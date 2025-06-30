@@ -4,7 +4,7 @@ The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordin
 - **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A) by converting them to a standard format for analysis.
 - **Advanced Peak Detection:** Employs a sophisticated, multi-step algorithm to accurately identify heartbeats (peaks) in the audio signal:
-    - **Adaptive S1-S2 Pairing:** Differentiates between the two main heart sounds (S1 and S2) and adapts its strategy for high vs. moderate heart rates.
+    - **Fully Dynamic S1-S2 Pairing:** The core of the algorithm is its ability to differentiate between the two main heart sounds (S1 and S2). It uses a fully adaptive threshold that continuously updates based on a rolling window of the most recent beat-to-beat intervals. This makes the analysis highly responsive to changes in heart rate throughout the recording.
     - **Beat Rescue Logic:** Re-analyzes sections of the audio where a beat might have been missed due to noise or a weak signal.
 - **BPM Hint:** Users can provide an estimated starting BPM to guide the algorithm, improving accuracy for difficult recordings.
 - **Interactive Visualization:** Generates an interactive HTML plot showing:
@@ -30,7 +30,7 @@ You will also need **FFmpeg** installed and accessible in your system's PATH for
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
     ```
-    python bpm_analysis_v0.4.py
+    python bpm_analysis_v0.5.py
     ```
 4. **Use the Application:**
     - The application will attempt to automatically load a supported audio file from the same directory.
