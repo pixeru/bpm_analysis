@@ -438,3 +438,12 @@ This version introduces a major advancement in the beat detection algorithm by m
 ### ⚙️ New Configuration Parameters
 - A new `recovery_phase_duration_sec` parameter has been added to `DEFAULT_PARAMS`. This controls how long the stricter "Post-Exertion Recovery" rules are applied after the peak BPM is detected.
 
+# Changelog: BPM Analysis Script
+## Version 3.1
+This version refines the core pairing logic by introducing a dynamic confidence model that better reflects heart physiology at different levels of exertion.
+### ✨ New Features
+- **Dynamic Confidence Curve:** The `calculate_blended_confidence` function was completely overhauled. It no longer uses a single static curve. Instead, it dynamically constructs a confidence curve by interpolating between two different defined curves: one for low BPM and one for high BPM. This allows the algorithm to have different expectations for S1/S2 amplitude ratios at rest versus during exertion, significantly improving pairing accuracy.
+### 🚀 Improvements & Refactoring
+- **New Configuration Parameters:** Added `confidence_deviation_points`, `confidence_curve_low_bpm`, and `confidence_curve_high_bpm` to `DEFAULT_PARAMS` to allow fine-tuning of the new dynamic confidence model.
+- **Simplified Logic:** The logic in `evaluate_pairing_confidence` is now simpler as the complex, BPM-aware calculations have been centralized into the new `calculate_blended_confidence` function.
+

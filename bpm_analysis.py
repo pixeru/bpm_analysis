@@ -90,6 +90,15 @@ DEFAULT_PARAMS = {
     # Increase: Allows the S1-S2 interval to be a larger portion of the cardiac cycle.
     # Decrease: Restricts the S1-S2 interval to be a smaller fraction of the cycle, useful for higher heart rates.
 
+    # --- Parameters for the Dynamic Confidence Curve ---
+    "confidence_deviation_points": [0.0, 0.25, 0.40, 0.80, 1.0],
+    # The confidence curve for LOW heart rates.
+    # Favors LOW deviation (similar S1/S2 amps), giving high confidence (0.9) for deviations from 0% to 25%.
+    "confidence_curve_low_bpm":    [0.9, 0.9, 0.5, 0.1, 0.1],
+    # The confidence curve for HIGH heart rates.
+    # Favors HIGH deviation (S1 >> S2), giving high confidence (0.95) for deviations from 40% to 80%.
+    "confidence_curve_high_bpm":   [0.1, 0.4, 0.95, 0.95, 0.1],
+
     "trough_noise_multiplier": 3.0,
     # A peak is considered "noisy" if the trough preceding it has an amplitude N-times higher than the dynamic noise floor.
     # Increase: Requires the trough to be much louder to be considered noisy. Less likely to classify peaks as noise.
@@ -302,17 +311,31 @@ def _find_raw_peaks(audio_envelope, height_threshold, params, sample_rate):
     logging.info(f"Found {len(peaks)} raw peaks using dynamic height threshold.")
     return peaks
 
-def calculate_blended_confidence(deviation, bpm):
+def calculate_blended_confidence(deviation, bpm, params):
     """
     Calculates a confidence score for pairing two peaks based on amplitude deviation.
-    This version correctly identifies that S1-S2 pairs have a significant amplitude drop.
+    This version dynamically constructs the confidence curve based on the current BPM
+    to reflect physiological expectations (contractility).
     """
-    deviation_points = [0.0, 0.25, 0.40, 0.80, 1.0]
-    confidence_curve = [0.1, 0.40, 0.95, 0.95, 0.1]
-    final_confidence = np.interp(deviation, deviation_points, confidence_curve)
+    # Get the anchor points for our dynamic model from params
+    bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
+    deviation_points = params['confidence_deviation_points']
+
+    # Get the two boundary curves (for low and high BPM)
+    curve_low = np.array(params['confidence_curve_low_bpm'])
+    curve_high = np.array(params['confidence_curve_high_bpm'])
+
+    # --- Create the Live Confidence Curve ---
+    # Calculate how far the current BPM is into the transition zone (0.0 to 1.0)
+    blend_ratio = np.clip((bpm - bpm_points[0]) / (bpm_points[1] - bpm_points[0]), 0, 1)
+
+    # Linearly interpolate between the low and high curves to get the live curve
+    live_confidence_curve = curve_low + (curve_high - curve_low) * blend_ratio
+
+    final_confidence = np.interp(deviation, deviation_points, live_confidence_curve)
+
     return final_confidence
 
-# <--- NEW REFACTORED FUNCTION ---
 def should_veto_by_lookahead(current_peak_idx, next_peak_idx, sorted_troughs, audio_envelope, params):
     """
     Checks if a peak should be vetoed by the 'lookahead' rule.
@@ -333,7 +356,6 @@ def should_veto_by_lookahead(current_peak_idx, next_peak_idx, sorted_troughs, au
                 return True
     return False
 
-# <--- NEW REFACTORED FUNCTION ---
 def calculate_preceding_trough_noise(current_peak_idx, sorted_troughs, dynamic_noise_floor, audio_envelope, params):
     """
     Calculates a noise confidence score based on the amplitude of the trough preceding a peak.
@@ -385,7 +407,7 @@ def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelo
     penalty_applied = False # We can rename this to has_unexpected_ratio later
 
     # Base confidence from amplitude deviation
-    confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
+    confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm, params)
     reason += f"| Base Pairing Conf: {confidence:.2f} "
 
     # --- State-Aware Contractility Logic ---
