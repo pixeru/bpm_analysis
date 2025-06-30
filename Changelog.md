@@ -482,3 +482,13 @@ This update introduces a dynamic confidence boost system that adapts to the stab
 - **Adaptive Logic:** The `find_heartbeat_peaks` function now calculates a `dynamic_boost_amount` at each step, which is then passed to the `evaluate_pairing_confidence` function.
 - **New Configuration Parameters:** Added `boost_history_window`, `boost_amount_min`, and `boost_amount_max` to `DEFAULT_PARAMS` to provide fine-grained control over the new dynamic boost feature. The previous static `s1_s2_boost_amount` parameter has been removed.
 
+# Changelog: BPM Analysis Script
+## Version 3.5
+This update introduces a more sophisticated noise detection system and improves the quality of the visual outputs.
+### ✨ New Features
+- **Surrounding Trough Noise Check:** The noise detection logic has been significantly improved. Instead of only checking the trough _before_ a peak, the new `calculate_surrounding_trough_noise` function analyzes the deeper of the two troughs surrounding a peak. This provides a more robust assessment of the local baseline, preventing peaks in generally noisy areas from being misclassified as heartbeats.
+### 🚀 Improvements & Refactoring
+- **Improved Plot Hover Information:** The parsing logic for the hover-tooltips in the interactive HTML plot has been refactored. Multi-line debug information is now correctly displayed with line breaks, making the detailed analysis reasons much easier to read.
+- **Enhanced Debugging:** The log messages for noise rejection are now more detailed, showing the exact values used in the calculation.
+- **Algorithm Tuning:** The default `pairing_confidence_threshold` has been slightly lowered to `0.50` to better complement the more robust noise rejection logic.
+

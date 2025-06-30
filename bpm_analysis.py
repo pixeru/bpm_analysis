@@ -146,7 +146,7 @@ DEFAULT_PARAMS = {
     # we might need to make this linear and not a set number of seconds
     "recovery_phase_duration_sec": 120.0, # For Post-Exertion State Detection, Duration (in seconds) of the high-contractility state after peak BPM is detected.
 
-    "pairing_confidence_threshold": 0.52,
+    "pairing_confidence_threshold": 0.50,
     # The confidence score required to classify two adjacent peaks as an S1-S2 pair.
     # Increase: Requires stronger evidence for pairing. Results in fewer S1-S2 pairs and more "Lone S1" beats.
     # Decrease: Easier to form S1-S2 pairs. Risks incorrectly pairing a true S1 with a nearby noise peak.
@@ -395,22 +395,48 @@ def should_veto_by_lookahead(current_peak_idx, next_peak_idx, sorted_troughs, au
 
     return False, ""
 
-def calculate_preceding_trough_noise(current_peak_idx, sorted_troughs, dynamic_noise_floor, audio_envelope, params):
+def calculate_surrounding_trough_noise(current_peak_idx, sorted_troughs, dynamic_noise_floor, audio_envelope, params):
     """
-    Calculates a noise confidence score based on the amplitude of the trough preceding a peak.
-    Returns a high confidence score (e.g., 0.8) if noisy, 0.0 otherwise.
+    Calculates a noise confidence score based on the amplitude of the troughs surrounding a peak.
+    It checks the deeper of the two troughs (the local baseline) to see if it's noisy.
+    Returns a tuple: (score, reason_string)
     """
+    # Find the trough immediately before the current peak
     preceding_trough_search = np.searchsorted(sorted_troughs, current_peak_idx, side='left')
+    # Find the trough immediately after the current peak
+    following_trough_search = np.searchsorted(sorted_troughs, current_peak_idx, side='right')
 
-    if preceding_trough_search > 0:
+    # Ensure that troughs exist on both sides of the peak
+    if preceding_trough_search > 0 and following_trough_search < len(sorted_troughs):
         preceding_trough_idx = sorted_troughs[preceding_trough_search - 1]
+        following_trough_idx = sorted_troughs[following_trough_search]
+
         preceding_trough_amp = audio_envelope[preceding_trough_idx]
-        noise_floor_at_trough = dynamic_noise_floor.iloc[preceding_trough_idx]
+        following_trough_amp = audio_envelope[following_trough_idx]
+
+        # Determine which trough is the deeper valley (the local baseline)
+        if preceding_trough_amp < following_trough_amp:
+            min_trough_amp = preceding_trough_amp
+            min_trough_idx = preceding_trough_idx
+        else:
+            min_trough_amp = following_trough_amp
+            min_trough_idx = following_trough_idx
+
+        # Now, perform the noise check on this local baseline trough
+        noise_floor_at_trough = dynamic_noise_floor.iloc[min_trough_idx]
         trough_noise_multiplier = params['trough_noise_multiplier']
 
-        if preceding_trough_amp > (noise_floor_at_trough * trough_noise_multiplier):
-            return 0.8  # High noise confidence
-    return 0.0 # No noise detected
+        if min_trough_amp > (noise_floor_at_trough * trough_noise_multiplier):
+            # --- IMPROVED LOGGING ---
+            reason = (
+                f"Noise (High local noise confidence).\n"
+                f"  - Reason: The baseline (min adjacent trough) before or after this peak is unusually loud.\n"
+                f"  - Calculation: Min Trough Amp > (Noise Floor * Multiplier)\n"
+                f"  - Values: {min_trough_amp:.0f} > ({noise_floor_at_trough:.0f} * {trough_noise_multiplier:.1f})\n"
+                f"  - Result: {min_trough_amp:.0f} > {(noise_floor_at_trough * trough_noise_multiplier):.0f}"
+            )
+            return 0.8, reason
+    return 0.0, ""
 
 def update_long_term_bpm(new_rr_sec, current_long_term_bpm, params):
     """
@@ -588,20 +614,21 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                 current_peak_idx, all_peaks[i+1], sorted_troughs, audio_envelope, params
             )
             if vetoed:
-                # Use the detailed reason string for the debug log.
                 beat_debug_info[current_peak_idx] = veto_reason
                 i += 1
                 continue
 
-        noise_confidence = calculate_preceding_trough_noise(current_peak_idx, sorted_troughs, dynamic_noise_floor, audio_envelope, params)
+        noise_confidence, noise_reason_str = calculate_surrounding_trough_noise(
+            current_peak_idx, sorted_troughs, dynamic_noise_floor, audio_envelope, params
+        )
         if noise_confidence > 0:
-            reason += "| Noise Conf: High "
+            reason += "| Preceding trough is noisy "
 
         peak_to_floor_ratio = audio_envelope[current_peak_idx] / (dynamic_noise_floor.iloc[current_peak_idx] + 1e-9)
         strong_peak_override = peak_to_floor_ratio >= params['strong_peak_override_ratio']
 
         if noise_confidence > params['noise_confidence_threshold'] and not is_potential_s2 and not strong_peak_override:
-            beat_debug_info[current_peak_idx] = "Noise (High local noise confidence)"
+            beat_debug_info[current_peak_idx] = noise_reason_str
             i += 1
             continue
 
@@ -938,25 +965,40 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
         category = 'Noise'
         if reason_str.startswith('S1') or reason_str.startswith('Lone S1'): category = 'S1'
         elif reason_str.startswith('S2'): category = 'S2'
-        peak_type, reason_details = reason_str, ""
-        if category in ['S1', 'Noise']:
-            if '. ' in reason_str:
-                parts = reason_str.split('. ', 1)
-                peak_type, reason_details = parts[0].strip(), parts[1].strip().replace(' | ', '<br>- ')
-            elif '(' in reason_str and ')' in reason_str:
-                peak_type_part = reason_str[:reason_str.find('(')].strip()
-                details_part = reason_str[reason_str.find('(') + 1:reason_str.rfind(')')].strip()
-                peak_type, reason_details = peak_type_part, details_part
-        elif category == 'S2':
-            if '. Justification: ' in reason_str:
-                parts = reason_str.split('. Justification: ', 1)
-                peak_type = "S2"
-                reason_details = f"{parts[0]}.<br><b>Justification:</b><br>- {parts[1].strip().replace(' | ', '<br>- ')}"
+
+        # --- New robust parsing logic for hover details ---
+        peak_type = reason_str
+        reason_details = ""
+
+        # The .replace('\n', '<br>') is the key fix for multiline display in Plotly.
+        # The parsing logic is improved to be more robust.
+        if '. Justification: ' in reason_str and category == 'S2':
+            parts = reason_str.split('. Justification: ', 1)
+            peak_type = parts[0].strip()
+            details = parts[1].strip().replace(' | ', '<br>- ').replace('\n', '<br>')
+            reason_details = f"<b>Justification:</b><br>- {details}"
+        elif '. ' in reason_str:
+            parts = reason_str.split('. ', 1)
+            peak_type = parts[0].strip()
+            reason_details = parts[1].strip().replace(' | ', '<br>- ').replace('\n', '<br>')
+        elif '(' in reason_str and ')' in reason_str:
+            parts = reason_str.split('(', 1)
+            peak_type = parts[0].strip()
+            # Correctly strip the final ')' by using rsplit and taking the content before it
+            details_part = parts[1].rsplit(')', 1)[0]
+            reason_details = details_part.strip().replace(' | ', '<br>- ').replace('\n', '<br>')
+        # --- End of new logic ---
+
         custom_data_tuple = (peak_type, peak_time, peak_amp, reason_details)
         all_peaks_data[category]['indices'].append(p_idx)
         all_peaks_data[category]['customdata'].append(custom_data_tuple)
 
-    peak_hovertemplate = ("<b>Calculated Peak Type:</b> %{customdata[0]}<br>" + "<b>Time:</b> %{customdata[1]:.2f}s<br>" + "<b>Amp:</b> %{customdata[2]:.0f}<br>" + "<b>Reason:</b><br>- %{customdata[3]}<extra></extra>")
+    # A cleaner, more generic hovertemplate that works with the new parsing logic
+    peak_hovertemplate = ("<b>Type:</b> %{customdata[0]}<br>" +
+                          "<b>Time:</b> %{customdata[1]:.2f}s<br>" +
+                          "<b>Amp:</b> %{customdata[2]:.0f}<br>" +
+                          "<b>Details:</b><br>%{customdata[3]}<extra></extra>")
+
     if all_peaks_data['S1']['indices']:
         s1_indices, s1_customdata = np.array(all_peaks_data['S1']['indices']), np.stack(all_peaks_data['S1']['customdata'], axis=0)
         s1_times_dt = pd.to_datetime([start_datetime + datetime.timedelta(seconds=t) for t in (s1_indices / sample_rate)])
