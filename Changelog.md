@@ -245,4 +245,19 @@ This version introduces Heart Rate Variability (HRV) analysis as a major new fea
     - The new system is more intelligent and context-aware. It rejects a potential beat if the resulting beat-to-beat (RR) interval represents a physiologically implausible percentage change from the _previous_ RR interval.
     - This allows the algorithm to follow gradual changes in heart rate while effectively rejecting sudden, sharp spikes caused by noise.
     - The sensitivity of this feature can be tuned via the new `rr_interval_max_decrease_pct` and `rr_interval_max_increase_pct` parameters.
-
+### **Changelog: Heartbeat BPM Analyzer - Version 1.9**
+This update introduces a more sophisticated multi-stage analysis pipeline, significantly improving the algorithm's robustness, accuracy, and ability to handle noisy or complex recordings without manual tuning.
+#### **Major Enhancements**
+- **Multi-Stage Analysis Pipeline:** The core analysis logic has been refactored from a single pass into a four-stage process to make more intelligent, context-aware decisions.
+    1. **Stage 1: High-Confidence First Pass & Auto-BPM-Estimation:** The analyzer first performs a "high-confidence" pass with stricter parameters to find only the most obvious "anchor" beats. It uses the rhythm of these beats to automatically estimate a global BPM for the entire recording. This reduces the reliance on the optional "Starting BPM" hint.
+    2. **Stage 2: Trough Sanitization & Refined Noise Floor:** The algorithm for calculating the dynamic noise floor has been completely redesigned. It now uses a "trough sanitization" technique to identify and discard false troughs (i.e., small divots within a larger heartbeat sound), resulting in a much more accurate and stable noise floor, especially in noisy audio.
+    3. **Stage 3: Main Analysis Pass:** The primary beat detection and classification algorithm now runs using the refined inputs from the first two stages (the auto-estimated BPM and the sanitized noise floor), leading to more accurate S1/S2 pairing and noise rejection.
+    4. **Stage 4: Rhythm-Based Post-Correction:** A new final pass has been added to validate the detected S1 beats based on rhythmic plausibility. If two beats are detected too close together, this stage intelligently discards the one with the lower amplitude, correcting for errors where a single beat was split into two.
+#### **New Configuration Parameters**
+- To support the new pipeline, several advanced parameters have been added to the `DEFAULT_PARAMS` dictionary for fine-tuning:
+    - `trough_rejection_multiplier`: Controls the sensitivity of the new trough sanitization algorithm.
+    - `rr_correction_threshold_pct`: Sets the threshold for the new rhythm-based post-correction pass.
+    - `enable_bpm_boost`: Allows a specific heuristic in the pairing logic to be enabled or disabled for advanced testing.
+#### **Minor Improvements**
+- **Plotting:** The Y-axis of the interactive HTML plot now uses a percentile-based quantile for auto-scaling, making it more robust to single large outlier peaks in the audio envelope.
+- **Parameter Tuning:** Minor adjustments were made to `trough_veto_multiplier` and `s1_s2_interval_rr_fraction` for better general performance.

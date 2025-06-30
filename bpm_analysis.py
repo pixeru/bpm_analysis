@@ -68,7 +68,7 @@ DEFAULT_PARAMS = {
     # Increase: Requires peaks to stand out more from their surroundings. Filters out minor bumps more aggressively.
     # Decrease: Allows less prominent peaks to be included in the analysis, increasing sensitivity.
 
-    "trough_veto_multiplier": 2,
+    "trough_veto_multiplier": 2.1,
     # Lookahead Veto Logic: If `N * (current_peak - trough) < (next_peak - trough)`, the current peak is vetoed as noise.
     # This rule helps reject a small noise peak that occurs just before a large, real peak.
     # Increase: Makes the veto harder to trigger. Fewer peaks will be vetoed.
@@ -87,7 +87,7 @@ DEFAULT_PARAMS = {
     # The absolute maximum time (in seconds) allowed between a detected S1 and a subsequent S2.
     # Increase: Allows pairing of S1-S2 events that are further apart, which may be needed for very slow heart rates.
     # Decrease: Enforces a stricter time limit for pairing, preventing a distant noise peak from being classified as an S2.
-    "s1_s2_interval_rr_fraction": 0.65,
+    "s1_s2_interval_rr_fraction": 0.7,
     # The S1-S2 interval cannot be longer than this fraction of the current beat-to-beat (RR) interval.
     # Increase: Allows the S1-S2 interval to be a larger portion of the cardiac cycle.
     # Decrease: Restricts the S1-S2 interval to be a smaller fraction of the cycle, useful for higher heart rates.
@@ -116,6 +116,10 @@ DEFAULT_PARAMS = {
     # =================================================================================
     "rr_interval_max_decrease_pct": 0.45, # A new RR interval can't be more than 45% shorter than the previous one.
     "rr_interval_max_increase_pct": 0.70, # A new RR interval can't be more than 70% longer than the previous one.
+
+    "enable_bpm_boost": True, # Allows disabling the BPM spike prevention boost for the high-confidence pass
+    "trough_rejection_multiplier": 4.0, # For trough sanitization, a trough N-times higher than the draft noise floor is rejected.
+    "rr_correction_threshold_pct": 0.60, # For post-correction pass, An RR interval shorter than N% of the median is flagged for correction.
 
     # =================================================================================
     # Long-Term BPM Belief Parameters
@@ -183,33 +187,66 @@ def preprocess_audio(file_path, params):
 
 
 def _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params):
-    """Calculates a dynamic noise floor based on audio troughs."""
+    """
+    Calculates a dynamic noise floor based on a sanitized set of audio troughs
+    to avoid corruption from 'divots' in main waveforms.
+    """
     min_peak_dist_samples = int(params['min_peak_distance_sec'] * sample_rate)
     trough_prom_thresh = np.quantile(audio_envelope, params['trough_prominence_quantile'])
 
-    trough_indices, _ = find_peaks(-audio_envelope, distance=min_peak_dist_samples, prominence=trough_prom_thresh)
+    # --- STEP 1: Find all potential troughs initially ---
+    all_trough_indices, _ = find_peaks(-audio_envelope, distance=min_peak_dist_samples, prominence=trough_prom_thresh)
 
-    if len(trough_indices) > 2:
-        logging.info(f"Found {len(trough_indices)} troughs. Calculating dynamic noise floor.")
-        trough_series = pd.Series(index=trough_indices, data=audio_envelope[trough_indices])
-        noise_window_samples = int(params['noise_window_sec'] * sample_rate)
-        quantile_val = params['noise_floor_quantile']
-
-        # Use interpolation for a more efficient and robust rolling quantile
-        dense_troughs = trough_series.reindex(np.arange(len(audio_envelope))).interpolate()
-        dynamic_noise_floor = dense_troughs.rolling(window=noise_window_samples, min_periods=3, center=True).quantile(quantile_val)
-        dynamic_noise_floor = dynamic_noise_floor.bfill().ffill()
-    else:
-        logging.warning("Not enough troughs found. Using a static noise floor as fallback.")
+    # If we don't have enough troughs to begin with, fall back to a simple static floor.
+    if len(all_trough_indices) < 5:
+        logging.warning("Not enough troughs found for sanitization. Using a static noise floor.")
         fallback_value = np.quantile(audio_envelope, params['noise_floor_quantile'])
         dynamic_noise_floor = pd.Series(fallback_value, index=np.arange(len(audio_envelope)))
+        return dynamic_noise_floor, all_trough_indices
 
-    # Ensure no null values in the final series
+    # --- STEP 2: Create a preliminary 'draft' noise floor from ALL troughs ---
+    # This draft version is used only to evaluate the troughs themselves.
+    trough_series_draft = pd.Series(index=all_trough_indices, data=audio_envelope[all_trough_indices])
+    dense_troughs_draft = trough_series_draft.reindex(np.arange(len(audio_envelope))).interpolate()
+    noise_window_samples = int(params['noise_window_sec'] * sample_rate)
+    quantile_val = params['noise_floor_quantile']
+    draft_noise_floor = dense_troughs_draft.rolling(window=noise_window_samples, min_periods=3, center=True).quantile(quantile_val)
+    draft_noise_floor = draft_noise_floor.bfill().ffill() # Fill any gaps
+
+    # --- STEP 3: Sanitize the trough list ---
+    # A true trough should be close to the actual noise floor. If a trough's amplitude
+    # is significantly higher than the draft floor, it's likely a divot in a
+    # larger sound wave and should be discarded.
+    sanitized_trough_indices = []
+    rejection_multiplier = params.get('trough_rejection_multiplier', 4.0)
+    for trough_idx in all_trough_indices:
+        trough_amp = audio_envelope[trough_idx]
+        floor_at_trough = draft_noise_floor.iloc[trough_idx]
+
+        # Keep the trough only if it's not too high above the draft floor
+        if not pd.isna(floor_at_trough) and trough_amp <= (rejection_multiplier * floor_at_trough):
+            sanitized_trough_indices.append(trough_idx)
+
+    logging.info(f"Trough Sanitization: Kept {len(sanitized_trough_indices)} of {len(all_trough_indices)} initial troughs.")
+
+    # --- STEP 4: Calculate the FINAL, more accurate noise floor using only sanitized troughs ---
+    if len(sanitized_trough_indices) > 2:
+        trough_series_final = pd.Series(index=sanitized_trough_indices, data=audio_envelope[sanitized_trough_indices])
+        dense_troughs_final = trough_series_final.reindex(np.arange(len(audio_envelope))).interpolate()
+        dynamic_noise_floor = dense_troughs_final.rolling(window=noise_window_samples, min_periods=3, center=True).quantile(quantile_val)
+        dynamic_noise_floor = dynamic_noise_floor.bfill().ffill()
+    else:
+        # If sanitization removed too many troughs, it's safer to use the original draft floor.
+        logging.warning("Not enough sanitized troughs remaining. Using non-sanitized floor as fallback.")
+        dynamic_noise_floor = draft_noise_floor
+
+    # Final check for any remaining null values
     if dynamic_noise_floor.isnull().all():
-        fallback_val = np.quantile(audio_envelope, 0.1)
-        dynamic_noise_floor = pd.Series(fallback_val, index=np.arange(len(audio_envelope)))
+         fallback_val = np.quantile(audio_envelope, 0.1)
+         dynamic_noise_floor = pd.Series(fallback_val, index=np.arange(len(audio_envelope)))
 
-    return dynamic_noise_floor, trough_indices
+    # Return the sanitized troughs for potential plotting/debugging in the future
+    return dynamic_noise_floor, np.array(sanitized_trough_indices)
 
 
 def _find_raw_peaks(audio_envelope, height_threshold, params, sample_rate):
@@ -237,15 +274,22 @@ def calculate_blended_confidence(deviation, bpm):
     return final_confidence
 
 
-def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=None):
+def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=None, precomputed_noise_floor=None, precomputed_troughs=None):
     """
     Main logic to classify raw peaks into S1, S2, and Noise.
     This function has been refactored to use helper functions for clarity.
     """
     analysis_data = {}
 
-    # Step 1: Calculate dynamic noise floor
-    dynamic_noise_floor, trough_indices = _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params)
+    # Step 1: Calculate or use pre-calculated dynamic noise floor
+    if precomputed_noise_floor is not None and precomputed_troughs is not None:
+        logging.info("Using pre-computed noise floor and troughs for this pass.")
+        dynamic_noise_floor = precomputed_noise_floor
+        trough_indices = precomputed_troughs
+    else:
+        logging.info("No pre-computed floor found. Calculating noise floor for this pass.")
+        dynamic_noise_floor, trough_indices = _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params)
+
     analysis_data['dynamic_noise_floor_series'] = dynamic_noise_floor
     analysis_data['trough_indices'] = trough_indices
 
@@ -344,10 +388,11 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
             reason += f"| Base Pairing Conf: {pairing_confidence:.2f} "
 
             # Heuristic: Boost pairing confidence if NOT pairing would cause a massive, unlikely BPM spike
-            bpm_if_not_paired = 60.0 / interval_sec if interval_sec > 0 else 999
-            if bpm_if_not_paired > long_term_bpm * 1.7 and long_term_bpm < 150:
-                pairing_confidence = min(0.95, pairing_confidence + 0.3)
-                reason += f"| BOOSTED (Prevented {bpm_if_not_paired:.0f} BPM spike) "
+            if params.get("enable_bpm_boost", True):
+                bpm_if_not_paired = 60.0 / interval_sec if interval_sec > 0 else 999
+                if bpm_if_not_paired > long_term_bpm * 1.7 and long_term_bpm < 150:
+                    pairing_confidence = min(0.95, pairing_confidence + 0.3)
+                    reason += f"| BOOSTED (Prevented {bpm_if_not_paired:.0f} BPM spike) "
 
             is_paired = interval_sec <= s1_s2_max_interval and pairing_confidence > params['pairing_confidence_threshold']
 
@@ -423,6 +468,61 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
         analysis_data["long_term_bpm_series"] = pd.Series(dtype=np.float64)
 
     return final_peaks, all_peaks, analysis_data
+
+def correct_peaks_by_rhythm(peaks, audio_envelope, sample_rate, params):
+    """
+    Refines a list of S1 peaks by removing rhythmically implausible beats.
+    If two beats are too close together, the one with the lower amplitude is discarded.
+    """
+    # If we have too few peaks, correction is unreliable and unnecessary.
+    if len(peaks) < 5:
+        return peaks
+
+    logging.info(f"--- STAGE 4: Correcting peaks based on rhythm. Initial count: {len(peaks)} ---")
+
+    # Calculate the median R-R interval to establish a stable rhythmic expectation.
+    rr_intervals_sec = np.diff(peaks) / sample_rate
+    median_rr_sec = np.median(rr_intervals_sec)
+
+    # Any interval shorter than this threshold is considered a conflict.
+    correction_threshold_sec = median_rr_sec * params.get("rr_correction_threshold_pct", 0.6)
+    logging.info(f"Median R-R: {median_rr_sec:.3f}s. Correction threshold: {correction_threshold_sec:.3f}s.")
+
+    # We build a new list of corrected peaks. Start with the first peak as a given.
+    corrected_peaks = [peaks[0]]
+
+    # Iterate through the original peaks, starting from the second one.
+    for i in range(1, len(peaks)):
+        current_peak = peaks[i]
+        last_accepted_peak = corrected_peaks[-1]
+
+        interval_sec = (current_peak - last_accepted_peak) / sample_rate
+
+        if interval_sec < correction_threshold_sec:
+            # CONFLICT: The current peak is too close to the last accepted one.
+            # We must decide which one to keep. The one with the higher amplitude wins.
+            last_peak_amp = audio_envelope[last_accepted_peak]
+            current_peak_amp = audio_envelope[current_peak]
+
+            if current_peak_amp > last_peak_amp:
+                # The current peak is stronger, so it REPLACES the last accepted peak.
+                logging.info(f"Conflict at {current_peak/sample_rate:.2f}s. Replaced previous peak at {last_accepted_peak/sample_rate:.2f}s due to higher amplitude.")
+                corrected_peaks[-1] = current_peak
+            else:
+                # The last accepted peak was stronger, so we DISCARD the current peak.
+                logging.info(f"Conflict at {current_peak/sample_rate:.2f}s. Discarding current peak due to lower amplitude.")
+                pass  # Do nothing, effectively dropping the current_peak
+        else:
+            # NO CONFLICT: The interval is plausible. Add the peak to our corrected list.
+            corrected_peaks.append(current_peak)
+
+    final_peak_count = len(corrected_peaks)
+    if final_peak_count < len(peaks):
+        logging.info(f"Correction complete. Removed {len(peaks) - final_peak_count} peak(s). Final count: {final_peak_count}")
+    else:
+        logging.info("Correction pass complete. No rhythmic conflicts found.")
+
+    return np.array(corrected_peaks)
 
 def calculate_hrv_metrics(s1_peaks, sample_rate):
     """Calculates SDNN and RMSSD from a series of S1 heartbeats."""
@@ -645,8 +745,8 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
                       xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined),
                       hovermode='x unified')
 
-    fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False,
-                     range=[0, audio_envelope.max() * 60])
+    robust_upper_limit = np.quantile(audio_envelope, 0.95) # 95th percentile to ignore outliers
+    fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, robust_upper_limit * 60])
     fig.update_yaxes(title_text="BPM / Norm. Dev %", secondary_y=True, range=[params['min_bpm'] - 10, params['max_bpm'] + 10])
 
     output_html_path = f"{os.path.splitext(file_name)[0]}_bpm_plot.html"
@@ -759,37 +859,109 @@ def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, an
     logging.info("Debug log generation complete.")
 
 
-def analyze_wav_file(wav_file_path, params, start_bpm_hint):
-    """Main analysis pipeline for a single file."""
+def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signature for GUI compatibility
+    """
+    Main analysis pipeline that orchestrates multiple analysis passes.
+    """
     file_name_no_ext = os.path.splitext(wav_file_path)[0]
     logging.info(f"--- Processing file: {os.path.basename(wav_file_path)} ---")
 
+    # --- Initial Preprocessing ---
     audio_envelope, sample_rate = preprocess_audio(wav_file_path, params)
 
+    # =================================================================================
+    # STAGE 1: AUTOMATED GLOBAL BPM ESTIMATION
+    # =================================================================================
+    logging.info("--- STAGE 1: Running High-Confidence pass to find anchor beats ---")
+
+    params_pass_1 = params.copy()
+    params_pass_1["pairing_confidence_threshold"] = 0.75  # Stricter pairing
+    params_pass_1["enable_bpm_boost"] = False            # Disable boosting heuristic
+
+    # Run the first pass to get a reliable "rhythm skeleton"
+    anchor_beats, _, _ = find_heartbeat_peaks(audio_envelope, sample_rate, params_pass_1)
+
+    global_bpm_estimate = None
+    if len(anchor_beats) >= 10: # Need enough beats for a reliable estimate
+        rr_intervals_sec = np.diff(anchor_beats) / sample_rate
+        # Use the median to get a robust estimate, ignoring outlier gaps
+        median_rr_sec = np.median(rr_intervals_sec)
+
+        if median_rr_sec > 0:
+            global_bpm_estimate = 60.0 / median_rr_sec
+            logging.info(f"Automatically determined Global BPM Estimate: {global_bpm_estimate:.1f} BPM")
+        else:
+            logging.warning("Median R-R interval was zero. Cannot estimate BPM.")
+    else:
+        logging.warning(f"Found only {len(anchor_beats)} anchor beats. Falling back to user hint or default.")
+
+    # Decision logic for the starting BPM
+    # If a user provides a hint, it's probably for a good reason, so we can prioritize it.
+    if start_bpm_hint:
+        final_start_bpm = start_bpm_hint
+        logging.info(f"Using user-provided starting BPM of {start_bpm_hint:.1f} BPM for main analysis.")
+    elif global_bpm_estimate:
+        final_start_bpm = global_bpm_estimate
+        logging.info(f"Using automatically determined BPM of {global_bpm_estimate:.1f} BPM for main analysis.")
+    else:
+        final_start_bpm = 80.0 # Fallback default
+        logging.warning("Could not determine starting BPM. Using fallback default of 80.0 BPM.")
+
+    # =================================================================================
+    # STAGE 2: TROUGH SANITIZATION & NOISE FLOOR REFINEMENT
+    # =================================================================================
+    logging.info("--- STAGE 2: Performing trough sanitization for a refined noise floor ---")
+    # We use the main 'params' dictionary for the final, most accurate calculation
+    sanitized_noise_floor, sanitized_troughs = _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params)
+
+    # =================================================================================
+    # STAGE 3: PRIMARY ANALYSIS PASS
+    # =================================================================================
+    logging.info("--- STAGE 3: Running Main Analysis Pass with refined inputs ---")
+
+    # Run the main analysis pass using the determined start BPM and the sanitized noise floor
     peaks, all_raw_peaks, analysis_data = find_heartbeat_peaks(
-        audio_envelope, sample_rate, params, start_bpm_hint=start_bpm_hint
+        audio_envelope,
+        sample_rate,
+        params,
+        start_bpm_hint=final_start_bpm,
+        precomputed_noise_floor=sanitized_noise_floor,
+        precomputed_troughs=sanitized_troughs
     )
 
-    if len(peaks) < 2:
-        logging.warning("Not enough S1 peaks detected to calculate BPM.")
-        plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, pd.Series(dtype=np.float64), np.array([]), sample_rate, wav_file_path, params)
+    # =================================================================================
+    # STAGE 4: POST-CORRECTION PASS (PEAK VALIDATION)
+    # =================================================================================
+    # This final pass corrects the S1 peaks based on rhythmic plausibility.
+    final_peaks = correct_peaks_by_rhythm(peaks, audio_envelope, sample_rate, params)
+
+
+    # --- FINAL CALCULATIONS AND OUTPUT ---
+    # From this point on, all calculations must use 'final_peaks' instead of 'peaks'.
+
+    if len(final_peaks) < 2:
+        logging.warning("Not enough S1 peaks detected after correction to calculate BPM.")
+        plot_results(audio_envelope, final_peaks, all_raw_peaks, analysis_data, pd.Series(dtype=np.float64), np.array([]), sample_rate, wav_file_path, params)
         return
 
-    smoothed_bpm, bpm_times = calculate_bpm_series(peaks, sample_rate, params)
-    avg_rr, sdnn, rmssd = calculate_hrv_metrics(peaks, sample_rate)
-    # Create a dictionary to hold all summary stats for the plot
+    # Pass the corrected peaks to the final calculation functions.
+    smoothed_bpm, bpm_times = calculate_bpm_series(final_peaks, sample_rate, params)
+    avg_rr, sdnn, rmssd = calculate_hrv_metrics(final_peaks, sample_rate)
     hrv_stats_for_plot = {}
     if not smoothed_bpm.empty:
         hrv_stats_for_plot['avg_bpm'] = smoothed_bpm.mean()
         hrv_stats_for_plot['min_bpm'] = smoothed_bpm.min()
         hrv_stats_for_plot['max_bpm'] = smoothed_bpm.max()
-
     if avg_rr is not None:
         hrv_stats_for_plot['sdnn'] = sdnn
         hrv_stats_for_plot['rmssd'] = rmssd
 
-    plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, wav_file_path, params, hrv_metrics=hrv_stats_for_plot)
+    output_csv_path = f"{file_name_no_ext}_bpm_analysis.csv"
+    save_bpm_to_csv(smoothed_bpm, bpm_times, output_csv_path)
 
+    plot_results(audio_envelope, final_peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, wav_file_path, params, hrv_metrics=hrv_stats_for_plot)
+    # The chronological log can still use all_raw_peaks to show everything,
+    # but the final classifications and BPM are now based on the corrected peaks.
     output_log_path = f"{file_name_no_ext}_Debug_Log.md"
     create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, analysis_data, smoothed_bpm, output_log_path, wav_file_path)
 
