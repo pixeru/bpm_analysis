@@ -1,4 +1,3 @@
-#====== Version 0.2.0 ======
 import os
 import warnings
 import csv
@@ -77,10 +76,11 @@ def preprocess_audio(file_path, downsample_factor=50, bandpass_freqs=(20, 150), 
 
 def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=220, start_bpm_hint=None):
     """
-    Finds heartbeats by dynamically identifying S1-S2 patterns.
-    This version incorporates user hints for starting BPM.
-    Returns the final filtered peaks and the initial raw peaks for debugging.
+    Finds heartbeats by dynamically identifying S1-S2 patterns and then
+    re-evaluating long intervals to rescue potentially missed beats.
+    This version returns the final filtered peaks and the initial raw peaks for debugging.
     """
+    # --- Step 1: Initial Raw Peak Detection (same as before) ---
     min_peak_distance_samples = int((60.0 / 240.0) * sample_rate)
     prominence_threshold = np.quantile(audio_envelope, 0.6)
     height_threshold = np.mean(audio_envelope) * 0.6
@@ -93,69 +93,103 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=220, s
     )
 
     if len(all_peaks) < 3:
-        return all_peaks, all_peaks
+        return all_peaks, all_peaks # Not enough data to process
 
     peak_times_sec = all_peaks / sample_rate
     intervals_sec = np.diff(peak_times_sec)
 
+    # --- Step 2: S1-S2 Pairing to get an initial set of beats (same as before) ---
     s1_s2_max_interval_sec = 0.35 # Default fallback
 
-    # --- Use user-provided BPM to guide S1-S2 interval detection ---
     if start_bpm_hint and start_bpm_hint > 0:
         print(f"Using user hint: Starting BPM = {start_bpm_hint}")
         expected_beat_interval = 60.0 / start_bpm_hint
-        # The systolic interval (S1-S2) is typically 30-45% of the total cycle.
-        # We'll use 50% for a safe upper margin.
         s1_s2_max_interval_sec = expected_beat_interval * 0.50
-    # --- Improved automatic detection when no hint is given ---
     elif len(intervals_sec) > 5:
         print("Using improved automatic detection for S1-S2 interval.")
-        # Estimate the full beat cycle by summing adjacent intervals (systolic + diastolic)
-        # This is more robust to variations than just the median of all intervals.
         beat_cycle_estimates = intervals_sec[:-1] + intervals_sec[1:]
         robust_beat_interval = np.median(beat_cycle_estimates)
         dynamic_threshold = robust_beat_interval * 0.45
-        s1_s2_max_interval_sec = np.clip(dynamic_threshold, 0.15, 0.4) # Clamp to physiological range
+        s1_s2_max_interval_sec = np.clip(dynamic_threshold, 0.15, 0.4)
 
     print(f"Set max S1-S2 interval threshold to {s1_s2_max_interval_sec:.2f} seconds.")
 
-    true_beat_indices = []
+    candidate_beats = []
     i = 0
     while i < len(intervals_sec):
-        # If the interval is short, it's likely an S1-S2 pair
         if intervals_sec[i] <= s1_s2_max_interval_sec:
             peak1_idx, peak2_idx = all_peaks[i], all_peaks[i + 1]
-            # Pick the louder of the two peaks (S1 or S2) as the primary beat
-            true_beat_indices.append(peak1_idx if audio_envelope[peak1_idx] >= audio_envelope[peak2_idx] else peak2_idx)
-            i += 2 # Skip the next peak as it's part of the pair
+            candidate_beats.append(peak1_idx if audio_envelope[peak1_idx] >= audio_envelope[peak2_idx] else peak2_idx)
+            i += 2
         else:
-            # This interval is too long to be S1-S2, so the peak is a standalone beat.
-            true_beat_indices.append(all_peaks[i])
+            candidate_beats.append(all_peaks[i])
             i += 1
 
-    # Add the very last detected peak if it wasn't processed
     if i == len(intervals_sec):
-        true_beat_indices.append(all_peaks[-1])
+        candidate_beats.append(all_peaks[-1])
 
-    # Remove duplicates that might arise from edge cases
-    true_beat_indices = np.array(list(dict.fromkeys(true_beat_indices)))
+    candidate_beats = np.array(list(dict.fromkeys(candidate_beats)))
 
-    # Final filtering based on min/max BPM rules
+    if len(candidate_beats) < 2:
+        return candidate_beats, all_peaks
+
+    # --- Step 3: NEW LOGIC - Re-evaluate long intervals to rescue missed beats ---
+    print("Refining beat detection by checking for suspiciously long intervals...")
+    beat_intervals_sec = np.diff(candidate_beats) / sample_rate
+    median_interval_sec = np.median(beat_intervals_sec)
+
+    # A suspiciously long interval is one that would correspond to a sudden, large drop in BPM.
+    # e.g., if median BPM is 80 (0.75s interval), a 1.8x interval is 1.35s (44 BPM). This is suspicious.
+    # We set a floor based on the minimum plausible BPM to add a failsafe.
+    suspicious_interval_threshold_sec = max(median_interval_sec * 1.8, (60.0 / min_bpm) * 0.9)
+
+    refined_beats = []
+    if len(candidate_beats) > 0:
+        refined_beats.append(candidate_beats[0])
+
+        for i in range(1, len(candidate_beats)):
+            prev_beat = refined_beats[-1]
+            current_beat = candidate_beats[i]
+            interval_sec = (current_beat - prev_beat) / sample_rate
+
+            if interval_sec > suspicious_interval_threshold_sec:
+                # This interval is too long. Let's see if we missed a peak in between.
+                # Find all raw peaks that fall between the previous accepted beat and the current candidate beat.
+                missed_candidates = [p for p in all_peaks if prev_beat < p < current_beat]
+
+                # Exclude any peaks that are somehow already in our candidate_beats list.
+                missed_candidates = [p for p in missed_candidates if p not in candidate_beats]
+
+                if missed_candidates:
+                    # We found some peaks that were originally discarded.
+                    # Rescue the one with the highest amplitude (most prominent).
+                    rescued_peak = max(missed_candidates, key=lambda p: audio_envelope[p])
+                    refined_beats.append(rescued_peak)
+                    print(f"Rescued a likely missed beat at time {(rescued_peak / sample_rate):.2f}s.")
+
+            refined_beats.append(current_beat)
+
+        true_beat_indices = np.array(list(dict.fromkeys(refined_beats))) # Remove duplicates and finalize
+    else:
+        true_beat_indices = candidate_beats
+
+
+    # --- Step 4: Final Filtering based on min/max BPM (same as before, but applied to the refined list) ---
     if len(true_beat_indices) > 1:
         final_peak_times = true_beat_indices / sample_rate
         final_intervals = np.diff(final_peak_times)
         min_interval, max_interval = 60.0 / max_bpm, 60.0 / min_bpm
 
-        # Start with the first valid peak
         filtered_peaks = [true_beat_indices[0]]
         for j in range(len(final_intervals)):
             # Add the next peak only if the resulting interval is within the plausible BPM range
             if min_interval <= final_intervals[j] <= max_interval:
-                filtered_peaks.append(true_beat_indices[j + 1])
+                # Check for a potential duplicate insertion from the rescue logic.
+                if true_beat_indices[j + 1] != filtered_peaks[-1]:
+                    filtered_peaks.append(true_beat_indices[j + 1])
         return np.array(filtered_peaks), all_peaks
 
     return true_beat_indices, all_peaks
-
 
 def calculate_bpm_series(peaks, sample_rate, smoothing_window_sec=5):
     """
