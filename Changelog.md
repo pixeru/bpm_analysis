@@ -461,3 +461,12 @@ This version significantly enhances the reliability of beat detection by introdu
 - **New Configuration Parameters:** Added `lone_s1_min_strength_ratio` and `lone_s1_forward_check_pct` to `DEFAULT_PARAMS` to allow fine-tuning of the new Lone S1 validation logic.
 - **Bug Fix:** Resolved an issue in the debug log generation where duplicate timestamps in the BPM series could cause an error.
 
+# Changelog: BPM Analysis Script
+## Version 3.3
+This version enhances the physiological modeling of the analysis pipeline, improving the accuracy of beat pairing by better accounting for noise floor and the post-exercise recovery state.
+### ✨ New Features
+- **Peak Strength Deviation:** The core logic for comparing S1 and S2 peaks now uses "peak strength" (amplitude relative to the dynamic noise floor) instead of raw amplitude. This makes the S1/S2 deviation calculation more robust and less susceptible to changes in background noise or recording volume.
+### 🚀 Improvements & Refactoring
+- **Smarter Post-Exertion Logic:** The "post-exertion recovery" state is now more nuanced. It uses an "effective BPM" that prevents the pairing rules from becoming too lenient as the heart rate begins to drop, improving accuracy during the transition from high exertion to recovery.
+- **Configurable S1/S2 Confidence Boost:** The confidence boost applied when a clear S1 is much louder than S2 is now tunable via new `s1_s2_boost_ratio` and `s1_s2_boost_amount` parameters.
+- **Tuning:** The confidence curve for high BPMs (`confidence_curve_high_bpm`) has been adjusted to better reflect the new peak strength calculation.

@@ -90,14 +90,28 @@ DEFAULT_PARAMS = {
     # Increase: Allows the S1-S2 interval to be a larger portion of the cardiac cycle.
     # Decrease: Restricts the S1-S2 interval to be a smaller fraction of the cycle, useful for higher heart rates.
 
-    # --- Parameters for the Dynamic Confidence Curve ---
+    # =================================================================================
+    # Parameters for the Dynamic Confidence Curve
+    # Due to how the heart functions, at higher bpm, S1 starts becoming much louder than S2
+    # =================================================================================
+    # The confidence curve ('x-axis'), It represents the normalized
+    # amplitude difference (deviation) between two peaks, from 0.0 (0%, identical
+    # amplitudes) to 1.0 (100%, one peak is effectively zero).
     "confidence_deviation_points": [0.0, 0.25, 0.40, 0.80, 1.0],
-    # The confidence curve for LOW heart rates.
-    # Favors LOW deviation (similar S1/S2 amps), giving high confidence (0.9) for deviations from 0% to 25%.
-    "confidence_curve_low_bpm":    [0.9, 0.9, 0.7, 0.1, 0.1],
-    # The confidence curve for HIGH heart rates.
-    # Favors HIGH deviation (S1 >> S2), giving high confidence (0.95) for deviations from 40% to 80%.
-    "confidence_curve_high_bpm":   [0.1, 0.4, 0.95, 0.95, 0.1],
+
+    # The confidence curve ('y-axis'), used at LOW heart rates.
+    # PHYSIOLOGICAL ASSUMPTION: At rest, S1 and S2 sounds can have similar amplitudes.
+    # This curve rewards pairs with LOW deviation (i.e., their heights are similar).
+    # Reading the values against the points above:
+    #   - A deviation of 0.00 (0%)   -> gets a confidence score of 0.9.
+    #   - A deviation of 0.40 (40%)  -> gets a confidence score of 0.7.
+    #   - A deviation of 1.00 (100%) -> gets a confidence score of 0.1.
+    "confidence_curve_low_bpm": [0.9, 0.9, 0.7, 0.1, 0.1],
+
+    # The confidence curve ('y-axis') used at HIGH heart rates.
+    # PHYSIOLOGICAL ASSUMPTION: During exertion, S1 becomes much louder than S2.
+    # This curve rewards pairs with MODERATE-TO-HIGH deviation.
+    "confidence_curve_high_bpm": [0.1, 0.5, 0.75, 0.65, 0],
 
     "trough_noise_multiplier": 3.0,
     # A peak is considered "noisy" if the trough preceding it has an amplitude N-times higher than the dynamic noise floor.
@@ -142,6 +156,8 @@ DEFAULT_PARAMS = {
     "rr_interval_max_increase_pct": 0.70, # A new RR interval can't be more than 70% longer than the previous one.
 
     "enable_bpm_boost": True, # Allows disabling the BPM spike prevention boost for the high-confidence pass
+    "s1_s2_boost_ratio": 1.2, # If the S1 amplitude is more than 1.2 times the S2 amplitude
+    "s1_s2_boost_amount": 0.23, # then add the boost amount to the pairing confidence
     "trough_rejection_multiplier": 4.0, # For trough sanitization, a trough N-times higher than the draft noise floor is rejected.
     "rr_correction_threshold_pct": 0.60, # For post-correction pass, An RR interval shorter than N% of the median is flagged for correction.
 
@@ -438,11 +454,19 @@ def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelo
             is_in_recovery = True
 
     if is_in_recovery:
-        # STATE: Post-Exertion Recovery. Contractility is assumed to be high.
-        # We enforce the rules for HIGH BPM, regardless of the current long_term_bpm.
-        reason += "| Inferred Recovery State "
-        max_expected_s2_s1_ratio = params['s2_s1_ratio_high_bpm']
-        adjustment_factor = params['confidence_adjustment_high_bpm']
+        effective_bpm_for_rules = max(long_term_bpm, params['contractility_bpm_low'])
+        reason += (
+            f"\n- STATE: Post-Exertion Recovery."
+            f"\n- Result: Effective BPM for rules is capped at a minimum of {params['contractility_bpm_low']:.0f}. (Actual: {long_term_bpm:.0f} BPM)"
+        )
+        # In recovery, the rules can relax as BPM drops, but only down to a certain point.
+        # We use the current long_term_bpm, but prevent it from dropping below our 'low contractility' threshold.
+
+        bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
+        ratio_points = [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']]
+        adjustment_points = [params['confidence_adjustment_low_bpm'], params['confidence_adjustment_high_bpm']]
+        max_expected_s2_s1_ratio = np.interp(effective_bpm_for_rules, bpm_points, ratio_points)
+        adjustment_factor = np.interp(effective_bpm_for_rules, bpm_points, adjustment_points)
     else:
         # STATE: Normal. Use the standard, flexible BPM-based interpolation.
         bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
@@ -464,7 +488,7 @@ def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelo
         )
     # Standard Boost Logic (when S1 > S2)
     elif s1_amp > (s2_amp * params.get('s1_s2_boost_ratio', 1.2)):
-        confidence = min(1.0, confidence + 0.15)
+        confidence = min(1.0, confidence + params.get('s1_s2_boost_amount', 0.15))
         reason += f"| BOOSTED to {confidence:.2f}, (S1 amp {s1_amp:.0f} > 1.2x S2 amp {s2_amp:.0f}) "
 
     return confidence, reason, penalty_applied
@@ -508,8 +532,12 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
     if len(all_peaks) < 2:
         return all_peaks, all_peaks, {"beat_debug_info": {}}
 
-    peak_amplitudes = audio_envelope[all_peaks]
-    normalized_deviations = np.abs(np.diff(peak_amplitudes)) / (np.maximum(peak_amplitudes[:-1], peak_amplitudes[1:]) + 1e-9)
+    # --- Calculate deviation based on peak "strength" over the noise floor ---
+    noise_floor_at_peaks = dynamic_noise_floor.reindex(all_peaks, method='nearest').values
+    peak_strengths = audio_envelope[all_peaks] - noise_floor_at_peaks
+    peak_strengths[peak_strengths < 0] = 0 # Strength cannot be negative
+    normalized_deviations = np.abs(np.diff(peak_strengths)) / (np.maximum(peak_strengths[:-1], peak_strengths[1:]) + 1e-9)
+
     smoothing_window_peaks = max(5, int(len(normalized_deviations) * params['deviation_smoothing_factor']))
     smoothed_dev_series = pd.Series(normalized_deviations).rolling(window=smoothing_window_peaks, min_periods=1, center=True).mean().values
     analysis_data["deviation_times"] = (all_peaks[:-1] + all_peaks[1:]) / 2 / sample_rate
@@ -611,7 +639,12 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                                 if forward_interval_sec >= min_forward_interval:
                                     is_valid_lone_s1 = True # It passed all three checks
                                 else:
-                                    rejection_detail = f"Rejected Lone S1: Causes BPM spike (Forward interval {forward_interval_sec:.3f}s < min {min_forward_interval:.3f}s)"
+                                    implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
+                                    rejection_detail = (
+                                        f"Rejected Lone S1: Peak is too close to the next, implying an unrealistic BPM spike.\n"
+                                        f"  - Justification: Forward interval:{forward_interval_sec:.3f}s is < minimum allowed:({min_forward_interval:.3f}s).\n"
+                                        f"  - Implication: Instantaneous {implied_bpm:.0f}BPM, from the current trend of {long_term_bpm:.0f}BPM."
+                                    )
                             else:
                                 is_valid_lone_s1 = True # It's the last peak, no forward check possible
                         else:
