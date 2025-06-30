@@ -192,3 +192,19 @@ This version evolves the beat detection strategy by introducing a new "confidenc
 ### ♻️ Refactoring
 - **Algorithm Simplification (for Debugging):** To isolate and evaluate the effectiveness of the new confidence-based system, the "Beat Rescue" and "Final BPM Filtering" steps (Steps 4 and 5 from v0.6) have been temporarily removed from the `find_heartbeat_peaks` function.
 
+# Changelog: BPM Analysis Script
+## Version 0.8
+This major update transforms the beat detection algorithm from a stateless process to a **stateful** one. The algorithm now maintains an internal "belief" about the heart rate, allowing it to make more context-aware and intelligent decisions as it analyzes the audio.
+### ✨ New Features
+- **Stateful Long-Term BPM Tracking:**
+    - The core of the new system is a `long_term_bpm` variable that acts as the algorithm's "belief" about the current heart rate.
+    - This belief is initialized using the user's hint (or a default) and is then continuously updated after each beat is identified. The update is smoothed and rate-limited to prevent erratic jumps while still being responsive to real changes in heart rate.
+- **Blended Confidence Model:**
+    - The previous confidence function has been replaced with a more sophisticated `calculate_blended_confidence` model.
+    - This new function is dynamic, producing different confidence scores for the same peak deviation based on the current `long_term_bpm`. It effectively has different models for resting, exercise, and exertion heart rates, and blends between them.
+- **Heuristic Overrides and Boosts:**
+    - **Pattern Match Override:** A new heuristic has been added that looks for a classic High-Low amplitude pattern between adjacent peaks. If this pattern is detected along with a significant local amplitude deviation, it will override the confidence model and force a pairing, catching obvious beats the model might otherwise miss.
+    - **Confidence Boost:** The system now boosts the confidence score for potential pairs that would correspond to a sudden (but plausible) increase in heart rate, making it better at catching the start of an acceleration.
+### 🚀 Improvements
+- **Visualization:** A new "Long-Term BPM (Belief)" trace has been added to the interactive plot. This allows for powerful debugging, making it possible to visualize how the algorithm's internal state evolves and influences decisions throughout the analysis.
+

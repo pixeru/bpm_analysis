@@ -55,91 +55,136 @@ def preprocess_audio(file_path, downsample_factor=50, bandpass_freqs=(20, 150), 
     audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
     return audio_envelope, new_sample_rate
 
-def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=220, start_bpm_hint=None, verbose_debug=False):
+# --- Core Beat Detection Logic v6.4 ---
+
+def calculate_blended_confidence(deviation, bpm):
+    """v6.0: Replaces the piecewise function with a continuous, blended model."""
+    conf_at_rest = np.interp(deviation, [0.0, 0.3, 0.6], [0.9, 0.8, 0.1])
+    conf_at_exercise = np.interp(deviation, [0.1, 0.4, 0.7], [0.2, 0.9, 0.8])
+    conf_at_exertion = np.interp(deviation, [0.0, 0.2, 0.5], [0.05, 0.1, 0.7])
+    final_confidence = np.interp(bpm, [80, 130, 170], [conf_at_rest, conf_at_exercise, conf_at_exertion])
+    return final_confidence
+
+def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, start_bpm_hint=None, verbose_debug=False):
     """
-    Finds heartbeats using only the dynamic pairing logic (Steps 4 & 5 removed).
+    v6.4: Pattern Match Override is now triggered by a local, raw deviation > 0.25.
     """
-    # --- Step 1: Broad Peak Detection ---
     min_peak_distance_samples = int(0.05 * sample_rate)
     prominence_threshold = np.quantile(audio_envelope, 0.1)
     height_threshold = np.mean(audio_envelope) * 0.1
     all_peaks, _ = find_peaks(audio_envelope, distance=min_peak_distance_samples, prominence=prominence_threshold, height=height_threshold)
 
-    if verbose_debug: print(f"\n--- VERBOSE DEBUG: find_heartbeat_peaks (v4.5) ---")
-    print(f"DEBUG: Found {len(all_peaks)} raw peaks in the broad detection phase.")
-    if len(all_peaks) < 2: return all_peaks, all_peaks, {}
+    if verbose_debug: print(f"\n--- VERBOSE DEBUG: find_heartbeat_peaks (v6.4) ---")
+    print(f"DEBUG: Found {len(all_peaks)} raw peaks.")
+    if len(all_peaks) < 2: return all_peaks, all_peaks, {}, pd.Series(dtype=np.float64)
 
-    # --- Step 2: Preliminary Analysis ---
-    print("DEBUG: Step 2 (Analysis) - Calculating NORMALIZED Deviation and Confidence.")
     peak_amplitudes = audio_envelope[all_peaks]
-    peak_diffs = np.abs(np.diff(peak_amplitudes))
-    max_adjacent_amps = np.maximum(peak_amplitudes[:-1], peak_amplitudes[1:])
-    normalized_deviations = peak_diffs / (max_adjacent_amps + 1e-9)
+    # Note: 'normalized_deviations' is the raw, unsmoothed series.
+    normalized_deviations = np.abs(np.diff(peak_amplitudes)) / (np.maximum(peak_amplitudes[:-1], peak_amplitudes[1:]) + 1e-9)
     deviation_times = (all_peaks[:-1] + all_peaks[1:]) / 2 / sample_rate
     smoothing_window_peaks = max(5, int(len(normalized_deviations) * 0.05))
     smoothed_dev_series = pd.Series(normalized_deviations).rolling(window=smoothing_window_peaks, min_periods=1, center=True).mean().values
 
-    def calculate_confidence(dev):
-        if dev < 0.2: return 0.9
-        if dev > 0.5: return 0.8
-        return np.interp(dev, [0.2, 0.35, 0.5], [0.9, 0.1, 0.8])
+    long_term_bpm = float(start_bpm_hint) if start_bpm_hint else 80.0
+    print(f"DEBUG: Initializing Long-Term BPM to: {long_term_bpm:.1f} BPM")
 
-    confidence_scores = np.array([calculate_confidence(d) for d in smoothed_dev_series])
-
-    # --- Step 3: Grouping with DYNAMIC S1-S2 Interval ---
-    print("DEBUG: Step 3 (Grouping) - Applying pairing logic with a DYNAMIC interval threshold.")
     candidate_beats = []
     beat_debug_info = {}
+    long_term_bpm_history = []
 
-    last_s1_interval = (60.0 / start_bpm_hint) if start_bpm_hint else 60.0/80.0
-
+    print("DEBUG: Step 3 (Grouping) - Applying pattern matching and confidence-weighted updates.")
     i = 0
     while i < len(all_peaks) - 1:
+        expected_rr_interval = 60.0 / long_term_bpm
+        s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)
+
         current_peak_idx = all_peaks[i]
         next_peak_idx = all_peaks[i + 1]
 
-        s1_s2_max_interval_sec = min(0.35, last_s1_interval * 0.5)
         interval_sec = (next_peak_idx - current_peak_idx) / sample_rate
-        confidence = confidence_scores[i]
+        # We use the smoothed deviation for the confidence model
+        smoothed_deviation = smoothed_dev_series[i]
 
-        if current_peak_idx not in beat_debug_info: beat_debug_info[current_peak_idx] = "Unprocessed"
-        if next_peak_idx not in beat_debug_info: beat_debug_info[next_peak_idx] = "Unprocessed"
+        confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
+        reason = f"Base Conf: {confidence:.2f} (Smoothed Dev: {smoothed_deviation:.2f}, LT-BPM: {long_term_bpm:.0f})"
 
-        decision_made = False
-        if interval_sec <= s1_s2_max_interval_sec and confidence > 0.6:
-            amp_current, amp_next = audio_envelope[current_peak_idx], audio_envelope[next_peak_idx]
-            s1_idx, s2_idx = (current_peak_idx, next_peak_idx) if amp_current >= amp_next else (next_peak_idx, current_peak_idx)
+        bpm_if_not_paired = 60.0 / interval_sec if interval_sec > 0 else 999
+        if bpm_if_not_paired > long_term_bpm * 1.7 and long_term_bpm < 150:
+            confidence = min(0.95, confidence + 0.3)
+            reason += f" | BOOSTED to {confidence:.2f} (BPM spike: {bpm_if_not_paired:.0f}>>{long_term_bpm:.0f})"
 
-            if candidate_beats:
-                last_s1_interval = (s1_idx - candidate_beats[-1]) / sample_rate
+        # --- v6.4: Pattern Match Override Logic ---
+        pattern_match_override = False
+        # Calculate the local, raw deviation for this specific pair
+        local_raw_deviation = normalized_deviations[i]
+
+        # Trigger using the local, raw deviation.
+        if local_raw_deviation > 0.25 and i > 0 and i < len(all_peaks) - 2:
+            is_current_peak_H = peak_amplitudes[i] > peak_amplitudes[i-1] and peak_amplitudes[i] > peak_amplitudes[i+1]
+            is_next_peak_L = peak_amplitudes[i+1] < peak_amplitudes[i] and peak_amplitudes[i+1] < peak_amplitudes[i+2]
+
+            if is_current_peak_H and is_next_peak_L:
+                pattern_match_override = True
+                reason += f" | OVERRIDE (H-L Pattern, Local Dev: {local_raw_deviation:.2f})"
+
+        # --- Final Decision ---
+        is_paired = False
+        if (interval_sec <= s1_s2_max_interval_sec and confidence > 0.6) or pattern_match_override:
+            s1_idx = current_peak_idx
+            s2_idx = next_peak_idx
+
             candidate_beats.append(s1_idx)
-            beat_debug_info[s1_idx] = f"S1 (Kept). Paired with peak at {s2_idx/sample_rate:.2f}s"
-            beat_debug_info[s2_idx] = f"S2 (Discarded). Paired with S1 at {s1_idx/sample_rate:.2f}s"
-            if verbose_debug:
-                print(f"  - PAIR FOUND @ {current_peak_idx/sample_rate:.2f}s: Labeled S1: {s1_idx}, S2: {s2_idx}. (Conf: {confidence:.2f})")
-            i += 2
-            decision_made = True
+            beat_debug_info[s1_idx] = f"S1 (Paired). {reason}"
+            beat_debug_info[s2_idx] = f"S2 of {s1_idx/sample_rate:.2f}s"
+            is_paired = True
 
-        if not decision_made:
-            reason = f"Lone S1 (Interval {interval_sec:.3f}s > Dynamic Max {s1_s2_max_interval_sec:.3f}s)" if interval_sec > s1_s2_max_interval_sec else f"Lone S1 (Confidence {confidence:.2f} <= 0.6)"
-            if candidate_beats:
-                last_s1_interval = (current_peak_idx - candidate_beats[-1]) / sample_rate
-            candidate_beats.append(current_peak_idx)
-            beat_debug_info[current_peak_idx] = reason
-            if verbose_debug: print(f"  - LONE PEAK @ {current_peak_idx/sample_rate:.2f}s: {reason}")
+            if len(candidate_beats) > 1:
+                prev_s1_idx = candidate_beats[-2]
+                new_rr_interval = (s1_idx - prev_s1_idx) / sample_rate
+                if new_rr_interval > 0:
+                    instant_bpm = 60.0 / new_rr_interval
+                    if 0.5 * long_term_bpm < instant_bpm < 2.0 * long_term_bpm:
+                        target_bpm = (0.95 * long_term_bpm) + (0.05 * instant_bpm)
+                        max_bpm_change_per_second = 3.0
+                        max_change_for_this_interval = max_bpm_change_per_second * new_rr_interval
+                        proposed_change = target_bpm - long_term_bpm
+
+                        if abs(proposed_change) > max_change_for_this_interval:
+                            limited_change = np.sign(proposed_change) * max_change_for_this_interval
+                            new_long_term_bpm = long_term_bpm + limited_change
+                        else:
+                            new_long_term_bpm = target_bpm
+                        long_term_bpm = max(min_bpm, min(new_long_term_bpm, max_bpm))
+            i += 2
+
+        if not is_paired:
+            s1_idx = current_peak_idx
+            candidate_beats.append(s1_idx)
+            beat_debug_info[s1_idx] = f"Lone S1. {reason}"
             i += 1
+
+        time_of_beat = candidate_beats[-1] / sample_rate
+        long_term_bpm_history.append((time_of_beat, long_term_bpm))
 
     if i == len(all_peaks) - 1:
         last_peak_idx = all_peaks[-1]
         candidate_beats.append(last_peak_idx)
         beat_debug_info[last_peak_idx] = "Lone S1 (Last Peak)"
 
-    # --- STEPS 4 AND 5 HAVE BEEN REMOVED ---
-    print("DEBUG: Steps 4 (Rescue) and 5 (Final Filter) were REMOVED for debugging.")
-
     final_peaks = np.array(sorted(list(dict.fromkeys(candidate_beats))))
-    print(f"DEBUG: Final peak count after Step 3: {len(final_peaks)}.")
-    analysis_data = {"deviation_times": deviation_times, "deviation_series": smoothed_dev_series, "confidence_scores": confidence_scores, "beat_debug_info": beat_debug_info}
+    print(f"DEBUG: Final peak count after stateful grouping: {len(final_peaks)}.")
+
+    analysis_data = {
+        "beat_debug_info": beat_debug_info,
+        "deviation_times": deviation_times,
+        "deviation_series": smoothed_dev_series
+    }
+    if long_term_bpm_history:
+        lt_bpm_times, lt_bpm_values = zip(*long_term_bpm_history)
+        analysis_data["long_term_bpm_series"] = pd.Series(lt_bpm_values, index=lt_bpm_times)
+    else:
+        analysis_data["long_term_bpm_series"] = pd.Series(dtype=np.float64)
+
     return final_peaks, all_peaks, analysis_data
 
 def calculate_bpm_series(peaks, sample_rate, smoothing_window_sec=5):
@@ -159,7 +204,7 @@ def calculate_bpm_series(peaks, sample_rate, smoothing_window_sec=5):
         smoothed_bpm = pd.Series(dtype=np.float64)
     return smoothed_bpm, bpm_series.index.values
 
-def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, file_name):
+def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, file_name, min_bpm, max_bpm):
     time_axis = np.arange(len(audio_envelope)) / sample_rate
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Scatter(x=time_axis, y=audio_envelope, name="Audio Envelope", line=dict(color="#47a5c4")), secondary_y=False)
@@ -167,21 +212,22 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
     if len(all_raw_peaks) > 0:
         raw_peak_reasons = [analysis_data.get('beat_debug_info', {}).get(p, 'N/A') for p in all_raw_peaks]
         raw_peak_customdata = np.stack((all_raw_peaks / sample_rate, audio_envelope[all_raw_peaks], raw_peak_reasons), axis=-1)
-        fig.add_trace(go.Scatter(x=all_raw_peaks / sample_rate, y=audio_envelope[all_raw_peaks], mode='markers', name='All Peaks (Labeled)', marker=dict(color='grey', symbol='x', size=6), customdata=raw_peak_customdata, hovertemplate="<b>Raw Peak</b><br>Time: %{customdata[0]:.2f}s<br>Amp: %{customdata[1]:.0f}<br><b>Status:</b> %{customdata[2]}<extra></extra>", visible='legendonly'), secondary_y=False)
+        fig.add_trace(go.Scatter(x=all_raw_peaks / sample_rate, y=audio_envelope[all_raw_peaks], mode='markers', name='All Peaks (Hover for Status)', marker=dict(color='grey', symbol='x', size=6), customdata=raw_peak_customdata, hovertemplate="<b>Raw Peak</b><br>Time: %{customdata[0]:.2f}s<br>Amp: %{customdata[1]:.0f}<br><b>Status:</b> %{customdata[2]}<extra></extra>", visible='legendonly'), secondary_y=False)
 
     if len(peaks) > 0:
         final_peak_reasons = [analysis_data.get('beat_debug_info', {}).get(p, 'N/A') for p in peaks]
         final_peak_customdata = np.stack((peaks / sample_rate, audio_envelope[peaks], final_peak_reasons), axis=-1)
-        fig.add_trace(go.Scatter(x=peaks / sample_rate, y=audio_envelope[peaks], mode='markers', name='Final Heartbeats', marker=dict(color='#e36f6f', size=8, symbol='diamond'), customdata=final_peak_customdata, hovertemplate="<b>Final Beat</b><br>Time: %{customdata[0]:.2f}s<br>Amp: %{customdata[1]:.0f}<br><b>Reason:</b> %{customdata[2]}<extra></extra>"), secondary_y=False)
+        fig.add_trace(go.Scatter(x=peaks / sample_rate, y=audio_envelope[peaks], mode='markers', name='Final Heartbeats (S1)', marker=dict(color='#e36f6f', size=8, symbol='diamond'), customdata=final_peak_customdata, hovertemplate="<b>Final Beat</b><br>Time: %{customdata[0]:.2f}s<br><b>Reason:</b> %{customdata[2]}<extra></extra>"), secondary_y=False)
 
     if not smoothed_bpm.empty:
         fig.add_trace(go.Scatter(x=bpm_times, y=smoothed_bpm, name="Smoothed BPM", line=dict(color="#4a4a4a", width=3, dash='dash')), secondary_y=True)
 
-    if 'deviation_series' in analysis_data and analysis_data['deviation_series'] is not None:
-        fig.add_trace(go.Scatter(x=analysis_data['deviation_times'], y=analysis_data['deviation_series'], name='Norm. Deviation', line=dict(color='purple', width=2), visible='legendonly'), secondary_y=True)
+    if "long_term_bpm_series" in analysis_data and not analysis_data["long_term_bpm_series"].empty:
+        lt_series = analysis_data["long_term_bpm_series"]
+        fig.add_trace(go.Scatter(x=lt_series.index, y=lt_series.values, name="Long-Term BPM (Belief)", line=dict(color='orange', width=2, dash='dot')), secondary_y=True)
 
-    if 'confidence_scores' in analysis_data and analysis_data['confidence_scores'] is not None:
-        fig.add_trace(go.Scatter(x=analysis_data['deviation_times'], y=analysis_data['confidence_scores'], name='Pairing Confidence', line=dict(color='orange', width=2, dash='dot'), visible='legendonly'), secondary_y=True)
+    if 'deviation_series' in analysis_data and analysis_data['deviation_series'] is not None:
+        fig.add_trace(go.Scatter(x=analysis_data['deviation_times'], y=analysis_data['deviation_series'], name='Norm. Deviation (Smoothed)', line=dict(color='purple', width=2), visible='legendonly'), secondary_y=True)
 
     if not smoothed_bpm.empty:
         max_bpm_val, min_bpm_val = smoothed_bpm.max(), smoothed_bpm.min()
@@ -193,9 +239,9 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
     tick_vals_sec = np.arange(0, max_time_sec + 30, 30)
     tick_text_combined = [f"{int(s)}s ({int(s // 60):02d}:{int(s % 60):02d})" for s in tick_vals_sec]
 
-    fig.update_layout(title_text=f"Heartbeat Analysis - {os.path.basename(file_name)} (v4.5)", dragmode='pan', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=100, b=100), xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined), hovermode='x unified')
+    fig.update_layout(title_text=f"Heartbeat Analysis - {os.path.basename(file_name)} (v6.4)", dragmode='pan', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=100, b=100), xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined), hovermode='x unified')
     fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False)
-    fig.update_yaxes(title_text="BPM / Normalized Score", secondary_y=True, range=[0, smoothed_bpm.max(skipna=True)+10 if not smoothed_bpm.empty else 260])
+    fig.update_yaxes(title_text="BPM / Norm. Dev", secondary_y=True, range=[min_bpm-10, max_bpm+10])
     output_html_path = f"{os.path.splitext(file_name)[0]}_bpm_plot.html"
     fig.write_html(output_html_path, config={'scrollZoom': True})
     print(f"Interactive plot saved to {output_html_path}")
@@ -210,7 +256,7 @@ def save_bpm_to_csv(bpm_series, time_points, output_path):
 
 def analyze_wav_file(wav_file_path, params, start_bpm_hint):
     file_name_no_ext = os.path.splitext(wav_file_path)[0]
-    print(f"\n--- Processing file: {os.path.basename(wav_file_path)} ---")
+    print(f"\n--- Processing file: {os.path.basename(wav_file_path)} (Engine v6.4) ---")
     audio_envelope, sample_rate = preprocess_audio(wav_file_path, params['downsample_factor'], params['bandpass_freqs'], params['save_debug_wav'])
 
     peaks, all_raw_peaks, analysis_data = find_heartbeat_peaks(
@@ -220,24 +266,24 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint):
 
     if len(peaks) < 2:
         print("Not enough peaks detected to calculate BPM.")
-        plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, pd.Series(dtype=np.float64), np.array([]), sample_rate, wav_file_path)
+        plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, pd.Series(dtype=np.float64), np.array([]), sample_rate, wav_file_path, params['min_bpm'], params['max_bpm'])
         return
 
     smoothed_bpm, bpm_times = calculate_bpm_series(peaks, sample_rate, params['smoothing_window_sec'])
     output_csv_path = f"{file_name_no_ext}_bpm_analysis.csv"
     save_bpm_to_csv(smoothed_bpm, bpm_times, output_csv_path)
     print(f"BPM data saved to {output_csv_path}")
-    plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, wav_file_path)
+    plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, wav_file_path, params['min_bpm'], params['max_bpm'])
 
 # --- GUI Class ---
 class BPMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Heartbeat BPM Analyzer v4.5")
+        self.root.title("Heartbeat BPM Analyzer v6.4")
         self.root.geometry("500x300")
         self.style = ttkb.Style(theme='minty')
         self.current_file = None
-        self.params = { "downsample_factor": 100, "bandpass_freqs": (20, 150), "min_bpm": 40, "max_bpm": 220, "smoothing_window_sec": 5, "save_debug_wav": True }
+        self.params = { "downsample_factor": 100, "bandpass_freqs": (20, 150), "min_bpm": 40, "max_bpm": 240, "smoothing_window_sec": 5, "save_debug_wav": True }
         self.create_widgets()
         self._find_initial_audio_file()
     def create_widgets(self):
