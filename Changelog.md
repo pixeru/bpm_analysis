@@ -346,3 +346,15 @@ This release focuses on improving the core signal processing pipeline for higher
     - The `calculate_blended_confidence` function's dependency on the `long_term_bpm` has been removed to make its logic more direct and based purely on signal properties.
     - The list of supported audio file types in the GUI has been expanded to include `.mov`.
 
+# Changelog: BPM Analysis Script
+## Version 2.5
+This is a maintenance release focused on improving the precision of the analysis and providing more detailed data exports for advanced users.
+### ✨ New Features
+- **HRV Data Export:** The application now generates a new, separate CSV file (`_hrv_data.csv`). This file contains the detailed, time-varying Heart Rate Variability data from the sliding window analysis, including the timestamp, RMSSDc, SDNN, and average BPM for each window. This allows for deeper, external analysis of HRV dynamics.
+### 🚀 Improvements
+- **Floating-Point Precision:** The `save_bpm_to_csv` function has been updated to use the original floating-point BPM values from the `smoothed_bpm` pandas Series instead of converting them to integers. This preserves the precision of the BPM calculations in the CSV output.
+- **Parameter Renaming:** The `peak_recovery_stats` variable has been renamed to the more accurate `peak_decline_stats` throughout the code to better reflect its function of finding the steepest rate of BPM _decrease_, which is not always post-exercise recovery.
+### 🐛 Bug Fixes
+- A minor bug in the `plot_results` function was fixed to correctly handle cases where no significant inclines or declines were found, preventing potential errors.
+
+

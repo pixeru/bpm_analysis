@@ -748,7 +748,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
         fig.add_annotation(x=max_bpm_time, y=max_bpm_val, text=f"Max: {max_bpm_val:.1f} BPM", showarrow=True, arrowhead=1, ax=20, ay=-40, font=dict(color="#e36f6f"), yref="y2")
         fig.add_annotation(x=min_bpm_time, y=min_bpm_val, text=f"Min: {min_bpm_val:.1f} BPM", showarrow=True, arrowhead=1, ax=20, ay=40, font=dict(color="#a3d194"), yref="y2")
 
-    plot_title = f"Heartbeat Analysis - {os.path.basename(file_name)} (v7.5)"
+    plot_title = f"Heartbeat Analysis - {os.path.basename(file_name)}"
 
     if hrv_summary:
         avg_bpm_val, min_bpm_val, max_bpm_val = hrv_summary.get('avg_bpm'), hrv_summary.get('min_bpm'), hrv_summary.get('max_bpm')
@@ -858,7 +858,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
         title_text=plot_title,
         dragmode='pan',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(t=100, b=100),
+        margin=dict(t=140, b=100),
         xaxis=dict(
             title_text="Time (mm:ss)",
             tickformat='%M:%S', # Format tick labels as Minute:Second
@@ -875,19 +875,110 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
     fig.write_html(output_html_path, config=plot_config)
     logging.info(f"Interactive plot saved to {output_html_path}")
 
-def save_bpm_to_csv(bpm_series, time_points, output_path):
-    with open(output_path, "w", newline="") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(["Time (s)", "BPM"])
-        if bpm_series.size > 0:
-            for t, bpm in zip(time_points, bpm_series):
-                if not np.isnan(bpm): writer.writerow([f"{t:.2f}", f"{bpm:.1f}"])
-    logging.info(f"BPM data saved to {output_path}")
+def save_analysis_summary(output_path, file_name, hrv_summary, hrr_stats, peak_exertion_stats,
+                          peak_recovery_stats, major_inclines, major_declines,
+                          smoothed_bpm, bpm_times):
+    """Saves a comprehensive Markdown summary of the analysis results."""
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(f"# Analysis Report for: {os.path.basename(file_name)}\n")
+        f.write(f"*Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
+
+        # --- Overall Summary Section ---
+        f.write("## Overall Summary\n\n")
+        f.write("| Metric | Value |\n")
+        f.write("|:---|:---|\n")
+
+        if hrv_summary:
+            avg_bpm = hrv_summary.get('avg_bpm')
+            min_bpm = hrv_summary.get('min_bpm')
+            max_bpm = hrv_summary.get('max_bpm')
+            avg_rmssdc = hrv_summary.get('avg_rmssdc')
+            avg_sdnn = hrv_summary.get('avg_sdnn')
+
+            if avg_bpm is not None:
+                f.write(f"| **Average BPM** | {avg_bpm:.1f} BPM |\n")
+            if min_bpm is not None and max_bpm is not None:
+                f.write(f"| **BPM Range** | {min_bpm:.1f} to {max_bpm:.1f} BPM |\n")
+            if avg_rmssdc is not None:
+                f.write(f"| **Avg. Corrected RMSSD** | {avg_rmssdc:.2f} |\n")
+            if avg_sdnn is not None:
+                f.write(f"| **Avg. Windowed SDNN** | {avg_sdnn:.2f} ms |\n")
+
+        if hrr_stats and hrr_stats.get('hrr_value_bpm') is not None:
+            f.write(f"| **1-Minute HRR** | {hrr_stats['hrr_value_bpm']:.1f} BPM Drop |\n")
+        f.write("\n")
+
+        # --- Steepest Slopes Section ---
+        f.write("## Steepest Slopes Analysis\n\n")
+
+        # Peak Exertion
+        f.write("### Peak Exertion (Fastest HR Increase)\n\n")
+        if peak_exertion_stats:
+            pes = peak_exertion_stats
+            f.write("| Attribute | Value |\n")
+            f.write("|:---|:---|\n")
+            f.write(f"| **Rate** | `+{pes['slope_bpm_per_sec']:.2f}` BPM/second |\n")
+            f.write(f"| **Period** | {pes['start_time'].strftime('%M:%S')} to {pes['end_time'].strftime('%M:%S')} |\n")
+            f.write(f"| **Duration** | {pes['duration_sec']:.1f} seconds |\n")
+            f.write(f"| **BPM Change** | {pes['start_bpm']:.1f} to {pes['end_bpm']:.1f} BPM |\n")
+        else:
+            f.write("*No significant peak exertion period found.*\n")
+        f.write("\n")
+
+        # Peak Recovery
+        f.write("### Peak Recovery (Fastest HR Decrease)\n\n")
+        if peak_recovery_stats:
+            prs = peak_recovery_stats
+            f.write("| Attribute | Value |\n")
+            f.write("|:---|:---|\n")
+            f.write(f"| **Rate** | `{prs['slope_bpm_per_sec']:.2f}` BPM/second |\n")
+            f.write(f"| **Period** | {prs['start_time'].strftime('%M:%S')} to {prs['end_time'].strftime('%M:%S')} |\n")
+            f.write(f"| **Duration** | {prs['duration_sec']:.1f} seconds |\n")
+            f.write(f"| **BPM Change** | {prs['start_bpm']:.1f} to {prs['end_bpm']:.1f} BPM |\n")
+        else:
+            f.write("*No significant peak recovery period found post-peak.*\n")
+        f.write("\n")
+
+        # --- All Significant Periods ---
+        f.write("## All Significant HR Changes\n\n")
+
+        f.write("### Exertion Periods (Sustained HR Increase)\n\n")
+        if major_inclines:
+            epoch = datetime.datetime.fromtimestamp(0)
+            for incline in major_inclines:
+                start_sec = (incline['start_time'] - epoch).total_seconds()
+                end_sec = (incline['end_time'] - epoch).total_seconds()
+                f.write(f"- **From {start_sec:.1f}s to {end_sec:.1f}s:** Duration={incline['duration_sec']:.1f}s, Change=`+{incline['bpm_increase']:.1f}` BPM\n")
+        else:
+            f.write("*None found.*\n")
+        f.write("\n")
+
+        f.write("### Recovery Periods (Sustained HR Decrease)\n\n")
+        if major_declines:
+            epoch = datetime.datetime.fromtimestamp(0)
+            for decline in major_declines:
+                start_sec = (decline['start_time'] - epoch).total_seconds()
+                end_sec = (decline['end_time'] - epoch).total_seconds()
+                f.write(f"- **From {start_sec:.1f}s to {end_sec:.1f}s:** Duration={decline['duration_sec']:.1f}s, Change=`-{decline['bpm_decrease']:.1f}` BPM\n")
+        else:
+            f.write("*None found.*\n")
+        f.write("\n")
+
+        # --- Heartbeat Data Table ---
+        f.write("## Heartbeat Data (BPM over Time)\n\n")
+        f.write("| Time (s) | Smoothed BPM |\n")
+        f.write("|:---:|:---:|\n")
+        if not smoothed_bpm.empty:
+            for t, bpm in zip(bpm_times, smoothed_bpm.values):
+                f.write(f"| {t:.2f} | {bpm:.1f} |\n")
+        else:
+            f.write("| *No data* | *No data* |\n")
+
+    logging.info(f"Markdown analysis summary saved to {output_path}")
+
 
 def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, analysis_data, smoothed_bpm, output_log_path, file_name):
-    """
-    Creates a chronological debug log using efficient, vectorized pandas operations.
-    """
+    """Creates a chronological debug log using efficient, vectorized pandas operations."""
     logging.info(f"Generating readable debug log at '{output_log_path}'...")
     debug_info = analysis_data.get('beat_debug_info', {})
 
@@ -939,7 +1030,7 @@ def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, an
 
     with open(output_log_path, "w", encoding="utf-8") as log_file:
         log_file.write(f"# Chronological Debug Log for {os.path.basename(file_name)}\n")
-        log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with Engine v7.4\n\n")
+        log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
         for t, row in merged_df.iterrows():
             log_file.write(f"## Time: `{t:.4f}s`\n")
@@ -947,7 +1038,6 @@ def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, an
 
             if row['type'] == 'Peak':
                 status_line = ""
-                # This logic formats the multi-line reason string
                 if '. ' in reason:
                     if '. Justification: ' in reason:
                         parts = reason.split('. Justification: ', 1)
@@ -992,13 +1082,9 @@ def find_major_hr_inclines(smoothed_bpm_series, min_duration_sec=10, min_bpm_inc
 
     logging.info(f"Searching for major HR inclines (min_duration={min_duration_sec}s, min_increase={min_bpm_increase} BPM)...")
 
-    # This approach is more robust to minor noise in the smoothed BPM series.
     # It finds local minima (troughs) and maxima (peaks) to define the start and end of a slope.
     # We use a prominence of at least 5 BPM to filter out insignificant wiggles.
     # A reasonable distance is calculated to avoid finding peaks too close together.
-
-    # --- FIXED LINE ---
-    # Correctly calculate the mean time difference between data points using pandas methods
     time_diffs_sec = smoothed_bpm_series.index.to_series().diff().dt.total_seconds()
     mean_time_diff = np.nanmean(time_diffs_sec)
 
@@ -1358,8 +1444,20 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
         hrv_summary_stats['avg_rmssdc'] = windowed_hrv_df['rmssdc'].mean()
         hrv_summary_stats['avg_sdnn'] = windowed_hrv_df['sdnn'].mean()
 
-    output_csv_path = f"{file_name_no_ext}_bpm_analysis.csv"
-    save_bpm_to_csv(smoothed_bpm.values, bpm_times, output_csv_path)
+    # --- Save the comprehensive summary markdown file ---
+    output_summary_path = f"{file_name_no_ext}_Analysis_Summary.md"
+    save_analysis_summary(
+        output_path=output_summary_path,
+        file_name=wav_file_path,
+        hrv_summary=hrv_summary_stats,
+        hrr_stats=hrr_stats,
+        peak_exertion_stats=peak_exertion_stats,
+        peak_recovery_stats=peak_recovery_stats,
+        major_inclines=major_inclines,
+        major_declines=major_declines,
+        smoothed_bpm=smoothed_bpm,
+        bpm_times=bpm_times
+    )
 
     plot_results(audio_envelope, final_peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times,
                  sample_rate, wav_file_path, params, hrv_summary=hrv_summary_stats, windowed_hrv_df=windowed_hrv_df,
@@ -1374,7 +1472,7 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
 class BPMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Heartbeat BPM Analyzer v7.5 (Slope Metrics)")
+        self.root.title("Heartbeat BPM Analyzer")
         self.root.geometry("550x350")
         self.style = ttkb.Style(theme='minty')
         self.current_file = None
