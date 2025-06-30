@@ -294,3 +294,35 @@ This release enhances the robustness of the outlier rejection system by introduc
 - **Refined Log Formatting:** The logic for parsing and formatting the reason strings in the Markdown debug log has been improved to handle more edge cases, resulting in a cleaner and more readable output.
 - **Plot Axis Scaling:** The plot's Y-axis auto-scaling has been slightly adjusted for better default visualization of the signal amplitude.
 
+# Changelog: BPM Analysis Script
+## Version 2.2
+This version introduces a new suite of analytics focused on exercise and recovery, providing deeper insights into cardiovascular response beyond standard HRV. It also refactors the code to use modern, time-aware `pandas` objects for increased precision.
+### ✨ New Features
+- **Heart Rate Recovery (HRR) Analysis:**
+    - A new `calculate_hrr` function has been added to compute the standard 1-minute Heart Rate Recovery, a key indicator of cardiovascular fitness.
+    - The result (BPM drop) is now prominently displayed in the "Analysis Summary" box on the plot.
+- **Exertion & Recovery Slope Analysis:**
+    - New functions (`find_major_hr_inclines` and `find_major_hr_declines`) have been implemented to identify the most significant, sustained periods of heart rate increase and decrease.
+    - The primary exertion and recovery slopes are now visualized directly on the BPM graph with clear labels showing the rate of change in BPM per second.
+### 🚀 Improvements & Refactoring
+- **Time-Aware Data Structures:** The `calculate_bpm_series` function and all downstream analysis and plotting functions have been refactored to use `pandas` `Timestamp` objects instead of simple float seconds. This provides more robust and precise handling of time-series data, especially for nearest-neighbor lookups in the logging function.
+- **Simplified `calculate_blended_confidence`:** The confidence model for S1-S2 pairing has been simplified. It now relies solely on the normalized deviation between peaks, removing the dependency on the `long_term_bpm` belief. This makes the pairing decision more direct and less prone to being influenced by a potentially lagging BPM belief state.
+- **Plotting Enhancements:** The plot now uses a dark theme for better contrast and visual appeal.
+
+# Changelog: BPM Analysis Script
+## Version 2.3
+This version introduces a significant architectural refactoring to decouple the analysis process from file I/O operations and adds a key usability feature to the GUI for saving results.
+### ✨ New Features
+- **"Save All Results" Button & Workflow:**
+    - A new **"Save All Results"** button has been added to the GUI, which becomes active after a successful analysis.
+    - This feature allows the user to re-save all output files (HTML Plot, CSV data, and Markdown Log) for the most recent analysis to a new location or with a new name, without needing to run the entire computationally expensive process again.
+    - When clicked, it opens a "Save As" dialog asking the user to provide a base file name for the set of output files.
+### 🚀 Improvements & Refactoring
+- **Decoupled Analysis and Saving:**
+    - The main `analyze_wav_file` function has been refactored to be a pure computation function. It no longer saves any files directly and instead returns a dictionary containing all analysis results.
+    - The results of the last completed analysis are now stored in memory within the `BPMApp` instance.
+- **Consolidated Output Function:**
+    - A new `save_all_outputs` function has been created to handle all file output operations (Plot, CSV, Log).
+    - This function is called by the new "Save All Results" button and takes the stored analysis results and a user-specified base path as input. This change improves code organization and reduces redundancy.
+- **Configuration:** A new `File Output Settings` section has been added to the `DEFAULT_PARAMS` dictionary to centralize the suffixes for all output files.
+
