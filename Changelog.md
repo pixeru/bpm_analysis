@@ -160,4 +160,16 @@ This version further refines the intelligent noise rejection system with a more 
     - The trough-based noise confidence rule, which rejects peaks in noisy areas, has been improved.
     - It now has a specific **exception** that prevents it from rejecting a peak if that peak falls within the expected time window for an S2 beat. This helps "rescue" valid S2 sounds that might occur during a noisy segment of the audio.
 
+# Changelog: BPM Analysis Script
+## Version 1.3
+This version introduces a "Strong Peak Exception" to the noise rejection logic and enhances the detail in the debug outputs for better traceability.
+### ✨ New Features
+- **Strong Peak Exception for Noise Rule:**
+    - A new exception has been added to the trough-based noise confidence system.
+    - The algorithm now calculates a peak's amplitude relative to the local dynamic noise floor. If a peak is exceptionally prominent (e.g., more than 6 times the noise floor), it will bypass the noise rejection rule.
+    - This prevents very strong, clear S1 beats from being accidentally discarded just because they occur in a segment with a high baseline noise level.
+### 🚀 Improvements
+- **Enhanced S2 Debug Information:** The debug information for S2 peaks has been improved. It now includes the full justification (confidence scores, BPM belief, etc.) that was used to make the original S1 pairing decision, providing complete context for why an S2 was identified.
+- **Refined S2 Time Window:** The dynamic time window used to identify potential S2 peaks (`s1_s2_max_interval_sec`) has been slightly widened, making the algorithm a little more generous in its search for the second heart sound.
+- **Code Refactoring:** The plotting and logging functions have been updated to correctly parse and display the new, more detailed S2 justification strings. The hover-label templates in the plot have also been unified for consistency.
 
