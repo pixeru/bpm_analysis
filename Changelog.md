@@ -279,3 +279,18 @@ This release introduces a major new analytical capability: **Windowed Heart Rate
 - **Configuration for HRV:** The `DEFAULT_PARAMS` dictionary now includes `hrv_window_size_beats` and `hrv_step_size_beats` to allow for easy tuning of the new sliding window analysis.
 - **Code Refactoring:** The main analysis pipeline in `analyze_wav_file` has been updated to call the new windowed HRV function and pass the results to the plotting function.
 
+# Changelog: BPM Analysis Script
+## Version 2.1
+This release enhances the robustness of the outlier rejection system by introducing an intelligent "double-check" mechanism. It also improves the usability of the plot output and refactors the S2 pairing logic for better clarity.
+### ✨ New Features
+- **RR-based Double Check for Outlier Rejection:**
+    - The dynamic HRV-based outlier rejection system has been made smarter.
+    - When the system flags a peak for rejection due to an implausible beat-to-beat (RR) interval, it now performs a "double check."
+    - It looks back at the immediately preceding raw peak. If that previous peak was classified as `Noise`, the algorithm now temporarily "rescues" it and re-evaluates the RR interval.
+    - If the interval becomes plausible after this correction, the rescued peak is kept as a `Lone S1` and the original peak is accepted. This prevents a single misclassified noise peak from causing a cascade of incorrect rejections.
+### 🚀 Improvements
+- **S2 Amplitude Rejection:** A new, tunable parameter `s2_amplitude_rejection_factor` has been added. If a candidate S2 peak is significantly larger than its preceding S1 (e.g., > 1.5x), the pairing is now rejected. This prevents an abnormally large noise peak from being incorrectly classified as an S2 sound.
+- **High-Resolution Plot Export:** The configuration for the interactive plot now includes options to export it as a high-resolution (2x scale) PNG image directly from the camera icon in the plot's mode bar.
+- **Refined Log Formatting:** The logic for parsing and formatting the reason strings in the Markdown debug log has been improved to handle more edge cases, resulting in a cleaner and more readable output.
+- **Plot Axis Scaling:** The plot's Y-axis auto-scaling has been slightly adjusted for better default visualization of the signal amplitude.
+

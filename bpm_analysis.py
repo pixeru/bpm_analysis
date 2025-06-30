@@ -97,6 +97,8 @@ DEFAULT_PARAMS = {
     # Increase: Requires stronger evidence for pairing. Results in fewer S1-S2 pairs and more "Lone S1" beats.
     # Decrease: Easier to form S1-S2 pairs. Risks incorrectly pairing a true S1 with a nearby noise peak.
 
+    "s2_amplitude_rejection_factor": 1.5, # If S2 candidate is 1.5x (50%) larger than S1, reject pairing.
+
     "trough_noise_multiplier": 3.0,
     # A peak is considered "noisy" if the trough preceding it has an amplitude N-times higher than the dynamic noise floor.
     # Increase: Requires the trough to be much louder to be considered noisy. Less likely to classify peaks as noise.
@@ -382,7 +384,20 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                     reason += f"| BOOSTED (Prevented {bpm_if_not_paired:.0f} BPM spike) "
 
             is_paired = interval_sec <= s1_s2_max_interval and pairing_confidence > params['pairing_confidence_threshold']
+            if is_paired:
+                s1_amp = audio_envelope[current_peak_idx]
+                s2_amp = audio_envelope[next_peak_idx]
+                rejection_factor = params.get('s2_amplitude_rejection_factor', 1.5)
 
+                if s2_amp > (s1_amp * rejection_factor):
+                    # If the candidate S2 is significantly larger than S1, invalidate the pairing.
+                    is_paired = False
+                    # Mark the rejected S1 as noise and provide a clear reason.
+                    rejection_reason = (f"Noise (Rejected as S1: Following peak at {next_peak_idx/sample_rate:.2f}s "
+                                        f"was >{rejection_factor:.1f}x larger).")
+                    beat_debug_info[current_peak_idx] = rejection_reason
+                    i += 1  # Move on to the next peak, effectively skipping this one.
+                    continue # Restart the loop for the next peak
             if is_paired:
                 s1_idx = current_peak_idx
                 candidate_beats.append(s1_idx)
@@ -393,6 +408,10 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                 s1_idx = current_peak_idx
 
                 # --- BPM Outlier Rejection Logic ---
+                if s1_idx in beat_debug_info: # If the S1 was already marked as noise by the new rule
+                    i += 1
+                    continue
+
                 if candidate_beats:
                     previous_beat_idx = candidate_beats[-1]
                     rr_interval_sec = (s1_idx - previous_beat_idx) / sample_rate
@@ -688,6 +707,8 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
     tick_vals_sec = np.arange(0, max_time_sec + 30, 30)
     tick_text_combined = [f"{int(s)}s ({int(s // 60):02d}:{int(s % 60):02d})" for s in tick_vals_sec]
 
+    plot_title = f"Heartbeat Analysis - {os.path.basename(file_name)} (v7.3 - Beat-Based HRV)"
+
     if hrv_summary:
         avg_bpm_val = hrv_summary.get('avg_bpm')
         min_bpm_val = hrv_summary.get('min_bpm')
@@ -700,12 +721,31 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
         annotation_text += f"Avg. Windowed SDNN: {avg_sdnn_val:.2f} ms" if avg_sdnn_val is not None else ""
         fig.add_annotation(text=annotation_text, align='left', showarrow=False, xref='paper', yref='paper', x=0.02, y=0.98, bordercolor='black', borderwidth=1, bgcolor='rgba(255, 253, 231, 0.4)')
 
-    fig.update_layout(title_text=f"Heartbeat Analysis - {os.path.basename(file_name)} (v7.3 - Beat-Based HRV)", dragmode='pan', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=100, b=100), xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined), hovermode='x unified')
+    fig.update_layout(
+        title_text=plot_title,
+        dragmode='pan',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(t=100, b=100),
+        xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined),
+        hovermode='x unified'
+    )
     robust_upper_limit = np.quantile(audio_envelope, 0.95)
     fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, robust_upper_limit * 60])
-    fig.update_yaxes(title_text="BPM / HRV (ms)", secondary_y=True, range=[0, params['max_bpm'] + 10])
+
+    fig.update_yaxes(title_text="BPM / HRV (ms)", secondary_y=True, range=[50, 200])
+
     output_html_path = f"{os.path.splitext(file_name)[0]}_bpm_plot.html"
-    fig.write_html(output_html_path, config={'scrollZoom': True})
+
+    plot_config = {
+        'scrollZoom': True,
+        'toImageButtonOptions': {
+            'filename': plot_title,
+            'format': 'png',
+            'scale': 2
+        }
+    }
+
+    fig.write_html(output_html_path, config=plot_config)
     logging.info(f"Interactive plot saved to {output_html_path}")
 
 def save_bpm_to_csv(bpm_series, time_points, output_path):
@@ -750,7 +790,7 @@ def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, an
 
     with open(output_log_path, "w", encoding="utf-8") as log_file:
         log_file.write(f"# Chronological Debug Log for {os.path.basename(file_name)}\n")
-        log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with Engine v7.0\n\n")
+        log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with Engine v3.0\n\n")
 
         if not loggable_events:
             log_file.write("No significant events (peaks or troughs) were detected to log.\n")
@@ -788,8 +828,18 @@ def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, an
                         status = parts[0].strip()
                         details = parts[1].strip().replace(' | ', '\n- ')
                         status_line = f"**{status}.**\n- {details}"
+                elif '(' in reason and ')' in reason:
+                     # Handle the new noise reason format
+                    if 'Rejected as S1' in reason:
+                        status_line = f"**{reason}**"
+                    else:
+                        parts = reason.split('(', 1)
+                        status = parts[0].strip()
+                        details = parts[1].strip(')').replace(' | ', '\n- ')
+                        status_line = f"**{status}**\n- {details}"
                 else:
                     status_line = f"**{reason}**"
+
 
                 log_file.write(f"{status_line}\n")
                 log_file.write(f"**Audio Envelope**: `{envelope_val:.2f}`\n")
