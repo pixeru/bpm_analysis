@@ -387,3 +387,20 @@ This version introduces a comprehensive Markdown analysis report, further decoup
 - **Clearer File Suffixes:** The output file suffixes have been updated in `DEFAULT_PARAMS` to be more descriptive (e.g., `_bpm_plot.html`, `_Analysis_Summary.md`).
 - **Streamlined Code:** Several functions have been refactored to accept the `params` dictionary directly, reducing the number of arguments passed and improving code readability. The `save_bpm_to_csv` function has been removed as its functionality is now covered by the more comprehensive `save_analysis_summary`.
 
+# Changelog: BPM Analysis Script
+## Version 2.8
+This major version introduces a significant user interface upgrade with live parameter editing and a substantial architectural refactoring to a class-based structure for better organization and maintainability.
+### ✨ New Features
+- **Live Parameter Editing in GUI:**
+    - A new, scrollable "Tunable Parameters" frame has been added to the user interface.
+    - This frame dynamically displays all core analysis parameters from the `DEFAULT_PARAMS` dictionary, allowing the user to view and modify them directly within the application.
+    - A **"Restore Defaults"** button allows the user to instantly revert all changes back to the original settings.
+    - A **"Save As Default"** button enables the user to save their current parameter set to a `config.json` file, which will be automatically loaded the next time the application starts.
+- **Object-Oriented Refactoring:**
+    - The entire analysis workflow has been encapsulated within a new `AnalysisPipeline` class.
+    - This class-based approach organizes the code by separating concerns: file handling, preprocessing, the multi-stage analysis, and result calculation are now distinct methods within the class. This greatly improves code readability, maintainability, and scalability.
+### 🚀 Improvements
+- **Analysis Function Signature:** The `analyze_wav_file` function has been streamlined. It now primarily acts as an orchestrator, creating an instance of the `AnalysisPipeline` and running it, simplifying the top-level logic.
+- **Robustness:** The logic for passing parameters from the GUI to the analysis thread has been made more robust to handle the new live editing feature.
+- **Code Clarity:** The use of helper functions within the `AnalysisPipeline` class (e.g., `_run_stage_1_estimation`, `_run_stage_3_main_analysis`) makes the sequence of the analysis pipeline much clearer and easier to follow.
+
