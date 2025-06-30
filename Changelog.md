@@ -371,3 +371,19 @@ This version introduces a new, iterative post-processing stage to the analysis p
 - **S2 Amplitude Penalty:** The previous hard rejection rule for an S2 peak being larger than an S1 peak has been converted to a "soft" penalty. Now, if a candidate S2 is too large, its `pairing_confidence` is reduced. The pairing is only rejected if this penalized score falls below the confidence threshold, providing a more nuanced decision.
 - **Configuration:** New parameters have been added to `DEFAULT_PARAMS` to control the new correction pass (`enable_correction_pass`, `correction_pass_window_beats`, `correction_pass_ratio_threshold`).
 
+# Changelog: BPM Analysis Script
+## Version 2.7
+This version introduces a comprehensive Markdown analysis report, further decouples the analysis and saving workflows, and refactors the GUI for better state management and usability.
+### ✨ New Features
+- **Comprehensive Markdown Analysis Report:**
+    - The application now generates a new `_Analysis_Summary.md` file.
+    - This professional, well-formatted report includes a high-level summary of all key metrics (BPM, HRR, HRV), a detailed breakdown of the steepest exertion and recovery slopes, and tables listing all significant periods of heart rate change.
+    - It also includes the raw BPM-over-time data in a clean tabular format, making it the primary human-readable output for the analysis.
+- **Decoupled Analysis and Saving:**
+    - Following the pattern from the previous version, the new `save_analysis_summary` function is now decoupled from the main analysis pipeline.
+    - The `analyze_wav_file` function now returns a complete dictionary of all results, which is then passed to the various saving functions.
+### 🚀 Improvements
+- **GUI State Management:** The application now stores the results of the most recent analysis in a dedicated `self.last_analysis_results` variable. This makes the "Save All Results" feature more robust and efficient as it no longer needs to hold onto the plot figure object itself, only the data required to regenerate it.
+- **Clearer File Suffixes:** The output file suffixes have been updated in `DEFAULT_PARAMS` to be more descriptive (e.g., `_bpm_plot.html`, `_Analysis_Summary.md`).
+- **Streamlined Code:** Several functions have been refactored to accept the `params` dictionary directly, reducing the number of arguments passed and improving code readability. The `save_bpm_to_csv` function has been removed as its functionality is now covered by the more comprehensive `save_analysis_summary`.
+
