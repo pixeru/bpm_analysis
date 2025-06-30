@@ -357,4 +357,17 @@ This is a maintenance release focused on improving the precision of the analysis
 ### 🐛 Bug Fixes
 - A minor bug in the `plot_results` function was fixed to correctly handle cases where no significant inclines or declines were found, preventing potential errors.
 
+# Changelog: BPM Analysis Script
+## Version 2.6
+This version introduces a new, iterative post-processing stage to the analysis pipeline, designed to intelligently correct beat classifications by considering the local context of the rhythm.
+### ✨ New Features
+- **Iterative Contextual Correction Pass:**
+    - A new, final stage has been added to the `analyze_wav_file` pipeline: **Stage 5 - Contextual Correction**.
+    - This stage uses a new function, `correct_beats_with_local_context`, which analyzes the results of the primary detection pass.
+    - It calculates a **local pairing ratio** using a sliding window over the detected beats. In areas where the pairing success rate is high, the algorithm gains confidence that S1-S2 pairs are the norm.
+    - If it finds a `Lone S1` beat in one of these high-confidence areas, and the subsequent rejected peak was a failed S2 candidate, it will **correct** the classification, promoting the `Lone S1` to a `Paired S1` and the `Noise` peak to an `S2`.
+    - This entire correction pass runs iteratively until no more changes are made, ensuring the results are stable.
+### 🚀 Improvements
+- **S2 Amplitude Penalty:** The previous hard rejection rule for an S2 peak being larger than an S1 peak has been converted to a "soft" penalty. Now, if a candidate S2 is too large, its `pairing_confidence` is reduced. The pairing is only rejected if this penalized score falls below the confidence threshold, providing a more nuanced decision.
+- **Configuration:** New parameters have been added to `DEFAULT_PARAMS` to control the new correction pass (`enable_correction_pass`, `correction_pass_window_beats`, `correction_pass_ratio_threshold`).
 
