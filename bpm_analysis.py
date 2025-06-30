@@ -59,7 +59,7 @@ DEFAULT_PARAMS = {
     # The size of the rolling window (in seconds) for calculating the dynamic noise floor.
     # Increase: The noise floor adapts more slowly to changes in background noise, resulting in a smoother, more stable floor.
     # Decrease: The noise floor adapts very quickly to local changes in noise level.
-    "trough_prominence_quantile": 0.05,
+    "trough_prominence_quantile": 0.1,
     # The prominence required for a dip in the signal to be considered a 'trough' for noise floor calculation.
     # Increase: Requires troughs to be much deeper to be identified. Finds fewer, more significant troughs.
     # Decrease: Allows shallower dips to be considered troughs. Finds more troughs, but can make false positives.
@@ -78,6 +78,9 @@ DEFAULT_PARAMS = {
     # Controls the amount of smoothing applied to the peak-to-peak amplitude deviation series.
     # Increase: More smoothing. The S1/S2 pairing confidence will be based on the general trend of amplitude changes.
     # Decrease: Less smoothing. Pairing confidence will be highly influenced by the amplitude change between two adjacent peaks.
+
+    "max_bpm_rejection_factor": 2.0,
+    # Reject Instant BPM if it is N-times higher than the configured max_bpm.
 
     # =================================================================================
     # S1/S2 Pairing Logic Parameters
@@ -102,7 +105,7 @@ DEFAULT_PARAMS = {
     # Increase: Requires the trough to be much louder to be considered noisy. Less likely to classify peaks as noise.
     # Decrease: Even a slightly elevated trough can mark an area as noisy, making noise classification more likely.
 
-    "noise_confidence_threshold": 0.7,
+    "noise_confidence_threshold": 0.6,
     # If the calculated "noise confidence" for a peak exceeds this value, it will be classified as noise.
     # Increase: Harder to reject a peak. The algorithm needs to be more certain it's noise.
     # Decrease: Easier to reject a peak as noise, making the filter more aggressive.
@@ -323,53 +326,78 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
             if strong_peak_override: reason += f"(Strong Peak: {peak_to_floor_ratio:.1f}x floor)"
 
         # --- Main Pairing Logic ---
+        # This section iterates through peaks, decides if they form S1-S2 pairs or are
+        # lone S1 beats, and rejects outliers.
         if i >= len(all_peaks) - 1: # Last peak is always a lone S1
             candidate_beats.append(current_peak_idx)
             beat_debug_info[current_peak_idx] = "Lone S1 (Last Peak)"
             i += 1
-            continue
+            # The loop will terminate, but the BPM update below will run one last time.
+        else:
+            next_peak_idx = all_peaks[i + 1]
+            interval_sec = (next_peak_idx - current_peak_idx) / sample_rate
+            smoothed_deviation = smoothed_dev_series[i]
 
-        next_peak_idx = all_peaks[i + 1]
-        interval_sec = (next_peak_idx - current_peak_idx) / sample_rate
-        smoothed_deviation = smoothed_dev_series[i]
+            pairing_confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
+            reason += f"| Base Pairing Conf: {pairing_confidence:.2f} "
 
-        pairing_confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
-        reason += f"| Base Pairing Conf: {pairing_confidence:.2f} "
+            # Heuristic: Boost pairing confidence if NOT pairing would cause a massive, unlikely BPM spike
+            bpm_if_not_paired = 60.0 / interval_sec if interval_sec > 0 else 999
+            if bpm_if_not_paired > long_term_bpm * 1.7 and long_term_bpm < 150:
+                pairing_confidence = min(0.95, pairing_confidence + 0.3)
+                reason += f"| BOOSTED (Prevented {bpm_if_not_paired:.0f} BPM spike) "
 
-        # Heuristic: Boost pairing confidence if NOT pairing would cause a massive, unlikely BPM spike
-        bpm_if_not_paired = 60.0 / interval_sec if interval_sec > 0 else 999
-        if bpm_if_not_paired > long_term_bpm * 1.7 and long_term_bpm < 150:
-            pairing_confidence = min(0.95, pairing_confidence + 0.3)
-            reason += f"| BOOSTED (Prevented {bpm_if_not_paired:.0f} BPM spike) "
+            is_paired = interval_sec <= s1_s2_max_interval and pairing_confidence > params['pairing_confidence_threshold']
 
-        is_paired = interval_sec <= s1_s2_max_interval and pairing_confidence > params['pairing_confidence_threshold']
+            if is_paired:
+                s1_idx = current_peak_idx
+                candidate_beats.append(s1_idx)
+                beat_debug_info[s1_idx] = f"S1 (Paired). {reason.lstrip(' |')}"
+                beat_debug_info[next_peak_idx] = f"S2 (Paired). Justification: {reason.lstrip(' |')}"
+                i += 2  # Skip S2 in the next iteration
+            else:  # Not paired, treat as a potential lone S1.
+                s1_idx = current_peak_idx
 
-        if is_paired:
-            s1_idx, s2_idx = current_peak_idx, next_peak_idx
-            candidate_beats.append(s1_idx)
-            beat_debug_info[s1_idx] = f"S1 (Paired). {reason.lstrip(' |')}"
-            beat_debug_info[s2_idx] = f"S2 (Paired). Justification: {reason.lstrip(' |')}"
+                # --- BPM Outlier Rejection Logic ---
+                if candidate_beats:
+                    previous_beat_idx = candidate_beats[-1]
+                    rr_interval_sec = (s1_idx - previous_beat_idx) / sample_rate
+                    if rr_interval_sec > 0.0:
+                        instant_bpm = 60.0 / rr_interval_sec
+                        bpm_threshold = params.get('max_bpm_rejection_factor', 2.0) * params['max_bpm']
 
-            if len(candidate_beats) > 1:
-                # Update long-term BPM belief
-                new_rr = (s1_idx - candidate_beats[-2]) / sample_rate
-                if new_rr > 0:
-                    instant_bpm = 60.0 / new_rr
-                    # Apply learning rate
-                    lr = params['long_term_bpm_learning_rate']
-                    target_bpm = ((1 - lr) * long_term_bpm) + (lr * instant_bpm)
-                    # Limit rate of change
-                    max_change = params['max_bpm_change_per_beat'] * new_rr
-                    proposed_change = target_bpm - long_term_bpm
-                    limited_change = np.clip(proposed_change, -max_change, max_change)
-                    long_term_bpm = max(params['min_bpm'], min(long_term_bpm + limited_change, params['max_bpm']))
-            i += 2 # Skip S2
-        else: # Not paired, treat as lone S1
-            s1_idx = current_peak_idx
-            candidate_beats.append(s1_idx)
-            beat_debug_info[s1_idx] = f"Lone S1. {reason.lstrip(' |')}"
-            i += 1
+                        if instant_bpm > bpm_threshold:
+                            # This peak would create an impossible BPM. Reject it as noise.
+                            rejection_reason = f"Noise (Rejected: Instant BPM {instant_bpm:.0f} > {bpm_threshold:.0f} BPM)"
+                            beat_debug_info[s1_idx] = rejection_reason
+                            i += 1
+                            continue # Continue to the next iteration of the main while loop
 
+                # If the check above passed, proceed to add the peak as a Lone S1.
+                candidate_beats.append(s1_idx)
+                beat_debug_info[s1_idx] = f"Lone S1. {reason.lstrip(' |')}"
+                i += 1
+
+        # --- Long-Term BPM Belief Update ---
+        if len(candidate_beats) > 1:
+            # The new S1 beat is the last one added.
+            new_s1_idx = candidate_beats[-1]
+            # The previous S1 beat is the second to last.
+            previous_s1_idx = candidate_beats[-2]
+
+            new_rr = (new_s1_idx - previous_s1_idx) / sample_rate
+            if new_rr > 0:
+                instant_bpm = 60.0 / new_rr
+                # Apply learning rate
+                lr = params['long_term_bpm_learning_rate']
+                target_bpm = ((1 - lr) * long_term_bpm) + (lr * instant_bpm)
+                # Limit rate of change
+                max_change = params['max_bpm_change_per_beat'] * new_rr
+                proposed_change = target_bpm - long_term_bpm
+                limited_change = np.clip(proposed_change, -max_change, max_change)
+                long_term_bpm = max(params['min_bpm'], min(long_term_bpm + limited_change, params['max_bpm']))
+
+        # Add the current state of the long-term BPM to the history for plotting.
         if candidate_beats:
             long_term_bpm_history.append((candidate_beats[-1] / sample_rate, long_term_bpm))
 
@@ -560,7 +588,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
                       hovermode='x unified')
 
     fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False,
-                     range=[0, audio_envelope.max() * 40])
+                     range=[0, audio_envelope.max() * 60])
     fig.update_yaxes(title_text="BPM / Norm. Dev %", secondary_y=True, range=[params['min_bpm'] - 10, params['max_bpm'] + 10])
 
     output_html_path = f"{os.path.splitext(file_name)[0]}_bpm_plot.html"

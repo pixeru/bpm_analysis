@@ -213,3 +213,17 @@ This version focuses on improving the tunability and maintainability of the core
 - **S2 Beat Justification:** The full justification string (including confidence scores, BPM belief, etc.) for an S1-S2 pairing decision is now correctly stored for the S2 peak. This makes the reasoning for S2 classification fully visible in both the plot's hover-label and the Markdown debug log.
 - **Algorithm Tuning:** The default `pairing_confidence_threshold` has been lowered from `0.6` to `0.55`, making the algorithm slightly more inclined to form S1-S2 pairs.
 
+# Changelog: BPM Analysis Script
+## Version 1.7
+This version introduces a critical new outlier rejection system to prevent noise from creating impossible BPM spikes and further refines the core algorithm's logic.
+### ✨ New Features
+- **BPM Outlier Rejection:**
+    - A new safety check has been integrated into the main classification loop. Before a peak is confirmed as a "Lone S1," the algorithm now calculates the instantaneous BPM that would result from its inclusion.
+    - If this BPM is determined to be physiologically impossible (i.e., greater than a tunable multiple of the `max_bpm`), the peak is rejected as noise.
+    - This significantly improves the robustness of the final BPM graph by preventing single, errant noise peaks from causing extreme, unrealistic spikes.
+    - The sensitivity of this feature can be tuned via the new `max_bpm_rejection_factor` parameter in `DEFAULT_PARAMS`.
+### 🚀 Improvements
+- **Refined Pairing Logic:** The "Pattern Match Override" heuristic has been removed from the final pairing decision. A pairing is now determined exclusively by the time interval and the blended confidence score, simplifying the logic and relying more on the core stateful model.
+- **Stateful Update Correction:** The logic for updating the `long_term_bpm` belief has been refactored to ensure it only runs _after_ a beat has been fully validated and added to the list of candidates, improving logical consistency and the accuracy of the belief state.
+- **Algorithm Tuning:** The default `noise_confidence_threshold` has been lowered from `0.7` to `0.6`, making the trough-based noise rejection slightly more aggressive.
+

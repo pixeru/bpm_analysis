@@ -7,7 +7,8 @@ The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordin
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A) by converting them to a standard format for analysis.
 - **Stateful Beat Detection Algorithm:** Employs a sophisticated, stateful algorithm that maintains a "belief" about the heart rate to make smarter decisions.
     - **Dynamic Noise Floor:** The analysis begins by detecting local minima (troughs) and calculating a dynamic noise floor that adapts to changing noise levels throughout the recording.
-    - **Intelligent Noise Rejection:** Before attempting to pair peaks, the algorithm uses advanced heuristics to proactively identify and reject noise.
+    - **Intelligent Noise Rejection:** Before attempting to pair peaks, the algorithm uses advanced heuristics to proactively identify and reject noise, including a trough-based lookahead veto.
+    - **BPM Outlier Rejection:** A key feature that prevents single noise peaks from creating unrealistic BPM spikes. If adding a lone peak would result in a physiologically impossible heart rate, it is rejected.
     - **Long-Term BPM Tracking:** The algorithm tracks a smoothed, long-term BPM "belief" to dynamically adjust pairing parameters.
     - **Blended Confidence Model:** A continuous confidence model evaluates how likely a pair of sound peaks is a true S1-S2 couplet.
 - **BPM Hint:** Users can provide an estimated starting BPM to give the algorithm an initial "belief" to work from.
@@ -34,7 +35,7 @@ You will also need **FFmpeg** installed and accessible in your system's PATH for
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
     ```
-    python bpm_analysis_v1.6.py
+    python bpm_analysis_v1.7.py
     ```
 4. **Use the Application:**
     - The application will attempt to automatically load a supported audio file from the same directory.
