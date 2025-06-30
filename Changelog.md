@@ -227,3 +227,22 @@ This version introduces a critical new outlier rejection system to prevent noise
 - **Stateful Update Correction:** The logic for updating the `long_term_bpm` belief has been refactored to ensure it only runs _after_ a beat has been fully validated and added to the list of candidates, improving logical consistency and the accuracy of the belief state.
 - **Algorithm Tuning:** The default `noise_confidence_threshold` has been lowered from `0.7` to `0.6`, making the trough-based noise rejection slightly more aggressive.
 
+# Changelog: BPM Analysis Script
+## Version 1.8
+This version introduces Heart Rate Variability (HRV) analysis as a major new feature and replaces the previous outlier rejection system with a more sophisticated, dynamic model based on HRV principles.
+### ✨ New Features
+- **Heart Rate Variability (HRV) Analysis:**
+    - The script now performs time-domain HRV analysis on the detected S1 beats.
+    - A new function, `calculate_hrv_metrics`, has been added to compute two key metrics:
+        - **SDNN** (Standard Deviation of NN intervals): An indicator of overall heart rate variability.
+        - **RMSSD** (Root Mean Square of Successive Differences): A measure of short-term, high-frequency variability.
+- **Analysis Summary Box in Plot:**
+    - The results plot now includes a prominent **Analysis Summary** box in the top-left corner.
+    - This box displays the key calculated metrics at a glance, including Avg/Min/Max BPM, SDNN, and RMSSD.
+### 🚀 Improvements
+- **Dynamic HRV-Based Outlier Rejection:**
+    - The previous "BPM Outlier Rejection" logic, which used a static multiple of `max_bpm`, has been completely replaced.
+    - The new system is more intelligent and context-aware. It rejects a potential beat if the resulting beat-to-beat (RR) interval represents a physiologically implausible percentage change from the _previous_ RR interval.
+    - This allows the algorithm to follow gradual changes in heart rate while effectively rejecting sudden, sharp spikes caused by noise.
+    - The sensitivity of this feature can be tuned via the new `rr_interval_max_decrease_pct` and `rr_interval_max_increase_pct` parameters.
+

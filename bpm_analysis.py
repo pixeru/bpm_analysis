@@ -79,9 +79,6 @@ DEFAULT_PARAMS = {
     # Increase: More smoothing. The S1/S2 pairing confidence will be based on the general trend of amplitude changes.
     # Decrease: Less smoothing. Pairing confidence will be highly influenced by the amplitude change between two adjacent peaks.
 
-    "max_bpm_rejection_factor": 2.0,
-    # Reject Instant BPM if it is N-times higher than the configured max_bpm.
-
     # =================================================================================
     # S1/S2 Pairing Logic Parameters
     # These settings control how the algorithm decides if two peaks are an S1/S2 pair or a lone S1.
@@ -114,6 +111,11 @@ DEFAULT_PARAMS = {
     # A peak whose amplitude is N-times the noise floor will bypass the noise-rejection rules and be kept.
     # Increase: Requires a peak to be exceptionally tall to bypass noise rules.
     # Decrease: Allows moderately tall peaks to be kept even if they are in a section considered noisy.
+
+    # Dynamic HRV-Based Outlier Rejection Parameters
+    # =================================================================================
+    "rr_interval_max_decrease_pct": 0.45, # A new RR interval can't be more than 45% shorter than the previous one.
+    "rr_interval_max_increase_pct": 0.70, # A new RR interval can't be more than 70% longer than the previous one.
 
     # =================================================================================
     # Long-Term BPM Belief Parameters
@@ -362,16 +364,25 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                 if candidate_beats:
                     previous_beat_idx = candidate_beats[-1]
                     rr_interval_sec = (s1_idx - previous_beat_idx) / sample_rate
-                    if rr_interval_sec > 0.0:
-                        instant_bpm = 60.0 / rr_interval_sec
-                        bpm_threshold = params.get('max_bpm_rejection_factor', 2.0) * params['max_bpm']
 
-                        if instant_bpm > bpm_threshold:
-                            # This peak would create an impossible BPM. Reject it as noise.
-                            rejection_reason = f"Noise (Rejected: Instant BPM {instant_bpm:.0f} > {bpm_threshold:.0f} BPM)"
+                    if rr_interval_sec > 0.0:
+                        # Get the expected RR interval based on the algorithm's current belief
+                        expected_rr_sec = 60.0 / long_term_bpm
+
+                        # Define the plausible range for the new RR interval
+                        min_plausible_rr = expected_rr_sec * (1 - params['rr_interval_max_decrease_pct'])
+                        max_plausible_rr = expected_rr_sec * (1 + params['rr_interval_max_increase_pct'])
+
+                        # Check if the new interval is outside the plausible window
+                        if not (min_plausible_rr <= rr_interval_sec <= max_plausible_rr):
+                            instant_bpm = 60.0 / rr_interval_sec
+                            rejection_reason = (f"Noise (Rejected: RR interval {rr_interval_sec:.3f}s "
+                                                f"is outside plausible range [{min_plausible_rr:.3f}s - {max_plausible_rr:.3f}s] "
+                                                f"based on current BPM of {long_term_bpm:.1f}). "
+                                                f"Implies instant BPM of {instant_bpm:.0f}.")
                             beat_debug_info[s1_idx] = rejection_reason
                             i += 1
-                            continue # Continue to the next iteration of the main while loop
+                            continue # Reject this peak and move to the next
 
                 # If the check above passed, proceed to add the peak as a Lone S1.
                 candidate_beats.append(s1_idx)
@@ -413,6 +424,26 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
 
     return final_peaks, all_peaks, analysis_data
 
+def calculate_hrv_metrics(s1_peaks, sample_rate):
+    """Calculates SDNN and RMSSD from a series of S1 heartbeats."""
+    if len(s1_peaks) < 10: # Need a reasonable number of beats for meaningful HRV
+        return None, None, None
+
+    # Calculate R-R intervals in milliseconds
+    rr_intervals_sec = np.diff(s1_peaks) / sample_rate
+    rr_intervals_ms = rr_intervals_sec * 1000
+
+    if len(rr_intervals_ms) < 2:
+        return None, None, None
+
+    avg_rr = np.mean(rr_intervals_ms)
+    sdnn = np.std(rr_intervals_ms)
+
+    # Calculate successive differences
+    successive_diffs = np.diff(rr_intervals_ms)
+    rmssd = np.sqrt(np.mean(successive_diffs**2))
+
+    return avg_rr, sdnn, rmssd
 
 def calculate_bpm_series(peaks, sample_rate, params):
     """Calculates and smooths the final BPM series from S1 peaks."""
@@ -437,12 +468,10 @@ def calculate_bpm_series(peaks, sample_rate, params):
     return smoothed_bpm, bpm_series.index.values
 
 
-def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, file_name,
-                 params):
+def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, file_name, params, hrv_metrics=None):
     time_axis = np.arange(len(audio_envelope)) / sample_rate
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Scatter(x=time_axis, y=audio_envelope, name="Audio Envelope", line=dict(color="#47a5c4")),
-                  secondary_y=False)
+    fig.add_trace(go.Scatter(x=time_axis, y=audio_envelope, name="Audio Envelope", line=dict(color="#47a5c4")), secondary_y=False)
 
     if 'trough_indices' in analysis_data and analysis_data['trough_indices'].size > 0:
         trough_indices = analysis_data['trough_indices']
@@ -581,6 +610,35 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
     tick_vals_sec = np.arange(0, max_time_sec + 30, 30)
     tick_text_combined = [f"{int(s)}s ({int(s // 60):02d}:{int(s % 60):02d})" for s in tick_vals_sec]
 
+    # --- HRV & Summary Annotation Box ---
+    if hrv_metrics:
+        # Format the text with line breaks for the plot
+        # Using .get(key, 'N/A') is a safe way to access dictionary keys that might be missing
+        avg_bpm_val = hrv_metrics.get('avg_bpm')
+        min_bpm_val = hrv_metrics.get('min_bpm')
+        max_bpm_val = hrv_metrics.get('max_bpm')
+        sdnn_val = hrv_metrics.get('sdnn')
+        rmssd_val = hrv_metrics.get('rmssd')
+
+        annotation_text = "<b>Analysis Summary</b><br>"
+        annotation_text += f"Avg BPM: {avg_bpm_val:.1f}<br>" if avg_bpm_val is not None else ""
+        annotation_text += f"Min/Max BPM: {min_bpm_val:.1f} / {max_bpm_val:.1f}<br>" if min_bpm_val is not None else ""
+        annotation_text += f"SDNN (short-term HRV): {sdnn_val:.1f} ms<br>" if sdnn_val is not None else ""
+        annotation_text += f"RMSSD (overall HRV): {rmssd_val:.1f} ms" if rmssd_val is not None else ""
+
+        fig.add_annotation(
+            text=annotation_text,
+            align='left',
+            showarrow=False,
+            xref='paper', # Positions the box relative to the plotting area, not the data
+            yref='paper',
+            x=0.02,       # 2% from the left edge
+            y=0.98,       # 98% from the bottom edge (i.e., in the top-left corner)
+            bordercolor='black',
+            borderwidth=1,
+            bgcolor='rgba(255, 253, 231, 0.4)' # A semi-transparent light yellow
+        )
+
     fig.update_layout(title_text=f"Heartbeat Analysis - {os.path.basename(file_name)} (v7.0)", dragmode='pan',
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                       margin=dict(t=100, b=100),
@@ -718,10 +776,19 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint):
         return
 
     smoothed_bpm, bpm_times = calculate_bpm_series(peaks, sample_rate, params)
-    output_csv_path = f"{file_name_no_ext}_bpm_analysis.csv"
-    save_bpm_to_csv(smoothed_bpm, bpm_times, output_csv_path)
+    avg_rr, sdnn, rmssd = calculate_hrv_metrics(peaks, sample_rate)
+    # Create a dictionary to hold all summary stats for the plot
+    hrv_stats_for_plot = {}
+    if not smoothed_bpm.empty:
+        hrv_stats_for_plot['avg_bpm'] = smoothed_bpm.mean()
+        hrv_stats_for_plot['min_bpm'] = smoothed_bpm.min()
+        hrv_stats_for_plot['max_bpm'] = smoothed_bpm.max()
 
-    plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, wav_file_path, params)
+    if avg_rr is not None:
+        hrv_stats_for_plot['sdnn'] = sdnn
+        hrv_stats_for_plot['rmssd'] = rmssd
+
+    plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times, sample_rate, wav_file_path, params, hrv_metrics=hrv_stats_for_plot)
 
     output_log_path = f"{file_name_no_ext}_Debug_Log.md"
     create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, analysis_data, smoothed_bpm, output_log_path, wav_file_path)
