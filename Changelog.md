@@ -173,3 +173,13 @@ This version introduces a "Strong Peak Exception" to the noise rejection logic a
 - **Refined S2 Time Window:** The dynamic time window used to identify potential S2 peaks (`s1_s2_max_interval_sec`) has been slightly widened, making the algorithm a little more generous in its search for the second heart sound.
 - **Code Refactoring:** The plotting and logging functions have been updated to correctly parse and display the new, more detailed S2 justification strings. The hover-label templates in the plot have also been unified for consistency.
 
+# Changelog: BPM Analysis Script
+## Version 1.4
+This version introduces a final set of quality-of-life improvements to the GUI and internal code structure, marking a feature-complete milestone for this development cycle.
+### ✨ New Features
+- **Clear Button in GUI:** A "Clear" button has been added to the main application window. This allows the user to easily reset the selected file and analysis parameters without needing to restart the entire application, improving workflow when analyzing multiple files.
+### 🚀 Improvements
+- **Code Organization:** The entire script has been restructured using `#%%` cell separators. This divides the code into logical blocks (e.g., Audio Conversion, Preprocessing, Core Logic, GUI Class), making it significantly easier to navigate, read, and maintain within IDEs that support cell-based execution, such as VS Code or Spyder.
+- **Analysis Engine Versioning:** The `find_heartbeat_peaks` function and all corresponding output titles (in plots and logs) now explicitly reference the analysis engine version number (e.g., v6.9). This ensures that all generated artifacts are traceable to the exact version of the algorithm that produced them.
+- **GUI Code Cleanup:** Minor code cleanup and condensation have been applied within the `BPMApp` class to improve readability and maintainability.
+

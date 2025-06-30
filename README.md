@@ -1,12 +1,11 @@
 # Heartbeat BPM Analyzer
 The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordings of heart sounds to detect heartbeats and calculate the Beats Per Minute (BPM) over time. It is designed to work with various audio file formats and provides a visual representation of the analysis.
 ## Features
-- **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
+- **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis, including a "Clear" button to reset the state.
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A) by converting them to a standard format for analysis.
 - **Stateful Beat Detection Algorithm:** Employs a sophisticated, stateful algorithm that maintains a "belief" about the heart rate to make smarter decisions.
     - **Dynamic Noise Floor:** The analysis begins by detecting local minima (troughs) and calculating a dynamic noise floor that adapts to changing noise levels throughout the recording.
-    - **Intelligent Noise Rejection:** Before attempting to pair peaks, the algorithm uses advanced heuristics to proactively identify and reject noise, including a trough-based lookahead veto.
-    - **Strong Peak Exception:** The noise rejection system has a specific exception that prevents it from discarding an exceptionally prominent peak, even if it's in a noisy segment.
+    - **Intelligent Noise Rejection:** Before attempting to pair peaks, the algorithm uses advanced heuristics to proactively identify and reject noise, including a trough-based lookahead veto and exceptions for strong or potential S2 peaks.
     - **Long-Term BPM Tracking:** The algorithm tracks a smoothed, long-term BPM. This "belief" is used to dynamically adjust pairing parameters and is updated with each beat detected.
     - **Blended Confidence Model:** A continuous confidence model evaluates how likely a pair of sound peaks is a true S1-S2 couplet, blending multiple factors based on the current long-term BPM belief.
 - **BPM Hint:** Users can provide an estimated starting BPM to give the algorithm an initial "belief" to work from.
@@ -31,13 +30,14 @@ You will also need **FFmpeg** installed and accessible in your system's PATH for
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
     ```
-    python bpm_analysis_v1.3.py
+    python bpm_analysis_v1.4.py
     ```
 4. **Use the Application:**
     - The application will attempt to automatically load a supported audio file from the same directory.
     - If no file is loaded, click **Browse** to select an audio file.
     - (Optional) Enter an estimated starting BPM in the "Starting BPM" field.
     - Click **Analyze**.
+    - Click **Clear** to reset the interface and select a new file.
 5. **View Results:**
     - An HTML plot file (e.g., `your_audio_file_bpm_plot.html`) will be saved in the same directory as the script.
     - A CSV file with the BPM data (e.g., `your_audio_file_bpm_analysis.csv`) will also be created.

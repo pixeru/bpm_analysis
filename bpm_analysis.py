@@ -62,7 +62,6 @@ def preprocess_audio(file_path, downsample_factor=50, bandpass_freqs=(20, 150), 
 
 
 # --- Core Beat Detection Logic ---
-
 def calculate_blended_confidence(deviation, bpm):
     conf_at_rest = np.interp(deviation, [0.0, 0.3, 0.6], [0.9, 0.8, 0.1])
     conf_at_exercise = np.interp(deviation, [0.1, 0.4, 0.7], [0.2, 0.9, 0.8])
@@ -139,7 +138,7 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
         current_peak_idx = all_peaks[i]
         reason = ""
 
-        # --- START: New Trough-based Lookahead Veto ---
+        # --- Trough-based Lookahead Veto ---
         if i < len(all_peaks) - 1:
             next_peak_idx = all_peaks[i+1]
             trough_search_start_idx = np.searchsorted(sorted_troughs, current_peak_idx, side='right')
@@ -160,7 +159,6 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
                         beat_debug_info[current_peak_idx] = reason
                         i += 1
                         continue
-        # --- END: New Trough-based Lookahead Veto ---
 
         # --- S2 Exception Logic ---
         is_potential_s2 = False
@@ -233,11 +231,8 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
             candidate_beats.append(s1_idx)
             beat_debug_info[s1_idx] = s1_reason
             s1_time = s1_idx / sample_rate
-
-            # --- START: Enhanced S2 Debug Info ---
             s2_justification = reason.lstrip(' | ')
             beat_debug_info[next_peak_idx] = f"S2 paired to S1 at {s1_time:.4f}s. Justification: {s2_justification}"
-            # --- END: Enhanced S2 Debug Info ---
 
             if len(candidate_beats) > 1:
                 prev_s1_idx = candidate_beats[-2]
@@ -325,7 +320,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
             hovertemplate="Noise Floor: %{y:.2f}<extra></extra>"
         ), secondary_y=False)
 
-    # --- START: Updated Peak Plotting Logic ---
+    # --- Peak Plotting Logic ---
     all_peaks_data = {
         'S1': {'indices': [], 'customdata': []},
         'S2': {'indices': [], 'customdata': []},
@@ -413,7 +408,6 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
             customdata=noise_customdata,
             hovertemplate=peak_hovertemplate
         ), secondary_y=False)
-    # --- End of Updated Logic ---
 
     if not smoothed_bpm.empty:
         fig.add_trace(go.Scatter(x=bpm_times, y=smoothed_bpm, name="Smoothed BPM",
@@ -475,7 +469,6 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
     dev_times = analysis_data.get('deviation_times', np.array([]))
     dev_values = analysis_data.get('deviation_series', np.array([]))
     dev_series = pd.Series(dev_values, index=dev_times)
-
     loggable_events = []
 
     for p in all_raw_peaks:
@@ -526,7 +519,6 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
             if event['type'] == 'Peak':
                 reason = event['reason']
                 status_line = ""
-                # --- START: Updated Log Formatting ---
                 # This logic now handles S1, S2, and Noise peaks uniformly.
                 if '. ' in reason:
                     # Check for the detailed S2 format first
@@ -542,7 +534,6 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
                         status_line = f"**{status}.**\n- {details}"
                 else:
                     status_line = f"**{reason}**"
-                # --- END: Updated Log Formatting ---
 
                 log_file.write(f"{status_line}\n")
                 log_file.write(f"**Audio Envelope**: `{envelope_val:.2f}`\n")
@@ -582,7 +573,6 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint):
         return
 
     smoothed_bpm, bpm_times = calculate_bpm_series(peaks, sample_rate, params['smoothing_window_sec'])
-
     output_csv_path = f"{file_name_no_ext}_bpm_analysis.csv"
     save_bpm_to_csv(smoothed_bpm, bpm_times, output_csv_path)
     print(f"BPM data saved to {output_csv_path}")
