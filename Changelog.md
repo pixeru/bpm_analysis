@@ -166,3 +166,16 @@ This version represents a significant architectural improvement to the core beat
 - **Increased BPM Range:** The default `max_bpm` parameter in the application has been raised from 220 to 270 to reflect the enhanced capability of the new algorithm to handle very high heart rates.
 - **Algorithm Refinement:** A minor tweak was made to the fallback calculation within the "Beat Rescue" logic.>)
 
+# Changelog: BPM Analysis Script
+## Version 0.6
+This version introduces a fundamental change in the beat detection philosophy, moving from a single complex function to a clearer, multi-stage "Relax and Refine" strategy. This makes the algorithm more robust and easier to debug.
+### ✨ New Features
+- **"Relax and Refine" Peak Detection Strategy:** The core `find_heartbeat_peaks` function was entirely re-architected into a sequential, four-step process:
+    1. **Broad Peak Detection:** The algorithm now starts with a very "relaxed" initial peak detection phase. It uses minimal distance and prominence constraints specifically to capture _all_ potential sound events, including both the primary (S1) and secondary (S2) heart sounds.
+    2. **Logical Beat Grouping:** The script then processes the rich list of raw peaks from the first step. It logically groups them into beats by identifying plausible S1-S2 pairs based on timing. This is a significant change from previous versions which attempted to find only S1 peaks from the start.
+    3. **Beat Rescue:** The successful "beat rescue" logic from previous versions is retained. It now operates on the more reliable list of candidate beats from the grouping step to find any beats that were missed in noisy sections.
+    4. **Final BPM Filtering:** The final, strict filter that ensures the interval between beats is within a physiologically plausible BPM range is kept as the last step to clean up any remaining anomalies.
+### 🚀 Improvements
+- **Algorithmic Clarity:** By separating the detection, grouping, and refining steps, the code's logic is now much clearer and more maintainable.
+- **Robustness:** The new approach is less likely to miss S2 sounds and is better able to distinguish them from noise, leading to a more accurate set of candidate beats for the subsequent refining steps.
+
