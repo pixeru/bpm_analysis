@@ -404,3 +404,21 @@ This major version introduces a significant user interface upgrade with live par
 - **Robustness:** The logic for passing parameters from the GUI to the analysis thread has been made more robust to handle the new live editing feature.
 - **Code Clarity:** The use of helper functions within the `AnalysisPipeline` class (e.g., `_run_stage_1_estimation`, `_run_stage_3_main_analysis`) makes the sequence of the analysis pipeline much clearer and easier to follow.
 
+# Changelog: BPM Analysis Script
+## Version 2.9
+This version introduces a significant architectural refactoring by decoupling the analysis process from file I/O operations. It also adds a key usability feature to the GUI for saving results.
+### ✨ New Features
+- **"Save All Results" Button & Workflow:**
+    - A new **"Save All Results"** button has been added to the GUI. This button becomes active after an analysis is successfully completed.
+    - It allows the user to re-save all output files (HTML Plot, Markdown Summary, and Markdown Log) for the most recent analysis to a new location or with a new name, without needing to run the entire computationally expensive process again.
+    - When clicked, it opens a "Save As" dialog asking the user to provide a base file name for the set of output files.
+### 🚀 Improvements & Refactoring
+- **Decoupled Analysis and Saving:**
+    - The main `analyze_wav_file` function has been refactored to be a pure computation function. It no longer saves any files directly and instead returns a dictionary containing all analysis results.
+    - The results of the last completed analysis are now stored in memory within the `BPMApp` instance.
+- **Consolidated Output Function:**
+    - A new `save_all_outputs` function has been created to handle all file output operations.
+    - The logic from the previous `plot_results`, `save_analysis_summary`, and `create_chronological_log_file` functions has been consolidated into this single, unified function.
+    - This function is now called exclusively by the "Save All Results" button. This change improves code organization and reduces redundancy.
+- **Configuration:** A new `File Output Settings` section has been added to the `DEFAULT_PARAMS` dictionary to centralize the suffixes for all output files.
+

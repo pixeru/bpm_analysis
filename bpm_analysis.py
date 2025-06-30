@@ -95,8 +95,6 @@ DEFAULT_PARAMS = {
     # Increase: Requires stronger evidence for pairing. Results in fewer S1-S2 pairs and more "Lone S1" beats.
     # Decrease: Easier to form S1-S2 pairs. Risks incorrectly pairing a true S1 with a nearby noise peak.
 
-    "s2_amplitude_rejection_factor": 1.5, # If S2 candidate is 1.5x (50%) larger than S1, reject pairing.
-
     "trough_noise_multiplier": 3.0,
     # A peak is considered "noisy" if the trough preceding it has an amplitude N-times higher than the dynamic noise floor.
     # Increase: Requires the trough to be much louder to be considered noisy. Less likely to classify peaks as noise.
@@ -115,8 +113,19 @@ DEFAULT_PARAMS = {
     "penalty_waiver_strength_ratio": 4.0, # S1 peak must be this many times > noise floor to allow a penalty waiver.
     "penalty_waiver_max_s2_s1_ratio": 2.5, # Even if waived, penalty still applies if S2 is more than N times larger than S1.
 
+    # --- Parameters for the Dynamic Contractility Model ---
+    "contractility_bpm_low": 120.0, # Below this BPM, expect S2 can be louder than S1.
+    "contractility_bpm_high": 140.0, # Above this BPM, strongly expect S1 to be louder than S2.
+
+    # Maximum S2/S1 amplitude ratio expected at different BPMs
+    "s2_s1_ratio_low_bpm": 1.5,  # Lenient: Allows S2 to be up to 1.5x louder than S1 at low BPM.
+    "s2_s1_ratio_high_bpm": 1.1, # Strict: Expects S2 to be no more than 1.1x louder than S1 at high BPM.
+
+    # Confidence adjustment factor if the S2/S1 ratio is exceeded
+    "confidence_adjustment_low_bpm": 0.8, # Gentle adjustment (20% reduction) if exceeded at low BPM.
+    "confidence_adjustment_high_bpm": 0.4, # Harsh adjustment (60% reduction) if exceeded at high BPM.
+
     # Dynamic HRV-Based Outlier Rejection Parameters
-    # =================================================================================
     "rr_interval_max_decrease_pct": 0.45, # A new RR interval can't be more than 45% shorter than the previous one.
     "rr_interval_max_increase_pct": 0.70, # A new RR interval can't be more than 70% longer than the previous one.
 
@@ -339,7 +348,6 @@ def calculate_preceding_trough_noise(current_peak_idx, sorted_troughs, dynamic_n
             return 0.8  # High noise confidence
     return 0.0 # No noise detected
 
-# <--- NEW REFACTORED FUNCTION ---
 def update_long_term_bpm(new_rr_sec, current_long_term_bpm, params):
     """
     Updates the long-term BPM belief based on a new R-R interval.
@@ -362,36 +370,47 @@ def update_long_term_bpm(new_rr_sec, current_long_term_bpm, params):
     return max(params['min_bpm'], min(new_bpm, params['max_bpm']))
 
 
-def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelope, dynamic_noise_floor, params):
+def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelope, dynamic_noise_floor, long_term_bpm, params):
     """
-    Evaluates the confidence of an S1-S2 pair, applying boosts and penalties.
-    Returns: confidence score, a reason string, and a flag indicating if a penalty was applied.
+    Evaluates the confidence of an S1-S2 pair using a dynamic, BPM-dependent model
+    to represent myocardial contractility.
     """
     s1_amp = audio_envelope[s1_idx]
     s2_amp = audio_envelope[s2_idx]
     reason = ""
     penalty_applied = False
 
-    # Calculate the base confidence score
-    confidence = calculate_blended_confidence(smoothed_deviation, 0) # bpm arg is unused
+    # Base confidence from amplitude deviation
+    confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
     reason += f"| Base Pairing Conf: {confidence:.2f} "
 
-    # Get rejection and boost ratios from the centralized parameters
-    rejection_factor = params.get('s2_amplitude_rejection_factor', 1.5)
-    s1_s2_boost_ratio = params.get('s1_s2_boost_ratio', 1.2)
+    # --- Dynamic Contractility Logic ---
+    # Define the BPM range for our model
+    bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
 
-    if s2_amp > (s1_amp * rejection_factor):
-        # PENALTY: The S2 candidate is much larger than the S1 candidate.
-        penalty_factor = 0.5
-        confidence *= penalty_factor
-        penalty_applied = True  # Set flag for more detailed debugging later
-        reason += f"| PENALIZED (S2 amp {s2_amp:.0f} > {rejection_factor:.1f}x S1 amp {s1_amp:.0f}) "
+    # Define the expected S2/S1 ratio at those BPM points
+    ratio_points = [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']]
 
-    elif s1_amp > (s2_amp * s1_s2_boost_ratio):
-        # BOOST: The S1 candidate is clearly larger than the S2, as expected.
-        confidence_boost = 0.15
-        confidence = min(1.0, confidence + confidence_boost)
-        reason += f"| BOOSTED (S1 amp {s1_amp:.0f} > {s1_s2_boost_ratio:.1f}x S2 amp {s2_amp:.0f}) "
+    # Define the confidence adjustment factor at those BPM points
+    adjustment_points = [params['confidence_adjustment_low_bpm'], params['confidence_adjustment_high_bpm']]
+
+    # Use linear interpolation to get the rules for the CURRENT long_term_bpm
+    # This creates the smooth sliding scale for the 100-130 BPM transition zone
+    max_expected_s2_s1_ratio = np.interp(long_term_bpm, bpm_points, ratio_points)
+    adjustment_factor = np.interp(long_term_bpm, bpm_points, adjustment_points)
+
+    # Check if the observed S2/S1 ratio exceeds our dynamic expectation
+    current_s2_s1_ratio = s2_amp / (s1_amp + 1e-9)
+    if current_s2_s1_ratio > max_expected_s2_s1_ratio:
+        confidence *= adjustment_factor
+        penalty_applied = True
+        reason += (f"| ADJUSTED (S2/S1 Ratio {current_s2_s1_ratio:.1f}x "
+                   f"> Expected {max_expected_s2_s1_ratio:.1f}x at {long_term_bpm:.0f} BPM) ")
+
+    # --- Standard Boost Logic (when S1 > S2) ---
+    elif s1_amp > (s2_amp * params.get('s1_s2_boost_ratio', 1.2)):
+        confidence = min(1.0, confidence + 0.15)
+        reason += f"| BOOSTED (S1 amp {s1_amp:.0f} > 1.2x S2 amp {s2_amp:.0f}) "
 
     return confidence, reason, penalty_applied
 
@@ -481,7 +500,16 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
         else:
             next_peak_idx = all_peaks[i + 1]
             interval_sec = (next_peak_idx - current_peak_idx) / sample_rate
-            pairing_confidence, pair_reason, penalty_applied = evaluate_pairing_confidence(current_peak_idx, next_peak_idx, smoothed_dev_series[i], audio_envelope, dynamic_noise_floor, params)
+
+            pairing_confidence, pair_reason, penalty_applied = evaluate_pairing_confidence(
+                current_peak_idx,
+                next_peak_idx,
+                smoothed_dev_series[i],
+                audio_envelope,
+                dynamic_noise_floor,
+                long_term_bpm,  # Pass the current BPM belief
+                params
+            )
             reason += pair_reason
             is_paired = interval_sec <= s1_s2_max_interval and pairing_confidence >= params['pairing_confidence_threshold']
 
