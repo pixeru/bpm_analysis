@@ -155,9 +155,16 @@ DEFAULT_PARAMS = {
     "rr_interval_max_decrease_pct": 0.45, # A new RR interval can't be more than 45% shorter than the previous one.
     "rr_interval_max_increase_pct": 0.70, # A new RR interval can't be more than 70% longer than the previous one.
 
+    # --- Boost S1-S2 pairing confidence ---
     "enable_bpm_boost": True, # Allows disabling the BPM spike prevention boost for the high-confidence pass
     "s1_s2_boost_ratio": 1.2, # If the S1 amplitude is more than 1.2 times the S2 amplitude
-    "s1_s2_boost_amount": 0.23, # then add the boost amount to the pairing confidence
+    # The number of recent beats to look at to determine rhythm stability.
+    "boost_history_window": 20,
+    # The minimum confidence boost to apply (when pairing success is 0%).
+    "boost_amount_min": 0.10,
+    # The maximum confidence boost to apply (when pairing success is 100%).
+    "boost_amount_max": 0.35,
+
     "trough_rejection_multiplier": 4.0, # For trough sanitization, a trough N-times higher than the draft noise floor is rejected.
     "rr_correction_threshold_pct": 0.60, # For post-correction pass, An RR interval shorter than N% of the median is flagged for correction.
 
@@ -427,7 +434,7 @@ def update_long_term_bpm(new_rr_sec, current_long_term_bpm, params):
     return max(params['min_bpm'], min(new_bpm, params['max_bpm']))
 
 def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelope, dynamic_noise_floor,
-                              long_term_bpm, params, sample_rate,
+                              long_term_bpm, dynamic_boost_amount, params, sample_rate,
                               peak_bpm_time_sec, recovery_end_time_sec):
     """
     Evaluates the confidence of an S1-S2 pair using a state-aware, BPM-dependent model
@@ -488,8 +495,9 @@ def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelo
         )
     # Standard Boost Logic (when S1 > S2)
     elif s1_amp > (s2_amp * params.get('s1_s2_boost_ratio', 1.2)):
-        confidence = min(1.0, confidence + params.get('s1_s2_boost_amount', 0.15))
-        reason += f"| BOOSTED to {confidence:.2f}, (S1 amp {s1_amp:.0f} > 1.2x S2 amp {s2_amp:.0f}) "
+        # Use the new dynamic_boost_amount instead of a fixed value
+        confidence = min(1.0, confidence + dynamic_boost_amount)
+        reason += f"| BOOSTED to {confidence:.2f} (S1 > S2, Dynamic Boost: {dynamic_boost_amount:.2f}) "
 
     return confidence, reason, penalty_applied
 
@@ -549,6 +557,24 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
     sorted_troughs = sorted(trough_indices)
     i = 0
     while i < len(all_peaks):
+        # --- DYNAMIC BOOST CALCULATION ---
+        pairing_ratio = 0.0
+        history_window = params.get('boost_history_window', 20)
+
+        # Check if we are in the "startup phase" (not enough history yet)
+        if len(candidate_beats) < history_window:
+            # Use the default high startup boost
+            dynamic_boost_amount = params.get('boost_startup_amount', 0.25)
+        else:
+            recent_beats = candidate_beats[-history_window:]
+            paired_count = sum(1 for beat_idx in recent_beats if "S1 (Paired)" in beat_debug_info.get(beat_idx, ""))
+            pairing_ratio = paired_count / history_window
+
+            # Interpolate the boost amount based on the pairing ratio
+            min_boost = params.get('boost_amount_min', 0.05)
+            max_boost = params.get('boost_amount_max', 0.25)
+            dynamic_boost_amount = np.interp(pairing_ratio, [0.0, 1.0], [min_boost, max_boost])
+
         current_peak_idx = all_peaks[i]
         reason = ""
 
@@ -595,6 +621,7 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                 audio_envelope,
                 dynamic_noise_floor,
                 long_term_bpm,
+                dynamic_boost_amount,
                 params,
                 sample_rate,
                 peak_bpm_time_sec,

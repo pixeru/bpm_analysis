@@ -1,13 +1,14 @@
-# Heartbeat BPM Analyzer v3.3
+# Heartbeat BPM Analyzer v3.4
 The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordings of heart sounds to detect heartbeats and calculate the Beats Per Minute (BPM) over time. It is designed to work with various audio file formats and provides a visual representation of the analysis, with a focus on robust, non-blocking performance.
 ## Features
 - **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A, MOV) by converting them to a standard format for analysis.
 - **Intelligent Preprocessing:** The audio processing pipeline filters the audio at its original sample rate _before_ downsampling to preserve maximum signal fidelity and prevent aliasing errors.
 - **Dynamic and State-Aware Beat Detection Algorithm:** Employs a sophisticated, stateful algorithm that maintains a "belief" about the heart rate to make smarter decisions.
-    - **Peak Strength Deviation (New in v3.3):** The algorithm no longer compares raw peak amplitudes. Instead, it calculates the "strength" of each peak relative to the dynamic noise floor before comparing them. This provides a more accurate S1/S2 pairing confidence, as it is not skewed by overall volume changes in the recording.
-    - **Smarter Post-Exertion Logic (New in v3.3):** The "post-exertion recovery" state is now more nuanced. Instead of simply applying high-BPM rules, it uses an "effective BPM" for its logic, ensuring that as the heart rate drops during recovery, the rules do not become overly lenient.
-    - **Dynamic Confidence Curve:** The S1/S2 pairing logic uses a dynamic confidence model. It smoothly interpolates between two physiological models—one for resting heart rates and one for high heart rates.
+    - **Dynamic Rhythm-Based Confidence Boost (New in v3.4):** The confidence boost for S1/S2 pairing is no longer a fixed value. It now dynamically adapts based on the recent history of successful beat pairings. When the rhythm is stable and clear, the boost is stronger to confidently pair beats. In noisy or arrhythmic sections, the boost is weaker to avoid incorrect pairings.
+    - **Peak Strength Deviation:** The algorithm compares the "strength" of each peak (amplitude relative to the dynamic noise floor) instead of raw amplitude, making the analysis more robust against volume changes.
+    - **Smarter Post-Exertion Logic:** The "post-exertion recovery" state is now more nuanced, using an "effective BPM" for its logic to ensure rules adapt correctly as the heart rate drops.
+    - **Dynamic Confidence Curve:** The S1/S2 pairing logic uses a dynamic confidence model, smoothly interpolating between physiological models for resting and high heart rates.
 - **Multi-Stage Analysis Pipeline:** The core of the application is a multi-stage analysis pipeline designed for maximum accuracy:
     1. **High-Confidence Preliminary Pass:** The analysis starts by finding only the most obvious "anchor beats."
     2. **Peak BPM & Recovery Phase Detection:** It uses these anchor beats to find the point of peak exertion and defines a subsequent "post-exertion recovery phase."
@@ -44,7 +45,7 @@ You will also need **FFmpeg** installed and accessible in your system's PATH for
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
     ```
-    python bpm_analysis_v3.3.py
+    python bpm_analysis_v3.4.py
     ```
 4. **Use the Application:**
     - The application will attempt to automatically load a supported audio file from the same directory.

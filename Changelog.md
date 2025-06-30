@@ -470,3 +470,15 @@ This version enhances the physiological modeling of the analysis pipeline, impro
 - **Smarter Post-Exertion Logic:** The "post-exertion recovery" state is now more nuanced. It uses an "effective BPM" that prevents the pairing rules from becoming too lenient as the heart rate begins to drop, improving accuracy during the transition from high exertion to recovery.
 - **Configurable S1/S2 Confidence Boost:** The confidence boost applied when a clear S1 is much louder than S2 is now tunable via new `s1_s2_boost_ratio` and `s1_s2_boost_amount` parameters.
 - **Tuning:** The confidence curve for high BPMs (`confidence_curve_high_bpm`) has been adjusted to better reflect the new peak strength calculation.
+
+# Changelog: BPM Analysis Script
+## Version 3.4
+This update introduces a dynamic confidence boost system that adapts to the stability of the heart rhythm, further improving the accuracy and robustness of the beat-pairing logic.
+### ✨ New Features
+- **Dynamic Rhythm-Based Confidence Boost:** The confidence boost applied to likely S1/S2 pairs is no longer a fixed value. It now intelligently adapts based on the recent history of successfully paired beats.
+    - When the rhythm is stable (high pairing success), the boost is stronger, promoting confident pairing.
+    - In noisy or arrhythmic sections (low pairing success), the boost is weaker to prevent the algorithm from forcing incorrect pairs.
+### 🚀 Improvements & Refactoring
+- **Adaptive Logic:** The `find_heartbeat_peaks` function now calculates a `dynamic_boost_amount` at each step, which is then passed to the `evaluate_pairing_confidence` function.
+- **New Configuration Parameters:** Added `boost_history_window`, `boost_amount_min`, and `boost_amount_max` to `DEFAULT_PARAMS` to provide fine-grained control over the new dynamic boost feature. The previous static `s1_s2_boost_amount` parameter has been removed.
+
