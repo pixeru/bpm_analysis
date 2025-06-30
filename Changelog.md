@@ -447,3 +447,17 @@ This version refines the core pairing logic by introducing a dynamic confidence 
 - **New Configuration Parameters:** Added `confidence_deviation_points`, `confidence_curve_low_bpm`, and `confidence_curve_high_bpm` to `DEFAULT_PARAMS` to allow fine-tuning of the new dynamic confidence model.
 - **Simplified Logic:** The logic in `evaluate_pairing_confidence` is now simpler as the complex, BPM-aware calculations have been centralized into the new `calculate_blended_confidence` function.
 
+# Changelog: BPM Analysis Script
+## Version 3.2
+This version significantly enhances the reliability of beat detection by introducing a robust, multi-point validation system for "Lone S1" beats, making the algorithm less susceptible to noise. Debugging and transparency have also been improved with more detailed logging.
+### ✨ New Features
+- **Advanced Lone S1 Validation:** The logic for classifying a single, unpaired peak as a heartbeat (`Lone S1`) has been completely overhauled. A peak must now pass a rigorous three-point check to be accepted:
+    1. **Rhythmic Plausibility:** It must have a rhythmically plausible interval from the previous accepted beat.
+    2. **Amplitude Strength:** Its amplitude (relative to the noise floor) must be a significant fraction of the previous beat's amplitude. This prevents small noise peaks from being classified as beats.
+    3. **Forward-Looking Spike Prevention:** The algorithm checks if accepting the peak would create an immediate, implausibly sharp spike in the calculated BPM. This prevents the misinterpretation of closely spaced noise as a rapid heart rate.
+### 🚀 Improvements & Refactoring
+- **Contextual Correction Disabled by Default:** The new Lone S1 validation logic is more robust and accurate, superseding the need for the older, iterative "Contextual Correction Pass," which is now disabled by default (`enable_correction_pass`: False).
+- **Richer Debug Logs:** The debug outputs have been made more transparent and informative. The logs now include detailed, step-by-step reasons for why a peak was classified as a pair, a Lone S1, or noise, often including the specific values and thresholds used in the calculation.
+- **New Configuration Parameters:** Added `lone_s1_min_strength_ratio` and `lone_s1_forward_check_pct` to `DEFAULT_PARAMS` to allow fine-tuning of the new Lone S1 validation logic.
+- **Bug Fix:** Resolved an issue in the debug log generation where duplicate timestamps in the BPM series could cause an error.
+
