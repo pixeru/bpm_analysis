@@ -3,15 +3,14 @@ The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordin
 ## Features
 - **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A) by converting them to a standard format for analysis.
-- **Advanced Peak Detection:** Employs a sophisticated, multi-step algorithm to accurately identify heartbeats (peaks) in the audio signal:
-    - **Fully Dynamic S1-S2 Pairing:** The core of the algorithm is its ability to differentiate between the two main heart sounds (S1 and S2). It uses a fully adaptive threshold that continuously updates based on a rolling window of the most recent beat-to-beat intervals. This makes the analysis highly responsive to changes in heart rate throughout the recording.
-    - **Beat Rescue Logic:** Re-analyzes sections of the audio where a beat might have been missed due to noise or a weak signal.
+- **Advanced Peak Detection:** Employs a sophisticated, multi-step algorithm to accurately identify heartbeats:
+    - **Confidence Scoring:** The algorithm first performs a preliminary analysis to calculate a "confidence score" for every pair of adjacent sound peaks. This score is based on the normalized amplitude deviation between the peaks, quantifying how likely they are to be a distinct S1-S2 pair.
+    - **Confidence-Based Grouping:** It then uses this confidence score, combined with a dynamic time interval, to logically group the raw sound peaks into distinct heartbeats. A pair is only formed if the timing is correct _and_ the confidence is high.
 - **BPM Hint:** Users can provide an estimated starting BPM to guide the algorithm, improving accuracy for difficult recordings.
-- **Interactive Visualization:** Generates an interactive HTML plot showing:
-    - The audio signal's envelope.
-    - All raw peaks detected.
-    - The final, filtered heartbeats.
-    - A smoothed BPM trendline.
+- **Interactive Visualization & Debugging:** Generates an interactive HTML plot showing:
+    - The audio signal's envelope and final detected heartbeats.
+    - **Advanced Hover-Labels:** Hover over any raw or final peak to see a detailed explanation of why it was kept, discarded, or paired.
+    - **Debug Traces:** Optional, hidden traces for the raw sound peaks, the normalized deviation, and the pairing confidence scores can be enabled from the legend for in-depth analysis.
 - **Data Export:** Saves the calculated BPM data to a CSV file for further analysis.
 ## Dependencies
 To run this script, you will need Python and the following libraries:
@@ -30,7 +29,7 @@ You will also need **FFmpeg** installed and accessible in your system's PATH for
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
     ```
-    python bpm_analysis_v0.5.py
+    python bpm_analysis_v0.7.py
     ```
 4. **Use the Application:**
     - The application will attempt to automatically load a supported audio file from the same directory.

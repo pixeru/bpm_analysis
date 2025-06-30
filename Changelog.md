@@ -179,3 +179,16 @@ This version introduces a fundamental change in the beat detection philosophy, m
 - **Algorithmic Clarity:** By separating the detection, grouping, and refining steps, the code's logic is now much clearer and more maintainable.
 - **Robustness:** The new approach is less likely to miss S2 sounds and is better able to distinguish them from noise, leading to a more accurate set of candidate beats for the subsequent refining steps.
 
+# Changelog: BPM Analysis Script
+## Version 0.7
+This version evolves the beat detection strategy by introducing a new "confidence score" metric. This makes the beat grouping logic more intelligent and adds powerful new debugging capabilities to the visualization.
+### ✨ New Features
+- **Confidence-Based S1-S2 Pairing:**
+    - A new preliminary analysis step has been added. It calculates the **normalized amplitude deviation** between all adjacent raw peaks to generate a "confidence score." This score quantifies how likely a pair of peaks is a true S1-S2 couplet versus random noise.
+    - The beat grouping logic now uses a dual-criteria system: a pair of peaks is only grouped into a single heartbeat if both the **time interval** is appropriate AND the **confidence score** is above a set threshold.
+- **Advanced Debugging in Plots:**
+    - **Detailed Hover Information:** The interactive plot now has rich tooltips. Hovering over any peak (both raw and final) displays its status and the reasoning behind the algorithm's decision (e.g., "S1 (Kept)", "S2 (Discarded)", "Lone S1 (Confidence too low)").
+    - **New Data Traces:** The plot includes new, initially hidden traces for the "Normalized Deviation" and "Pairing Confidence" scores, allowing for in-depth visual debugging of the algorithm's performance.
+### ♻️ Refactoring
+- **Algorithm Simplification (for Debugging):** To isolate and evaluate the effectiveness of the new confidence-based system, the "Beat Rescue" and "Final BPM Filtering" steps (Steps 4 and 5 from v0.6) have been temporarily removed from the `find_heartbeat_peaks` function.
+
