@@ -183,3 +183,23 @@ This version introduces a final set of quality-of-life improvements to the GUI a
 - **Analysis Engine Versioning:** The `find_heartbeat_peaks` function and all corresponding output titles (in plots and logs) now explicitly reference the analysis engine version number (e.g., v6.9). This ensures that all generated artifacts are traceable to the exact version of the algorithm that produced them.
 - **GUI Code Cleanup:** Minor code cleanup and condensation have been applied within the `BPMApp` class to improve readability and maintainability.
 
+# Changelog: BPM Analysis Script
+## Version 1.5
+This is a major architectural update focused on improving application stability, responsiveness, and maintainability. The core analysis logic is now decoupled from the user interface, and the project structure has been professionalized.
+### ✨ New Features
+- **Thread-Safe, Non-Blocking GUI:**
+    - The entire analysis pipeline (file conversion, preprocessing, and beat detection) now runs on a separate background thread.
+    - This prevents the graphical user interface from freezing or becoming unresponsive, even when processing very large audio files.
+    - A `queue` is used to safely pass status updates, completion signals, and error messages from the background thread to the GUI for display.
+- **Centralized Parameter Configuration:**
+    - All tunable parameters for the analysis algorithm have been extracted and consolidated into a single `DEFAULT_PARAMS` dictionary at the top of the script.
+    - This makes it significantly easier to experiment with and fine-tune the algorithm's behavior without having to search for values scattered throughout the code.
+- **Professional Logging:**
+    - All `print()` statements used for debugging have been replaced with Python's standard `logging` module.
+    - This provides a more professional and structured logging output, including timestamps and log levels (e.g., INFO, WARNING, ERROR).
+### 🚀 Improvements
+- **Code Refactoring & Maintainability:**
+    - The core `find_heartbeat_peaks` function has been refactored. The initial peak finding and noise floor calculation steps have been moved into their own dedicated helper functions (`_find_raw_peaks` and `_calculate_dynamic_noise_floor`), improving clarity and modularity.
+    - The main analysis functions now accept the `params` dictionary, eliminating the need to pass numerous individual arguments.
+- **GUI Status Updates:** The GUI status bar is now more informative, providing real-time updates as the analysis progresses through different stages (e.g., "Converting file...", "Processing and analyzing...").
+
