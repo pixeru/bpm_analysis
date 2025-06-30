@@ -4,13 +4,15 @@ The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordin
 - **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A) by converting them to a standard format for analysis.
 - **Stateful Beat Detection Algorithm:** Employs a sophisticated, stateful algorithm that maintains a "belief" about the heart rate to make smarter decisions.
-    - **Noise Floor Estimation:** The analysis begins by detecting local minima (troughs) in the audio signal to establish an estimated noise floor, helping to differentiate true peaks from background noise.
-    - **Long-Term BPM Tracking:** The algorithm tracks a smoothed, long-term BPM throughout the analysis. This "belief" is used to dynamically adjust parameters and is updated with each beat detected.
+    - **Dynamic Noise Floor:** The analysis begins by detecting local minima (troughs) and calculating a dynamic noise floor that adapts to changing noise levels throughout the recording. This is used to set a dynamic height threshold for peak detection.
+    - **Intelligent Noise Rejection:** Before attempting to pair peaks, the algorithm uses advanced heuristics to proactively identify and reject noise:
+        - **Lookahead Veto:** A peak is rejected if the immediately subsequent peak is substantially larger, preventing misclassification.
+        - **Trough-based Confidence:** A peak is rejected if its preceding trough is significantly elevated above the local noise floor, indicating a noisy segment.
+    - **Long-Term BPM Tracking:** The algorithm tracks a smoothed, long-term BPM. This "belief" is used to dynamically adjust pairing parameters and is updated with each beat detected.
     - **Blended Confidence Model:** A continuous confidence model evaluates how likely a pair of sound peaks is a true S1-S2 couplet, blending multiple factors based on the current long-term BPM belief.
-    - **Advanced Heuristics:** The system uses intelligent overrides to improve accuracy, including a **Lookahead Veto** that prevents a strong, upcoming beat from being incorrectly paired as a secondary sound.
 - **BPM Hint:** Users can provide an estimated starting BPM to give the algorithm an initial "belief" to work from.
 - **Comprehensive Visualization & Debugging:** Generates multiple outputs for in-depth analysis:
-    - **Interactive HTML Plot:** A rich, interactive plot showing the audio envelope, detected troughs, noise floor, final heartbeats, and various debug traces like the "Long-Term BPM (Belief)."
+    - **Interactive HTML Plot:** A rich, interactive plot showing the audio envelope, dynamic noise floor, and all detected peaks, which are color-coded and symbol-coded by their final classification (S1, S2, or Noise).
     - **Chronological Debug Log:** A detailed, time-sorted log is printed to the console and saved as a separate Markdown file (`_Debug_Log.md`), documenting every event and decision made by the algorithm.
 - **Data Export:** Saves the calculated BPM data to a CSV file for further analysis.
 ## Dependencies
@@ -30,7 +32,7 @@ You will also need **FFmpeg** installed and accessible in your system's PATH for
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
     ```
-    python bpm_analysis_v0.9.py
+    python bpm_analysis_v1.0.py
     ```
 4. **Use the Application:**
     - The application will attempt to automatically load a supported audio file from the same directory.

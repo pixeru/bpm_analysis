@@ -59,7 +59,7 @@ def preprocess_audio(file_path, downsample_factor=50, bandpass_freqs=(20, 150), 
     audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
     return audio_envelope, new_sample_rate
 
-# --- Core Beat Detection Logic v6.5 ---
+# --- Core Beat Detection Logic ---
 
 def calculate_blended_confidence(deviation, bpm):
     """v6.0: Replaces the piecewise function with a continuous, blended model."""
@@ -71,30 +71,43 @@ def calculate_blended_confidence(deviation, bpm):
 
 def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, start_bpm_hint=None, verbose_debug=False):
     """
-    v6.5: Adds a "Lookahead Veto" to prevent strong S1 peaks from being misclassified as S2.
+    v6.8: Implements "Lookahead Amplitude Veto" and trough-based "Noise Confidence" score
+          to intelligently reject noise peaks misclassified as Lone S1s.
     """
     min_peak_distance_samples = int(0.05 * sample_rate)
+    quantile_value = 0.20
+    noise_window_sec = 10
 
-    # --- UPDATED: Robust Trough Detection ---
+    # --- Dynamic Noise Floor Calculation ---
     trough_prominence_threshold = np.quantile(audio_envelope, 0.05)
     trough_indices, _ = find_peaks(
         -audio_envelope,
         distance=min_peak_distance_samples,
         prominence=trough_prominence_threshold
-        # REMOVED the 'height' parameter to make detection less strict
     )
-    noise_floor = np.nan
-    if len(trough_indices) > 0:
-        trough_amplitudes = audio_envelope[trough_indices]
-        noise_floor = np.quantile(trough_amplitudes, 0.25)
-        print(f"DEBUG: Identified {len(trough_indices)} robust troughs. Calculated Noise Floor: {noise_floor:.2f}")
+    trough_indices_map = {idx: audio_envelope[idx] for idx in trough_indices}
+
+
+    if len(trough_indices) > 2:
+        print(f"DEBUG: Found {len(trough_indices)} troughs. Calculating dynamic floor with {noise_window_sec}s window and {quantile_value*100:.0f}th percentile.")
+        trough_series = pd.Series(trough_indices_map)
+        dense_troughs_for_rolling = trough_series.reindex(np.arange(len(audio_envelope)))
+        noise_window_samples = int(noise_window_sec * sample_rate)
+        dynamic_noise_floor = dense_troughs_for_rolling.rolling(window=noise_window_samples, min_periods=3, center=True).quantile(quantile_value)
+        dynamic_noise_floor = dynamic_noise_floor.bfill().ffill()
+        if dynamic_noise_floor.isnull().all():
+            fallback_value = np.quantile(audio_envelope[trough_indices], quantile_value) if len(trough_indices) > 0 else np.quantile(audio_envelope, 0.1)
+            dynamic_noise_floor = pd.Series(fallback_value, index=np.arange(len(audio_envelope)))
     else:
-        print("DEBUG: No significant troughs found to calculate noise floor.")
-    # --- END UPDATED ---
+        print(f"DEBUG: Not enough troughs found. Using static fallback for noise floor.")
+        fallback_value = np.quantile(audio_envelope, quantile_value)
+        dynamic_noise_floor = pd.Series(fallback_value, index=np.arange(len(audio_envelope)))
+
+    height_threshold = dynamic_noise_floor.values
+    # --- END Noise Floor ---
 
     # --- Peak Detection ---
     prominence_threshold = np.quantile(audio_envelope, 0.1)
-    height_threshold = np.mean(audio_envelope) * 0.1
     all_peaks, _ = find_peaks(
         audio_envelope,
         distance=min_peak_distance_samples,
@@ -102,13 +115,10 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
         height=height_threshold
     )
 
-    if verbose_debug: print(f"\n--- VERBOSE DEBUG: find_heartbeat_peaks (v6.5) ---")
-    print(f"DEBUG: Found {len(all_peaks)} raw peaks.")
+    if verbose_debug: print(f"\n--- VERBOSE DEBUG: find_heartbeat_peaks (v6.8) ---")
+    print(f"DEBUG: Found {len(all_peaks)} raw peaks using dynamic height threshold.")
     if len(all_peaks) < 2:
-        analysis_data = {
-            "beat_debug_info": {}, "deviation_times": np.array([]), "deviation_series": np.array([]),
-            "long_term_bpm_series": pd.Series(dtype=np.float64), 'trough_indices': trough_indices, 'noise_floor': noise_floor
-        }
+        analysis_data = { "beat_debug_info": {}, "deviation_times": np.array([]), "deviation_series": np.array([]), "long_term_bpm_series": pd.Series(dtype=np.float64), 'trough_indices': trough_indices, 'dynamic_noise_floor_series': dynamic_noise_floor }
         return all_peaks, all_peaks, analysis_data
 
     peak_amplitudes = audio_envelope[all_peaks]
@@ -124,50 +134,79 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
     beat_debug_info = {}
     long_term_bpm_history = []
 
-    print("DEBUG: Step 3 (Grouping) - Applying pattern matching and confidence-weighted updates with Lookahead Veto.")
-    i = 0
-    while i < len(all_peaks) - 1:
-        expected_rr_interval = 60.0 / long_term_bpm
-        s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)
+    sorted_troughs = sorted(trough_indices)
 
+    print("DEBUG: Step 3 (Grouping) - Applying advanced noise rejection and confidence-weighted updates.")
+    i = 0
+    while i < len(all_peaks):
         current_peak_idx = all_peaks[i]
+        reason = ""
+
+        # --- NEW: Lookahead Amplitude Veto (v6.8) ---
+        # If the next peak is substantially larger, the current one is likely noise.
+        if i < len(all_peaks) - 1:
+            next_peak_idx = all_peaks[i+1]
+            if audio_envelope[next_peak_idx] > audio_envelope[current_peak_idx] * 1.5:
+                beat_debug_info[current_peak_idx] = f"Noise (Vetoed by larger subsequent peak at {next_peak_idx/sample_rate:.2f}s)"
+                i += 1
+                continue # Skip this peak entirely
+
+        # --- NEW: Trough-based Noise Confidence (v6.8) ---
+        noise_confidence = 0.0
+        # Find the trough immediately preceding the current peak
+        preceding_trough_idx_search = np.searchsorted(sorted_troughs, current_peak_idx, side='left')
+        if preceding_trough_idx_search > 0:
+            preceding_trough_idx = sorted_troughs[preceding_trough_idx_search - 1]
+            preceding_trough_amp = audio_envelope[preceding_trough_idx]
+            noise_floor_at_trough = dynamic_noise_floor.iloc[preceding_trough_idx]
+
+            # If the trough is much higher than the floor, it's a noisy area
+            if preceding_trough_amp > noise_floor_at_trough * 3.0:
+                noise_confidence = 0.8
+                reason += f" | Noise Conf: {noise_confidence:.2f} (Trough at {preceding_trough_idx/sample_rate:.2f}s is {preceding_trough_amp/noise_floor_at_trough:.1f}x floor)"
+
+        # If we have high confidence this is a noisy area, reject the peak
+        if noise_confidence > 0.7:
+             beat_debug_info[current_peak_idx] = f"Noise (High local noise confidence). {reason}"
+             i += 1
+             continue
+
+        # If we've reached here, the peak is not immediately obvious noise. Proceed with pairing logic.
+        if i >= len(all_peaks) - 1:
+            # Can't pair the last peak
+            candidate_beats.append(current_peak_idx)
+            beat_debug_info[current_peak_idx] = "Lone S1 (Last Peak)"
+            i += 1
+            continue
+
         next_peak_idx = all_peaks[i + 1]
 
+        expected_rr_interval = 60.0 / long_term_bpm
+        s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)
         interval_sec = (next_peak_idx - current_peak_idx) / sample_rate
-        smoothed_deviation = smoothed_dev_series[i]
-        confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
 
-        reason = f"Base Conf: {confidence:.2f} (Smoothed Dev: {smoothed_deviation:.2f}, LT-BPM: {long_term_bpm:.0f})"
+        smoothed_deviation = smoothed_dev_series[i]
+        pairing_confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm) # RENAMED from 'confidence'
+        reason += f" | Base Pairing Conf: {pairing_confidence:.2f} (Smoothed Dev: {smoothed_deviation:.2f}, LT-BPM: {long_term_bpm:.0f})"
 
         bpm_if_not_paired = 60.0 / interval_sec if interval_sec > 0 else 999
         if bpm_if_not_paired > long_term_bpm * 1.7 and long_term_bpm < 150:
-            confidence = min(0.95, confidence + 0.3)
-            reason += f" | BOOSTED to {confidence:.2f} (BPM spike: {bpm_if_not_paired:.0f}>>{long_term_bpm:.0f})"
+            pairing_confidence = min(0.95, pairing_confidence + 0.3)
+            reason += f" | BOOSTED to {pairing_confidence:.2f} (BPM spike: {bpm_if_not_paired:.0f}>>{long_term_bpm:.0f})"
 
         pattern_match_override = False
         local_raw_deviation = normalized_deviations[i]
         if local_raw_deviation > 0.25 and i > 0 and i < len(all_peaks) - 2:
-            is_current_peak_H = peak_amplitudes[i] > peak_amplitudes[i-1] and peak_amplitudes[i] > peak_amplitudes[i+1]
-            is_next_peak_L = peak_amplitudes[i+1] < peak_amplitudes[i] and peak_amplitudes[i+1] < peak_amplitudes[i+2]
-            if is_current_peak_H and is_next_peak_L:
+            if peak_amplitudes[i] > peak_amplitudes[i-1] and peak_amplitudes[i] > peak_amplitudes[i+1] and peak_amplitudes[i+1] < peak_amplitudes[i+2]:
                 pattern_match_override = True
-                reason += f" | OVERRIDE (H-L Pattern, Local Dev: {local_raw_deviation:.2f})"
+                reason += f" | OVERRIDE (H-L Pattern, deviation: {local_raw_deviation:.2f})"
 
-        lookahead_veto = False
-        if i < len(all_peaks) - 2:
-            is_next_peak_a_strong_H = peak_amplitudes[i+1] > peak_amplitudes[i] and peak_amplitudes[i+1] > peak_amplitudes[i+2]
-            is_next_peak_much_larger = peak_amplitudes[i+1] > peak_amplitudes[i] * 1.5
-            if not pattern_match_override and is_next_peak_a_strong_H and is_next_peak_much_larger:
-                lookahead_veto = True
-
-        is_paired = False
-        if not lookahead_veto and ((interval_sec <= s1_s2_max_interval_sec and confidence > 0.6) or pattern_match_override):
-            is_paired = True
+        is_paired = (interval_sec <= s1_s2_max_interval_sec and pairing_confidence > 0.6) or pattern_match_override
 
         if is_paired:
             s1_idx = current_peak_idx
             candidate_beats.append(s1_idx)
-            beat_debug_info[s1_idx] = f"S1 (Paired). {reason}"
+            beat_debug_info[s1_idx] = f"S1 (Paired). {reason.lstrip(' | ')}"
             beat_debug_info[next_peak_idx] = f"S2 of {s1_idx/sample_rate:.2f}s"
 
             if len(candidate_beats) > 1:
@@ -188,28 +227,20 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
             i += 2
         else:
             s1_idx = current_peak_idx
-            if lookahead_veto:
-                reason += " | SKIPPED PAIRING (Vetoed by lookahead)"
-
             candidate_beats.append(s1_idx)
-            beat_debug_info[s1_idx] = f"Lone S1. {reason}"
+            beat_debug_info[s1_idx] = f"Lone S1. {reason.lstrip(' | ')}"
             i += 1
 
         if candidate_beats:
             time_of_beat = candidate_beats[-1] / sample_rate
             long_term_bpm_history.append((time_of_beat, long_term_bpm))
 
-    if i == len(all_peaks) - 1:
-        last_peak_idx = all_peaks[-1]
-        candidate_beats.append(last_peak_idx)
-        beat_debug_info[last_peak_idx] = "Lone S1 (Last Peak)"
-
     final_peaks = np.array(sorted(list(dict.fromkeys(candidate_beats))))
     print(f"DEBUG: Final peak count after stateful grouping: {len(final_peaks)}.")
     analysis_data = {"beat_debug_info": beat_debug_info, "deviation_times": deviation_times, "deviation_series": smoothed_dev_series}
 
     analysis_data['trough_indices'] = trough_indices
-    analysis_data['noise_floor'] = noise_floor
+    analysis_data['dynamic_noise_floor_series'] = dynamic_noise_floor
 
     if long_term_bpm_history:
         lt_bpm_times, lt_bpm_values = zip(*long_term_bpm_history)
@@ -245,42 +276,122 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
             x=trough_indices / sample_rate,
             y=audio_envelope[trough_indices],
             mode='markers',
-            name='Troughs (Local Minima)',
+            name='Troughs',
             marker=dict(color='green', symbol='circle-open', size=6),
             visible='legendonly'
         ), secondary_y=False)
 
-    if 'noise_floor' in analysis_data and not np.isnan(analysis_data['noise_floor']):
-        noise_floor = analysis_data['noise_floor']
-        fig.add_hline(
-            y=noise_floor,
-            line_dash="dot",
-            annotation_text=f"Noise Floor ({noise_floor:.2f})",
-            annotation_position="bottom right",
-            line_color="green",
-            secondary_y=False
-        )
+    if 'dynamic_noise_floor_series' in analysis_data and not analysis_data['dynamic_noise_floor_series'].empty:
+        noise_floor_series = analysis_data['dynamic_noise_floor_series']
+        fig.add_trace(go.Scatter(
+            x=time_axis,
+            y=noise_floor_series.values,
+            name="Dynamic Noise Floor",
+            line=dict(color="green", dash="dot", width=1.5),
+            hovertemplate="Noise Floor: %{y:.2f}<extra></extra>"
+        ), secondary_y=False)
 
-    if len(all_raw_peaks) > 0:
-        raw_peak_reasons = [analysis_data.get('beat_debug_info', {}).get(p, 'N/A').replace(' | ', '<br>- ') for p in all_raw_peaks]
-        raw_peak_customdata = np.stack((all_raw_peaks / sample_rate, audio_envelope[all_raw_peaks], raw_peak_reasons), axis=-1)
-        fig.add_trace(go.Scatter(x=all_raw_peaks / sample_rate, y=audio_envelope[all_raw_peaks], mode='markers', name='All Peaks (Hover for Status)', marker=dict(color='grey', symbol='x', size=6), customdata=raw_peak_customdata, hovertemplate="<b>Raw Peak</b><br>Time: %{customdata[0]:.2f}s<br>Amp: %{customdata[1]:.0f}<br><b>Status:</b><br>- %{customdata[2]}<extra></extra>", visible='legendonly'), secondary_y=False)
+    # --- New Peak Plotting Logic ---
+    # 1. Prepare and classify all peaks for plotting
+    all_peaks_data = {
+        'S1': {'indices': [], 'customdata': []},
+        'S2': {'indices': [], 'customdata': []},
+        'Noise': {'indices': [], 'customdata': []}
+    }
+    debug_info = analysis_data.get('beat_debug_info', {})
 
-    if len(peaks) > 0:
-        final_peak_reasons = [analysis_data.get('beat_debug_info', {}).get(p, 'N/A').replace(' | ', '<br>- ') for p in peaks]
-        final_peak_customdata = np.stack((peaks / sample_rate, audio_envelope[peaks], final_peak_reasons), axis=-1)
-        fig.add_trace(go.Scatter(x=peaks / sample_rate, y=audio_envelope[peaks], mode='markers', name='Final Heartbeats (S1)', marker=dict(color='#e36f6f', size=8, symbol='diamond'), customdata=final_peak_customdata, hovertemplate="<b>Final Beat</b><br>Time: %{customdata[0]:.2f}s<br><b>Reason:</b><br>- %{customdata[2]}<extra></extra>"), secondary_y=False)
+    for p_idx in all_raw_peaks:
+        reason_str = debug_info.get(p_idx, 'Unknown')
+        peak_time = p_idx / sample_rate
+        peak_amp = audio_envelope[p_idx]
+
+        # Determine category based on the reason string
+        category = 'Noise' # Default category
+        if reason_str.startswith('S1') or reason_str.startswith('Lone S1'):
+            category = 'S1'
+        elif reason_str.startswith('S2'):
+            category = 'S2'
+
+        # Parse the string to create hover text components
+        peak_type = reason_str
+        reason_details = ""
+
+        if category in ['S1', 'Noise']:
+            if '.' in reason_str:
+                parts = reason_str.split('.', 1)
+                peak_type = parts[0].strip()
+                reason_details = parts[1].strip().replace(' | ', '<br>- ')
+            elif '(' in reason_str and ')' in reason_str:
+                peak_type_part = reason_str[:reason_str.find('(')].strip()
+                details_part = reason_str[reason_str.find('(')+1:reason_str.rfind(')')].strip()
+                peak_type = peak_type_part
+                reason_details = details_part
+        elif category == 'S2':
+            peak_type = 'S2'
+            reason_details = reason_str
+
+        # Store the parsed data
+        custom_data_tuple = (peak_type, peak_time, peak_amp, reason_details)
+        all_peaks_data[category]['indices'].append(p_idx)
+        all_peaks_data[category]['customdata'].append(custom_data_tuple)
+
+    # 2. Add a separate trace for each peak category
+    # S1 Beats
+    if all_peaks_data['S1']['indices']:
+        s1_indices = np.array(all_peaks_data['S1']['indices'])
+        s1_customdata = np.stack(all_peaks_data['S1']['customdata'], axis=0)
+        fig.add_trace(go.Scatter(
+            x=s1_indices / sample_rate, y=audio_envelope[s1_indices],
+            mode='markers', name='S1 Beats',
+            marker=dict(color='#e36f6f', size=8, symbol='diamond'),
+            customdata=s1_customdata,
+            hovertemplate="<b>Calculated Peak Type:</b> %{customdata[0]}<br>" +
+                          "<b>Time:</b> %{customdata[1]:.2f}s<br>" +
+                          "<b>Amp:</b> %{customdata[2]:.0f}<br>" +
+                          "<b>Reason:</b><br>%{customdata[3]}<extra></extra>"
+        ), secondary_y=False)
+
+    # S2 Beats
+    if all_peaks_data['S2']['indices']:
+        s2_indices = np.array(all_peaks_data['S2']['indices'])
+        s2_customdata = np.stack(all_peaks_data['S2']['customdata'], axis=0)
+        fig.add_trace(go.Scatter(
+            x=s2_indices / sample_rate, y=audio_envelope[s2_indices],
+            mode='markers', name='S2 Beats',
+            marker=dict(color='orange', symbol='circle', size=6),
+            customdata=s2_customdata,
+            hovertemplate="<b>Calculated Peak Type:</b> %{customdata[0]}<br>" +
+                          "<b>Time:</b> %{customdata[1]:.2f}s<br>" +
+                          "<b>Amp:</b> %{customdata[2]:.0f}<br>" +
+                          "<b>Detail:</b> %{customdata[3]}<extra></extra>"
+        ), secondary_y=False)
+
+    # Noise/Rejected Peaks
+    if all_peaks_data['Noise']['indices']:
+        noise_indices = np.array(all_peaks_data['Noise']['indices'])
+        noise_customdata = np.stack(all_peaks_data['Noise']['customdata'], axis=0)
+        fig.add_trace(go.Scatter(
+            x=noise_indices / sample_rate, y=audio_envelope[noise_indices],
+            mode='markers', name='Noise/Rejected Peaks',
+            marker=dict(color='grey', symbol='x', size=6),
+            customdata=noise_customdata,
+            hovertemplate="<b>Calculated Peak Type:</b> %{customdata[0]}<br>" +
+                          "<b>Time:</b> %{customdata[1]:.2f}s<br>" +
+                          "<b>Amp:</b> %{customdata[2]:.0f}<br>" +
+                          "<b>Reason:</b> %{customdata[3]}<extra></extra>"
+        ), secondary_y=False)
+    # --- End of New Logic ---
 
     if not smoothed_bpm.empty:
-        fig.add_trace(go.Scatter(x=bpm_times, y=smoothed_bpm, name="Smoothed BPM", line=dict(color="#4a4a4a", width=3, dash='dash')), secondary_y=True)
+        fig.add_trace(go.Scatter(x=bpm_times, y=smoothed_bpm, name="Smoothed BPM", line=dict(color="#4a4a4a", width=3, dash='solid')), secondary_y=True)
 
     if "long_term_bpm_series" in analysis_data and not analysis_data["long_term_bpm_series"].empty:
         lt_series = analysis_data["long_term_bpm_series"]
-        fig.add_trace(go.Scatter(x=lt_series.index, y=lt_series.values, name="Long-Term BPM (Belief)", line=dict(color='orange', width=2, dash='dot')), secondary_y=True)
+        fig.add_trace(go.Scatter(x=lt_series.index, y=lt_series.values, name="Long-Term BPM", line=dict(color='orange', width=2, dash='dot')), secondary_y=True)
 
     if 'deviation_series' in analysis_data and analysis_data['deviation_series'] is not None:
         deviation_percent = analysis_data['deviation_series'] * 100
-        fig.add_trace(go.Scatter(x=analysis_data['deviation_times'], y=deviation_percent, name='Norm. Deviation % (Smoothed)', line=dict(color='purple', width=2), visible='legendonly', hovertemplate='Norm. Deviation: %{y:.2f}%<extra></extra>'), secondary_y=True)
+        fig.add_trace(go.Scatter(x=analysis_data['deviation_times'], y=deviation_percent, name='Norm. Deviation %', line=dict(color='purple', width=2), visible='legendonly', hovertemplate='Norm. Deviation: %{y:.2f}%<extra></extra>'), secondary_y=True)
 
     if not smoothed_bpm.empty:
         max_bpm_val, min_bpm_val = smoothed_bpm.max(), smoothed_bpm.min()
@@ -292,9 +403,9 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
     tick_vals_sec = np.arange(0, max_time_sec + 30, 30)
     tick_text_combined = [f"{int(s)}s ({int(s // 60):02d}:{int(s % 60):02d})" for s in tick_vals_sec]
 
-    fig.update_layout(title_text=f"Heartbeat Analysis - {os.path.basename(file_name)} (v6.5)", dragmode='pan', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=100, b=100), xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined), hovermode='x unified')
+    fig.update_layout(title_text=f"Heartbeat Analysis - {os.path.basename(file_name)} (v6.8)", dragmode='pan', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=100, b=100), xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined), hovermode='x unified')
 
-    fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, audio_envelope.max() * 15]) # reminder not to change this value
+    fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, audio_envelope.max() * 20]) # reminder not to change this value
     fig.update_yaxes(title_text="BPM / Norm. Dev %", secondary_y=True, range=[min_bpm-10, max_bpm+10])
 
     output_html_path = f"{os.path.splitext(file_name)[0]}_bpm_plot.html"
@@ -333,7 +444,7 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
     dev_times = analysis_data.get('deviation_times')
     if dev_series is not None and dev_times is not None:
         for i, t in enumerate(dev_times):
-            events.append({'time': t, 'text': f"Norm. Deviation (Smoothed): {dev_series[i] * 100:.2f}%"})
+            events.append({'time': t, 'text': f"Norm. Deviation: {dev_series[i] * 100:.2f}%"})
 
     if 'trough_indices' in analysis_data:
         for p in analysis_data['trough_indices']:
@@ -349,10 +460,9 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
 
     with open(output_log_path, "w", encoding="utf-8") as log_file:
         log_file.write(f"# Chronological Debug Log for {os.path.basename(file_name)}\n")
-        log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-        if 'noise_floor' in analysis_data and not np.isnan(analysis_data['noise_floor']):
-            log_file.write(f"\n**Calculated Noise Floor (25th percentile of troughs): `{analysis_data['noise_floor']:.2f}`**\n\n")
+        dynamic_noise_floor_series = analysis_data.get('dynamic_noise_floor_series')
 
         for time_val, group in groupby(events, key=itemgetter('time')):
             envelope_idx = np.abs(time_axis - time_val).argmin()
@@ -362,6 +472,10 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
             print(f"  Audio Envelope: {envelope_val:.2f}")
             log_file.write(f"## Time: `{time_val:.4f}s`\n\n")
             log_file.write(f"* **Audio Envelope**: `{envelope_val:.2f}`\n")
+
+            if dynamic_noise_floor_series is not None and not dynamic_noise_floor_series.empty:
+                floor_val = dynamic_noise_floor_series.iloc[envelope_idx]
+                log_file.write(f"* **Noise Floor**: `{floor_val:.2f}`\n")
 
             for event in group:
                 print(f"  - {event['text']}")
@@ -382,7 +496,7 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
 
 def analyze_wav_file(wav_file_path, params, start_bpm_hint):
     file_name_no_ext = os.path.splitext(wav_file_path)[0]
-    print(f"\n--- Processing file: {os.path.basename(wav_file_path)} (Engine v6.5) ---")
+    print(f"\n--- Processing file: {os.path.basename(wav_file_path)} (Engine v6.8) ---")
     audio_envelope, sample_rate = preprocess_audio(wav_file_path, params['downsample_factor'], params['bandpass_freqs'], params['save_debug_wav'])
 
     peaks, all_raw_peaks, analysis_data = find_heartbeat_peaks(
@@ -411,7 +525,7 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint):
 class BPMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Heartbeat BPM Analyzer v6.5")
+        self.root.title("Heartbeat BPM Analyzer v6.8")
         self.root.geometry("500x300")
         self.style = ttkb.Style(theme='minty')
         self.current_file = None

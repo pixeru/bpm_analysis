@@ -119,3 +119,19 @@ This version introduces significant new features for both analysis and debugging
     - The interactive plot now includes new traces for the detected **troughs** and the calculated **noise floor**.
     - Hover-labels for peaks in the plot are now multi-line for improved readability of complex decision reasons.
 
+# Changelog: BPM Analysis Script
+## Version 1.0
+This version marks a significant advancement in noise handling and visualization. It introduces a fully dynamic noise floor and a proactive noise rejection system, making the beat detection far more robust in varied conditions.
+### ✨ New Features
+- **Dynamic Noise Floor:**
+    - The previous static noise floor estimation has been upgraded to a **dynamic** system. It now calculates the noise floor using a rolling quantile over the detected signal troughs.
+    - This allows the peak detection `height` threshold to adapt continuously throughout the audio file, making it more sensitive in quiet sections and more robust in noisy ones.
+- **Intelligent Noise Rejection:**
+    - The core algorithm now includes a new pre-emptive noise rejection step that runs _before_ S1-S2 pairing is attempted.
+    - **Lookahead Amplitude Veto:** A peak is proactively rejected if the immediately following peak is substantially larger, preventing it from being considered in the pairing logic.
+    - **Trough-based Noise Confidence:** The algorithm checks the amplitude of the trough preceding a peak. If the trough is significantly elevated above the local dynamic noise floor, the peak is classified as noise and rejected.
+### 🚀 Improvements
+- **Categorical Peak Visualization:**
+    - The interactive plot has been completely overhauled to improve clarity. Instead of plotting all raw peaks as one series, it now classifies every detected peak as either **S1**, **S2**, or **Noise**.
+    - Each category is plotted as a separate trace with a unique color and symbol, making it immediately obvious which peaks were kept, which were paired, and which were rejected.
+
