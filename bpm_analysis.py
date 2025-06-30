@@ -12,7 +12,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
-from itertools import groupby
 from operator import itemgetter
 import datetime
 
@@ -62,7 +61,6 @@ def preprocess_audio(file_path, downsample_factor=50, bandpass_freqs=(20, 150), 
 # --- Core Beat Detection Logic ---
 
 def calculate_blended_confidence(deviation, bpm):
-    """v6.0: Replaces the piecewise function with a continuous, blended model."""
     conf_at_rest = np.interp(deviation, [0.0, 0.3, 0.6], [0.9, 0.8, 0.1])
     conf_at_exercise = np.interp(deviation, [0.1, 0.4, 0.7], [0.2, 0.9, 0.8])
     conf_at_exertion = np.interp(deviation, [0.0, 0.2, 0.5], [0.05, 0.1, 0.7])
@@ -70,10 +68,6 @@ def calculate_blended_confidence(deviation, bpm):
     return final_confidence
 
 def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, start_bpm_hint=None, verbose_debug=False):
-    """
-    v6.8: Implements "Lookahead Amplitude Veto" and trough-based "Noise Confidence" score
-          to intelligently reject noise peaks misclassified as Lone S1s.
-    """
     min_peak_distance_samples = int(0.05 * sample_rate)
     quantile_value = 0.20
     noise_window_sec = 10
@@ -104,7 +98,6 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
         dynamic_noise_floor = pd.Series(fallback_value, index=np.arange(len(audio_envelope)))
 
     height_threshold = dynamic_noise_floor.values
-    # --- END Noise Floor ---
 
     # --- Peak Detection ---
     prominence_threshold = np.quantile(audio_envelope, 0.1)
@@ -142,7 +135,7 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
         current_peak_idx = all_peaks[i]
         reason = ""
 
-        # --- NEW: Lookahead Amplitude Veto (v6.8) ---
+        # --- Lookahead Amplitude Veto ---
         # If the next peak is substantially larger, the current one is likely noise.
         if i < len(all_peaks) - 1:
             next_peak_idx = all_peaks[i+1]
@@ -151,7 +144,7 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
                 i += 1
                 continue # Skip this peak entirely
 
-        # --- NEW: Trough-based Noise Confidence (v6.8) ---
+        # --- Trough-based Noise Confidence ---
         noise_confidence = 0.0
         # Find the trough immediately preceding the current peak
         preceding_trough_idx_search = np.searchsorted(sorted_troughs, current_peak_idx, side='left')
@@ -206,8 +199,9 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
         if is_paired:
             s1_idx = current_peak_idx
             candidate_beats.append(s1_idx)
-            beat_debug_info[s1_idx] = f"S1 (Paired). {reason.lstrip(' | ')}"
-            beat_debug_info[next_peak_idx] = f"S2 of {s1_idx/sample_rate:.2f}s"
+            beat_debug_info[s1_idx] = f"S1 (Paired) {reason.lstrip(' | ')}"
+            s1_time = s1_idx / sample_rate
+            beat_debug_info[next_peak_idx] = f"S2 paired to S1 at {s1_time:.4f}s"
 
             if len(candidate_beats) > 1:
                 prev_s1_idx = candidate_beats[-2]
@@ -405,7 +399,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
 
     fig.update_layout(title_text=f"Heartbeat Analysis - {os.path.basename(file_name)} (v6.8)", dragmode='pan', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(t=100, b=100), xaxis=dict(title_text="Time", tickvals=tick_vals_sec, ticktext=tick_text_combined), hovermode='x unified')
 
-    fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, audio_envelope.max() * 20]) # reminder not to change this value
+    fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, audio_envelope.max() * 40]) # reminder not to change this value
     fig.update_yaxes(title_text="BPM / Norm. Dev %", secondary_y=True, range=[min_bpm-10, max_bpm+10])
 
     output_html_path = f"{os.path.splitext(file_name)[0]}_bpm_plot.html"
@@ -421,77 +415,103 @@ def save_bpm_to_csv(bpm_series, time_points, output_path):
                 if not np.isnan(bpm): writer.writerow([f"{t:.2f}", f"{bpm:.1f}"])
 
 def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks, analysis_data, smoothed_bpm, output_log_path, file_name):
-    events = []
     time_axis = np.arange(len(audio_envelope)) / sample_rate
+    debug_info = analysis_data.get('beat_debug_info', {})
+    dynamic_noise_floor_series = analysis_data.get('dynamic_noise_floor_series')
+    lt_bpm_series = analysis_data.get("long_term_bpm_series", pd.Series(dtype=np.float64))
+    dev_times = analysis_data.get('deviation_times', np.array([]))
+    dev_values = analysis_data.get('deviation_series', np.array([]))
+    dev_series = pd.Series(dev_values, index=dev_times)
+
+    # 1. Collect all significant events (classified peaks and troughs)
+    loggable_events = []
 
     for p in all_raw_peaks:
-        t = p / sample_rate
-        reason = analysis_data.get('beat_debug_info', {}).get(p, 'N/A')
-        reason_formatted = reason.replace(' | ', '\n    ')
-        text = f"Raw Peak (Amp: {audio_envelope[p]:.2f})\n  Status: {reason_formatted}"
-        events.append({'time': t, 'text': text})
-
-    if not smoothed_bpm.empty:
-        for t, bpm in smoothed_bpm.items():
-            events.append({'time': t, 'text': f"Smoothed BPM: {bpm:.2f}"})
-
-    lt_bpm_series = analysis_data.get("long_term_bpm_series")
-    if lt_bpm_series is not None and not lt_bpm_series.empty:
-        for t, bpm in lt_bpm_series.items():
-            events.append({'time': t, 'text': f"Long-Term BPM (Belief): {bpm:.2f}"})
-
-    dev_series = analysis_data.get('deviation_series')
-    dev_times = analysis_data.get('deviation_times')
-    if dev_series is not None and dev_times is not None:
-        for i, t in enumerate(dev_times):
-            events.append({'time': t, 'text': f"Norm. Deviation: {dev_series[i] * 100:.2f}%"})
+        reason = debug_info.get(p)
+        if reason and not reason.startswith('Unknown'):  # Only log peaks that were classified
+            loggable_events.append({
+                'time': p / sample_rate,
+                'type': 'Peak',
+                'amp': audio_envelope[p],
+                'reason': reason
+            })
 
     if 'trough_indices' in analysis_data:
         for p in analysis_data['trough_indices']:
-            t = p / sample_rate
-            text = f"Trough Detected (Amp: {audio_envelope[p]:.2f})"
-            events.append({'time': t, 'text': text})
+            loggable_events.append({
+                'time': p / sample_rate,
+                'type': 'Trough',
+                'amp': audio_envelope[p]
+            })
 
-    events.sort(key=itemgetter('time'))
+    # 2. Sort all collected events by time
+    loggable_events.sort(key=itemgetter('time'))
 
-    print("\n\n" + "="*80)
-    print(" Chronological Event Log")
-    print("="*80 + "\n")
+    print(f"\nGenerating readable debug log at '{output_log_path}'...")
 
+    # 3. Write the structured log to the markdown file
     with open(output_log_path, "w", encoding="utf-8") as log_file:
         log_file.write(f"# Chronological Debug Log for {os.path.basename(file_name)}\n")
         log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-        dynamic_noise_floor_series = analysis_data.get('dynamic_noise_floor_series')
+        if not loggable_events:
+            log_file.write("No significant events (peaks or troughs) were detected to log.\n")
+            return
 
-        for time_val, group in groupby(events, key=itemgetter('time')):
-            envelope_idx = np.abs(time_axis - time_val).argmin()
+        for event in loggable_events:
+            t = event['time']
+
+            # Find associated data using nearest-neighbor lookup
+            envelope_idx = np.abs(time_axis - t).argmin()
             envelope_val = audio_envelope[envelope_idx]
+            noise_floor_val = dynamic_noise_floor_series.iloc[envelope_idx] if dynamic_noise_floor_series is not None else 'N/A'
 
-            print(f"Time: {time_val:.4f}s")
-            print(f"  Audio Envelope: {envelope_val:.2f}")
-            log_file.write(f"## Time: `{time_val:.4f}s`\n\n")
-            log_file.write(f"* **Audio Envelope**: `{envelope_val:.2f}`\n")
+            # Use pandas' reindex for robust nearest-neighbor lookup on potentially sparse, time-indexed series
+            time_as_series = pd.Series([None], index=[t])
+            smoothed_val = smoothed_bpm.reindex(time_as_series.index, method='nearest', tolerance=0.5).iloc[0] if not smoothed_bpm.empty else np.nan
+            lt_bpm_val = lt_bpm_series.reindex(time_as_series.index, method='nearest', tolerance=0.5).iloc[0] if not lt_bpm_series.empty else np.nan
+            dev_val = dev_series.reindex(time_as_series.index, method='nearest', tolerance=0.5).iloc[0] if not dev_series.empty else np.nan
 
-            if dynamic_noise_floor_series is not None and not dynamic_noise_floor_series.empty:
-                floor_val = dynamic_noise_floor_series.iloc[envelope_idx]
-                log_file.write(f"* **Noise Floor**: `{floor_val:.2f}`\n")
+            log_file.write(f"## Time: `{t:.4f}s`\n")
 
-            for event in group:
-                print(f"  - {event['text']}")
-                lines = event['text'].split('\n')
-                first_line = lines[0]
-                rest_of_lines = lines[1:]
-                log_file.write(f"* **{first_line}**\n")
-                for sub_line in rest_of_lines:
-                    log_file.write(f"    * {sub_line.strip()}\n")
+            # --- Event-specific Formatting ---
+            if event['type'] == 'Peak':
+                reason = event['reason']
+                status_line = ""
+                # --- START OF FIX ---
+                # Split reason only on a period followed by a space to avoid splitting on decimal points.
+                if '. ' in reason:
+                    parts = reason.split('. ', 1)
+                    status = parts[0].strip()
+                    details = parts[1].strip().replace(' | ', '\n')
+                    status_line = f"**{status}.**\n{details}" # Added the period back for clarity
+                else: # For simpler reasons like "S2 paired to S1 at..."
+                    status_line = f"**{reason}**"
+                # --- END OF FIX ---
 
-            print("-" * 20)
-            log_file.write("\n---\n")
+                log_file.write(f"{status_line}\n")
+                log_file.write(f"**Audio Envelope**: `{envelope_val:.2f}`\n")
+                log_file.write(f"**Noise Floor**: `{noise_floor_val:.2f}`\n")
+                log_file.write(f"**Raw Peak** (Amp: {event['amp']:.2f})\n")
 
-    print("\n" + "="*80)
-    print(f"End of Log. Detailed output also saved to '{output_log_path}'")
-    print("="*80 + "\n")
+                # Conditionally attach other relevant data, primarily for S1 beats as they are the main event
+                if 'S1' in reason:
+                    if not pd.isna(smoothed_val):
+                        log_file.write(f"**Smoothed BPM**: {smoothed_val:.2f}\n")
+                    if not pd.isna(lt_bpm_val):
+                        log_file.write(f"**Long-Term BPM (Belief)**: {lt_bpm_val:.2f}\n")
+                    if not pd.isna(dev_val):
+                        log_file.write(f"**Norm. Deviation**: {dev_val * 100:.2f}%\n")
+
+            elif event['type'] == 'Trough':
+                log_file.write(f"**Trough Detected** (Amp: {event['amp']:.2f})\n")
+                log_file.write(f"**Audio Envelope**: `{envelope_val:.2f}`\n")
+                log_file.write(f"**Noise Floor**: `{noise_floor_val:.2f}`\n")
+
+            # Add a single newline for spacing between entries
+            log_file.write("\n")
+
+    print(f"Debug log generation complete.")
 
 
 def analyze_wav_file(wav_file_path, params, start_bpm_hint):

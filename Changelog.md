@@ -135,3 +135,16 @@ This version marks a significant advancement in noise handling and visualization
     - The interactive plot has been completely overhauled to improve clarity. Instead of plotting all raw peaks as one series, it now classifies every detected peak as either **S1**, **S2**, or **Noise**.
     - Each category is plotted as a separate trace with a unique color and symbol, making it immediately obvious which peaks were kept, which were paired, and which were rejected.
 
+# Changelog: BPM Analysis Script
+## Version 1.1
+This update focuses on significantly improving the quality, readability, and accuracy of the debug logging features, making it much easier to understand the algorithm's behavior.
+### ✨ New Features
+- **Chronological Debug Log Overhaul:**
+    - The log generation logic has been completely refactored to be event-driven. It now gathers all significant events (classified peaks and troughs), sorts them chronologically, and generates a comprehensive report.
+    - The output Markdown log (`_Debug_Log.md`) is now significantly more structured and readable. For each event, it displays the associated state of the algorithm (e.g., Audio Envelope, Noise Floor, Long-Term BPM) at that precise moment, making it much easier to trace the algorithm's state and decisions.
+### 🐛 Bug Fixes
+- **Log Parser Correction:** Fixed a critical bug in the debug log's text parser that caused it to incorrectly split the "reason" string when it contained decimal points. The parser is now more robust and formats the details correctly.
+### 🚀 Improvements
+- **Enhanced S2 Peak Information:** The debug information for S2 peaks (in both the plot's hover-label and the log) now includes the precise, high-precision timestamp of the S1 beat it was paired with, improving traceability.
+- **Plotting Adjustments:** The default vertical axis range for the signal amplitude in the plot has been adjusted to provide better scaling and visualization by default.
+
