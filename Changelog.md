@@ -148,3 +148,16 @@ This update focuses on significantly improving the quality, readability, and acc
 - **Enhanced S2 Peak Information:** The debug information for S2 peaks (in both the plot's hover-label and the log) now includes the precise, high-precision timestamp of the S1 beat it was paired with, improving traceability.
 - **Plotting Adjustments:** The default vertical axis range for the signal amplitude in the plot has been adjusted to provide better scaling and visualization by default.
 
+# Changelog: BPM Analysis Script
+## Version 1.2
+This version further refines the intelligent noise rejection system with a more sophisticated, trough-aware lookahead veto and makes the noise confidence rule more flexible.
+### ✨ New Features
+- **Trough-based Lookahead Veto:**
+    - The previous "Lookahead Amplitude Veto" has been replaced with a more robust, **trough-based** system.
+    - Instead of just comparing the heights of two adjacent peaks, the new logic finds the trough _between_ them. It then compares how much each peak rises _above that trough_. A peak is now vetoed only if the subsequent peak has a significantly greater rise from the common trough, making the veto decision more resilient to baseline signal drift.
+### 🚀 Improvements
+- **S2 Exception for Noise Rule:**
+    - The trough-based noise confidence rule, which rejects peaks in noisy areas, has been improved.
+    - It now has a specific **exception** that prevents it from rejecting a peak if that peak falls within the expected time window for an S2 beat. This helps "rescue" valid S2 sounds that might occur during a noisy segment of the audio.
+
+

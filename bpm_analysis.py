@@ -1,3 +1,4 @@
+#%%
 import os
 import warnings
 import csv
@@ -135,51 +136,80 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
         current_peak_idx = all_peaks[i]
         reason = ""
 
-        # --- Lookahead Amplitude Veto ---
-        # If the next peak is substantially larger, the current one is likely noise.
+        # --- START: New Trough-based Lookahead Veto ---
         if i < len(all_peaks) - 1:
             next_peak_idx = all_peaks[i+1]
-            if audio_envelope[next_peak_idx] > audio_envelope[current_peak_idx] * 1.5:
-                beat_debug_info[current_peak_idx] = f"Noise (Vetoed by larger subsequent peak at {next_peak_idx/sample_rate:.2f}s)"
-                i += 1
-                continue # Skip this peak entirely
+            trough_search_start_idx = np.searchsorted(sorted_troughs, current_peak_idx, side='right')
+            if trough_search_start_idx < len(sorted_troughs):
+                trough_between_idx = sorted_troughs[trough_search_start_idx]
+                if trough_between_idx < next_peak_idx:
+                    current_peak_amp = audio_envelope[current_peak_idx]
+                    next_peak_amp = audio_envelope[next_peak_idx]
+                    trough_amp = audio_envelope[trough_between_idx]
+                    lhs = 2 * (current_peak_amp - trough_amp)
+                    rhs = (next_peak_amp - trough_amp)
+                    if lhs < rhs:
+                        reason = (f"Noise (Vetoed by Lookahead). "
+                                  f"Current Peak Amp: {current_peak_amp:.2f} | "
+                                  f"Next Peak Amp: {next_peak_amp:.2f} | "
+                                  f"Trough Amp: {trough_amp:.2f}. "
+                                  f"Condition Met: ({lhs:.2f} < {rhs:.2f})")
+                        beat_debug_info[current_peak_idx] = reason
+                        i += 1
+                        continue
+        # --- END: New Trough-based Lookahead Veto ---
+
+        # --- START OF MODIFICATION: S2 Exception Logic ---
+        # Determine if the current peak is a candidate for an S2 beat based on timing from the last confirmed S1.
+        is_potential_s2 = False
+        expected_rr_interval = 60.0 / long_term_bpm
+        s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)
+
+        if candidate_beats:
+            last_s1_idx = candidate_beats[-1]
+            interval_from_last_s1 = (current_peak_idx - last_s1_idx) / sample_rate
+            if 0 < interval_from_last_s1 <= s1_s2_max_interval_sec:
+                is_potential_s2 = True
+        # --- END OF MODIFICATION: S2 Exception Logic ---
+
 
         # --- Trough-based Noise Confidence ---
         noise_confidence = 0.0
-        # Find the trough immediately preceding the current peak
         preceding_trough_idx_search = np.searchsorted(sorted_troughs, current_peak_idx, side='left')
         if preceding_trough_idx_search > 0:
             preceding_trough_idx = sorted_troughs[preceding_trough_idx_search - 1]
             preceding_trough_amp = audio_envelope[preceding_trough_idx]
             noise_floor_at_trough = dynamic_noise_floor.iloc[preceding_trough_idx]
 
-            # If the trough is much higher than the floor, it's a noisy area
             if preceding_trough_amp > noise_floor_at_trough * 3.0:
                 noise_confidence = 0.8
                 reason += f" | Noise Conf: {noise_confidence:.2f} (Trough at {preceding_trough_idx/sample_rate:.2f}s is {preceding_trough_amp/noise_floor_at_trough:.1f}x floor)"
 
-        # If we have high confidence this is a noisy area, reject the peak
-        if noise_confidence > 0.7:
-             beat_debug_info[current_peak_idx] = f"Noise (High local noise confidence). {reason}"
+        # --- START OF MODIFICATION: Apply S2 Exception to Noise Rule ---
+        # If we have high confidence this is a noisy area, reject the peak,
+        # UNLESS it falls in the expected window for an S2 beat.
+        if noise_confidence > 0.7 and not is_potential_s2:
+             beat_debug_info[current_peak_idx] = f"Noise (High local noise confidence). {reason.lstrip(' |')}"
              i += 1
              continue
+        elif noise_confidence > 0.7 and is_potential_s2:
+             # This peak is in a noisy area, but we are keeping it for now because it could be an S2.
+             # We add a note to the reason string for debugging purposes.
+             reason += " | Bypassed Noise Rule (Potential S2)"
+        # --- END OF MODIFICATION: Apply S2 Exception to Noise Rule ---
 
-        # If we've reached here, the peak is not immediately obvious noise. Proceed with pairing logic.
+
         if i >= len(all_peaks) - 1:
-            # Can't pair the last peak
             candidate_beats.append(current_peak_idx)
             beat_debug_info[current_peak_idx] = "Lone S1 (Last Peak)"
             i += 1
             continue
 
         next_peak_idx = all_peaks[i + 1]
-
-        expected_rr_interval = 60.0 / long_term_bpm
-        s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)
         interval_sec = (next_peak_idx - current_peak_idx) / sample_rate
 
         smoothed_deviation = smoothed_dev_series[i]
-        pairing_confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm) # RENAMED from 'confidence'
+        pairing_confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
         reason += f" | Base Pairing Conf: {pairing_confidence:.2f} (Smoothed Dev: {smoothed_deviation:.2f}, LT-BPM: {long_term_bpm:.0f})"
 
         bpm_if_not_paired = 60.0 / interval_sec if interval_sec > 0 else 999
@@ -199,7 +229,7 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, min_bpm=40, max_bpm=240, s
         if is_paired:
             s1_idx = current_peak_idx
             candidate_beats.append(s1_idx)
-            beat_debug_info[s1_idx] = f"S1 (Paired) {reason.lstrip(' | ')}"
+            beat_debug_info[s1_idx] = f"S1 (Paired). {reason.lstrip(' | ')}"
             s1_time = s1_idx / sample_rate
             beat_debug_info[next_peak_idx] = f"S2 paired to S1 at {s1_time:.4f}s"
 
@@ -342,7 +372,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
             hovertemplate="<b>Calculated Peak Type:</b> %{customdata[0]}<br>" +
                           "<b>Time:</b> %{customdata[1]:.2f}s<br>" +
                           "<b>Amp:</b> %{customdata[2]:.0f}<br>" +
-                          "<b>Reason:</b><br>%{customdata[3]}<extra></extra>"
+                          "<b>Reason:</b><br>- %{customdata[3]}<extra></extra>"
         ), secondary_y=False)
 
     # S2 Beats
@@ -372,7 +402,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
             hovertemplate="<b>Calculated Peak Type:</b> %{customdata[0]}<br>" +
                           "<b>Time:</b> %{customdata[1]:.2f}s<br>" +
                           "<b>Amp:</b> %{customdata[2]:.0f}<br>" +
-                          "<b>Reason:</b> %{customdata[3]}<extra></extra>"
+                          "<b>Reason:</b><br>- %{customdata[3]}<extra></extra>"
         ), secondary_y=False)
     # --- End of New Logic ---
 
@@ -483,8 +513,8 @@ def print_and_log_chronological_data(audio_envelope, sample_rate, all_raw_peaks,
                 if '. ' in reason:
                     parts = reason.split('. ', 1)
                     status = parts[0].strip()
-                    details = parts[1].strip().replace(' | ', '\n')
-                    status_line = f"**{status}.**\n{details}" # Added the period back for clarity
+                    details = parts[1].strip().replace(' | ', '\n- ')
+                    status_line = f"**{status}.**\n- {details}" # Added the period back for clarity
                 else: # For simpler reasons like "S2 paired to S1 at..."
                     status_line = f"**{reason}**"
                 # --- END OF FIX ---
@@ -605,3 +635,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+#%%
