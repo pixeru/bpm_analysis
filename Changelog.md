@@ -19,7 +19,6 @@ This update transitions the script from a command-line tool to a graphical user 
 - The `downsample_factor` in the core processing parameters was changed from `10` in `v0.1` to `50` in `v0.2` within the `preprocess_audio` function and changed from `100` to `100` in the main function. This change likely addresses performance on larger files.
 - The script now correctly handles the case where `pydub`/`FFmpeg` are not installed when attempting to convert non-WAV files, showing an error message in the GUI instead of just in the console.
 
-# Changelog: BPM Analysis Script
 ## Version 0.3
 This version focuses on improving the core beat detection algorithm to handle cases where beats might be missed, leading to more accurate and robust BPM analysis, especially in noisy recordings.
 ### 🚀 Improvements
@@ -33,7 +32,6 @@ This version focuses on improving the core beat detection algorithm to handle ca
 - A potential bug in the final filtering stage was addressed to prevent duplicate peaks from being added to the final list after the new "beat rescue" logic has been applied.
 _(No other significant changes were made to the GUI or other functions.)_
 
-# Changelog: BPM Analysis Script
 ## Version 0.4
 This version introduces a more intelligent and adaptive peak detection algorithm, specifically designed to improve accuracy for recordings with very high heart rates. It also includes more detailed debugging output.
 ### 🚀 Improvements
@@ -45,7 +43,6 @@ This version introduces a more intelligent and adaptive peak detection algorithm
 - **Debugging:** Extensive `print` statements have been added throughout the `find_heartbeat_peaks` function to provide a detailed, step-by-step log of the detection process. This is invaluable for troubleshooting and understanding how the final set of peaks was chosen.
 _(No other significant changes were made to the GUI or other functions.)_
 
-# Changelog: BPM Analysis Script
 ## Version 0.5
 This version represents a significant architectural improvement to the core beat detection algorithm, replacing the semi-static logic with a fully dynamic approach that is much more responsive to heart rate variability.
 ### ✨ New Features
@@ -58,7 +55,6 @@ This version represents a significant architectural improvement to the core beat
 - **Increased BPM Range:** The default `max_bpm` parameter in the application has been raised from 220 to 270 to reflect the enhanced capability of the new algorithm to handle very high heart rates.
 - **Algorithm Refinement:** A minor tweak was made to the fallback calculation within the "Beat Rescue" logic.>)
 
-# Changelog: BPM Analysis Script
 ## Version 0.6
 This version introduces a fundamental change in the beat detection philosophy, moving from a single complex function to a clearer, multi-stage "Relax and Refine" strategy. This makes the algorithm more robust and easier to debug.
 ### ✨ New Features
@@ -71,7 +67,6 @@ This version introduces a fundamental change in the beat detection philosophy, m
 - **Algorithmic Clarity:** By separating the detection, grouping, and refining steps, the code's logic is now much clearer and more maintainable.
 - **Robustness:** The new approach is less likely to miss S2 sounds and is better able to distinguish them from noise, leading to a more accurate set of candidate beats for the subsequent refining steps.
 
-# Changelog: BPM Analysis Script
 ## Version 0.7
 This version evolves the beat detection strategy by introducing a new "confidence score" metric. This makes the beat grouping logic more intelligent and adds powerful new debugging capabilities to the visualization.
 ### ✨ New Features
@@ -84,7 +79,6 @@ This version evolves the beat detection strategy by introducing a new "confidenc
 ### ♻️ Refactoring
 - **Algorithm Simplification (for Debugging):** To isolate and evaluate the effectiveness of the new confidence-based system, the "Beat Rescue" and "Final BPM Filtering" steps (Steps 4 and 5 from v0.6) have been temporarily removed from the `find_heartbeat_peaks` function.
 
-# Changelog: BPM Analysis Script
 ## Version 0.8
 This major update transforms the beat detection algorithm from a stateless process to a **stateful** one. The algorithm now maintains an internal "belief" about the heart rate, allowing it to make more context-aware and intelligent decisions as it analyzes the audio.
 ### ✨ New Features
@@ -100,7 +94,6 @@ This major update transforms the beat detection algorithm from a stateless proce
 ### 🚀 Improvements
 - **Visualization:** A new "Long-Term BPM (Belief)" trace has been added to the interactive plot. This allows for powerful debugging, making it possible to visualize how the algorithm's internal state evolves and influences decisions throughout the analysis.
 
-# Changelog: BPM Analysis Script
 ## Version 0.9
 This version introduces significant new features for both analysis and debugging, including a noise floor estimation mechanism, a "lookahead veto" to prevent misclassification of peaks, and a comprehensive chronological event log.
 ### ✨ New Features
@@ -119,7 +112,6 @@ This version introduces significant new features for both analysis and debugging
     - The interactive plot now includes new traces for the detected **troughs** and the calculated **noise floor**.
     - Hover-labels for peaks in the plot are now multi-line for improved readability of complex decision reasons.
 
-# Changelog: BPM Analysis Script
 ## Version 1.0
 This version marks a significant advancement in noise handling and visualization. It introduces a fully dynamic noise floor and a proactive noise rejection system, making the beat detection far more robust in varied conditions.
 ### ✨ New Features
@@ -135,7 +127,6 @@ This version marks a significant advancement in noise handling and visualization
     - The interactive plot has been completely overhauled to improve clarity. Instead of plotting all raw peaks as one series, it now classifies every detected peak as either **S1**, **S2**, or **Noise**.
     - Each category is plotted as a separate trace with a unique color and symbol, making it immediately obvious which peaks were kept, which were paired, and which were rejected.
 
-# Changelog: BPM Analysis Script
 ## Version 1.1
 This update focuses on significantly improving the quality, readability, and accuracy of the debug logging features, making it much easier to understand the algorithm's behavior.
 ### ✨ New Features
@@ -148,7 +139,6 @@ This update focuses on significantly improving the quality, readability, and acc
 - **Enhanced S2 Peak Information:** The debug information for S2 peaks (in both the plot's hover-label and the log) now includes the precise, high-precision timestamp of the S1 beat it was paired with, improving traceability.
 - **Plotting Adjustments:** The default vertical axis range for the signal amplitude in the plot has been adjusted to provide better scaling and visualization by default.
 
-# Changelog: BPM Analysis Script
 ## Version 1.2
 This version further refines the intelligent noise rejection system with a more sophisticated, trough-aware lookahead veto and makes the noise confidence rule more flexible.
 ### ✨ New Features
@@ -160,7 +150,6 @@ This version further refines the intelligent noise rejection system with a more 
     - The trough-based noise confidence rule, which rejects peaks in noisy areas, has been improved.
     - It now has a specific **exception** that prevents it from rejecting a peak if that peak falls within the expected time window for an S2 beat. This helps "rescue" valid S2 sounds that might occur during a noisy segment of the audio.
 
-# Changelog: BPM Analysis Script
 ## Version 1.3
 This version introduces a "Strong Peak Exception" to the noise rejection logic and enhances the detail in the debug outputs for better traceability.
 ### ✨ New Features
@@ -173,7 +162,6 @@ This version introduces a "Strong Peak Exception" to the noise rejection logic a
 - **Refined S2 Time Window:** The dynamic time window used to identify potential S2 peaks (`s1_s2_max_interval_sec`) has been slightly widened, making the algorithm a little more generous in its search for the second heart sound.
 - **Code Refactoring:** The plotting and logging functions have been updated to correctly parse and display the new, more detailed S2 justification strings. The hover-label templates in the plot have also been unified for consistency.
 
-# Changelog: BPM Analysis Script
 ## Version 1.4
 This version introduces a final set of quality-of-life improvements to the GUI and internal code structure, marking a feature-complete milestone for this development cycle.
 ### ✨ New Features
@@ -183,7 +171,6 @@ This version introduces a final set of quality-of-life improvements to the GUI a
 - **Analysis Engine Versioning:** The `find_heartbeat_peaks` function and all corresponding output titles (in plots and logs) now explicitly reference the analysis engine version number (e.g., v6.9). This ensures that all generated artifacts are traceable to the exact version of the algorithm that produced them.
 - **GUI Code Cleanup:** Minor code cleanup and condensation have been applied within the `BPMApp` class to improve readability and maintainability.
 
-# Changelog: BPM Analysis Script
 ## Version 1.5
 This is a major architectural update focused on improving application stability, responsiveness, and maintainability. The core analysis logic is now decoupled from the user interface, and the project structure has been professionalized.
 ### ✨ New Features
@@ -203,7 +190,6 @@ This is a major architectural update focused on improving application stability,
     - The main analysis functions now accept the `params` dictionary, eliminating the need to pass numerous individual arguments.
 - **GUI Status Updates:** The GUI status bar is now more informative, providing real-time updates as the analysis progresses through different stages (e.g., "Converting file...", "Processing and analyzing...").
 
-# Changelog: BPM Analysis Script
 ## Version 1.6
 This version focuses on improving the tunability and maintainability of the core algorithm by externalizing a key parameter and providing extensive documentation for all configuration settings.
 ### ✨ New Features
@@ -213,7 +199,6 @@ This version focuses on improving the tunability and maintainability of the core
 - **S2 Beat Justification:** The full justification string (including confidence scores, BPM belief, etc.) for an S1-S2 pairing decision is now correctly stored for the S2 peak. This makes the reasoning for S2 classification fully visible in both the plot's hover-label and the Markdown debug log.
 - **Algorithm Tuning:** The default `pairing_confidence_threshold` has been lowered from `0.6` to `0.55`, making the algorithm slightly more inclined to form S1-S2 pairs.
 
-# Changelog: BPM Analysis Script
 ## Version 1.7
 This version introduces a critical new outlier rejection system to prevent noise from creating impossible BPM spikes and further refines the core algorithm's logic.
 ### ✨ New Features
@@ -227,7 +212,6 @@ This version introduces a critical new outlier rejection system to prevent noise
 - **Stateful Update Correction:** The logic for updating the `long_term_bpm` belief has been refactored to ensure it only runs _after_ a beat has been fully validated and added to the list of candidates, improving logical consistency and the accuracy of the belief state.
 - **Algorithm Tuning:** The default `noise_confidence_threshold` has been lowered from `0.7` to `0.6`, making the trough-based noise rejection slightly more aggressive.
 
-# Changelog: BPM Analysis Script
 ## Version 1.8
 This version introduces Heart Rate Variability (HRV) analysis as a major new feature and replaces the previous outlier rejection system with a more sophisticated, dynamic model based on HRV principles.
 ### ✨ New Features
@@ -246,7 +230,6 @@ This version introduces Heart Rate Variability (HRV) analysis as a major new fea
     - This allows the algorithm to follow gradual changes in heart rate while effectively rejecting sudden, sharp spikes caused by noise.
     - The sensitivity of this feature can be tuned via the new `rr_interval_max_decrease_pct` and `rr_interval_max_increase_pct` parameters.
 
-# Changelog: BPM Analysis Script
 ## Version 1.9
 This update introduces a more sophisticated multi-stage analysis pipeline, significantly improving the algorithm's robustness, accuracy, and ability to handle noisy or complex recordings without manual tuning.
 #### **Major Enhancements**
@@ -264,7 +247,6 @@ This update introduces a more sophisticated multi-stage analysis pipeline, signi
 - **Plotting:** The Y-axis of the interactive HTML plot now uses a percentile-based quantile for auto-scaling, making it more robust to single large outlier peaks in the audio envelope.
 - **Parameter Tuning:** Minor adjustments were made to `trough_veto_multiplier` and `s1_s2_interval_rr_fraction` for better general performance.
 
-# Changelog: BPM Analysis Script
 ## Version 2.0
 This release introduces a major new analytical capability: **Windowed Heart Rate Variability (HRV) Analysis**. This moves beyond a single HRV summary for the entire recording to provide a dynamic, time-varying view of HRV.
 ### ✨ New Features
@@ -279,7 +261,6 @@ This release introduces a major new analytical capability: **Windowed Heart Rate
 - **Configuration for HRV:** The `DEFAULT_PARAMS` dictionary now includes `hrv_window_size_beats` and `hrv_step_size_beats` to allow for easy tuning of the new sliding window analysis.
 - **Code Refactoring:** The main analysis pipeline in `analyze_wav_file` has been updated to call the new windowed HRV function and pass the results to the plotting function.
 
-# Changelog: BPM Analysis Script
 ## Version 2.1
 This release enhances the robustness of the outlier rejection system by introducing an intelligent "double-check" mechanism. It also improves the usability of the plot output and refactors the S2 pairing logic for better clarity.
 ### ✨ New Features
@@ -294,7 +275,6 @@ This release enhances the robustness of the outlier rejection system by introduc
 - **Refined Log Formatting:** The logic for parsing and formatting the reason strings in the Markdown debug log has been improved to handle more edge cases, resulting in a cleaner and more readable output.
 - **Plot Axis Scaling:** The plot's Y-axis auto-scaling has been slightly adjusted for better default visualization of the signal amplitude.
 
-# Changelog: BPM Analysis Script
 ## Version 2.2
 This version introduces a new suite of analytics focused on exercise and recovery, providing deeper insights into cardiovascular response beyond standard HRV. It also refactors the code to use modern, time-aware `pandas` objects for increased precision.
 ### ✨ New Features
@@ -309,7 +289,6 @@ This version introduces a new suite of analytics focused on exercise and recover
 - **Simplified `calculate_blended_confidence`:** The confidence model for S1-S2 pairing has been simplified. It now relies solely on the normalized deviation between peaks, removing the dependency on the `long_term_bpm` belief. This makes the pairing decision more direct and less prone to being influenced by a potentially lagging BPM belief state.
 - **Plotting Enhancements:** The plot now uses a dark theme for better contrast and visual appeal.
 
-# Changelog: BPM Analysis Script
 ## Version 2.3
 This version introduces a significant architectural refactoring to decouple the analysis process from file I/O operations and adds a key usability feature to the GUI for saving results.
 ### ✨ New Features
@@ -326,7 +305,6 @@ This version introduces a significant architectural refactoring to decouple the 
     - This function is called by the new "Save All Results" button and takes the stored analysis results and a user-specified base path as input. This change improves code organization and reduces redundancy.
 - **Configuration:** A new `File Output Settings` section has been added to the `DEFAULT_PARAMS` dictionary to centralize the suffixes for all output files.
 
-# Changelog: BPM Analysis Script
 ## Version 2.4
 This release focuses on improving the core signal processing pipeline for higher fidelity, making the analysis logic more robust, and adding a new "Peak Exertion Rate" metric.
 ### ✨ New Features
@@ -346,7 +324,6 @@ This release focuses on improving the core signal processing pipeline for higher
     - The `calculate_blended_confidence` function's dependency on the `long_term_bpm` has been removed to make its logic more direct and based purely on signal properties.
     - The list of supported audio file types in the GUI has been expanded to include `.mov`.
 
-# Changelog: BPM Analysis Script
 ## Version 2.5
 This is a maintenance release focused on improving the precision of the analysis and providing more detailed data exports for advanced users.
 ### ✨ New Features
@@ -357,7 +334,6 @@ This is a maintenance release focused on improving the precision of the analysis
 ### 🐛 Bug Fixes
 - A minor bug in the `plot_results` function was fixed to correctly handle cases where no significant inclines or declines were found, preventing potential errors.
 
-# Changelog: BPM Analysis Script
 ## Version 2.6
 This version introduces a new, iterative post-processing stage to the analysis pipeline, designed to intelligently correct beat classifications by considering the local context of the rhythm.
 ### ✨ New Features
@@ -371,7 +347,6 @@ This version introduces a new, iterative post-processing stage to the analysis p
 - **S2 Amplitude Penalty:** The previous hard rejection rule for an S2 peak being larger than an S1 peak has been converted to a "soft" penalty. Now, if a candidate S2 is too large, its `pairing_confidence` is reduced. The pairing is only rejected if this penalized score falls below the confidence threshold, providing a more nuanced decision.
 - **Configuration:** New parameters have been added to `DEFAULT_PARAMS` to control the new correction pass (`enable_correction_pass`, `correction_pass_window_beats`, `correction_pass_ratio_threshold`).
 
-# Changelog: BPM Analysis Script
 ## Version 2.7
 This version introduces a comprehensive Markdown analysis report, further decouples the analysis and saving workflows, and refactors the GUI for better state management and usability.
 ### ✨ New Features
@@ -387,7 +362,6 @@ This version introduces a comprehensive Markdown analysis report, further decoup
 - **Clearer File Suffixes:** The output file suffixes have been updated in `DEFAULT_PARAMS` to be more descriptive (e.g., `_bpm_plot.html`, `_Analysis_Summary.md`).
 - **Streamlined Code:** Several functions have been refactored to accept the `params` dictionary directly, reducing the number of arguments passed and improving code readability. The `save_bpm_to_csv` function has been removed as its functionality is now covered by the more comprehensive `save_analysis_summary`.
 
-# Changelog: BPM Analysis Script
 ## Version 2.8
 This major version introduces a significant user interface upgrade with live parameter editing and a substantial architectural refactoring to a class-based structure for better organization and maintainability.
 ### ✨ New Features
@@ -404,7 +378,6 @@ This major version introduces a significant user interface upgrade with live par
 - **Robustness:** The logic for passing parameters from the GUI to the analysis thread has been made more robust to handle the new live editing feature.
 - **Code Clarity:** The use of helper functions within the `AnalysisPipeline` class (e.g., `_run_stage_1_estimation`, `_run_stage_3_main_analysis`) makes the sequence of the analysis pipeline much clearer and easier to follow.
 
-# Changelog: BPM Analysis Script
 ## Version 2.9
 This version introduces a significant architectural refactoring by decoupling the analysis process from file I/O operations. It also adds a key usability feature to the GUI for saving results.
 ### ✨ New Features
@@ -422,7 +395,6 @@ This version introduces a significant architectural refactoring by decoupling th
     - This function is now called exclusively by the "Save All Results" button. This change improves code organization and reduces redundancy.
 - **Configuration:** A new `File Output Settings` section has been added to the `DEFAULT_PARAMS` dictionary to centralize the suffixes for all output files.
 
-# Changelog: BPM Analysis Script
 ## Version 3.0
 This version introduces a major advancement in the beat detection algorithm by making it "state-aware." The pairing logic now understands the physiological concept of a post-exertion recovery period and dynamically adjusts its rules, significantly improving accuracy in recordings that include both rest and exercise.
 ### ✨ New Features
@@ -438,7 +410,6 @@ This version introduces a major advancement in the beat detection algorithm by m
 ### ⚙️ New Configuration Parameters
 - A new `recovery_phase_duration_sec` parameter has been added to `DEFAULT_PARAMS`. This controls how long the stricter "Post-Exertion Recovery" rules are applied after the peak BPM is detected.
 
-# Changelog: BPM Analysis Script
 ## Version 3.1
 This version refines the core pairing logic by introducing a dynamic confidence model that better reflects heart physiology at different levels of exertion.
 ### ✨ New Features
@@ -447,7 +418,6 @@ This version refines the core pairing logic by introducing a dynamic confidence 
 - **New Configuration Parameters:** Added `confidence_deviation_points`, `confidence_curve_low_bpm`, and `confidence_curve_high_bpm` to `DEFAULT_PARAMS` to allow fine-tuning of the new dynamic confidence model.
 - **Simplified Logic:** The logic in `evaluate_pairing_confidence` is now simpler as the complex, BPM-aware calculations have been centralized into the new `calculate_blended_confidence` function.
 
-# Changelog: BPM Analysis Script
 ## Version 3.2
 This version significantly enhances the reliability of beat detection by introducing a robust, multi-point validation system for "Lone S1" beats, making the algorithm less susceptible to noise. Debugging and transparency have also been improved with more detailed logging.
 ### ✨ New Features
@@ -461,7 +431,6 @@ This version significantly enhances the reliability of beat detection by introdu
 - **New Configuration Parameters:** Added `lone_s1_min_strength_ratio` and `lone_s1_forward_check_pct` to `DEFAULT_PARAMS` to allow fine-tuning of the new Lone S1 validation logic.
 - **Bug Fix:** Resolved an issue in the debug log generation where duplicate timestamps in the BPM series could cause an error.
 
-# Changelog: BPM Analysis Script
 ## Version 3.3
 This version enhances the physiological modeling of the analysis pipeline, improving the accuracy of beat pairing by better accounting for noise floor and the post-exercise recovery state.
 ### ✨ New Features
@@ -471,7 +440,6 @@ This version enhances the physiological modeling of the analysis pipeline, impro
 - **Configurable S1/S2 Confidence Boost:** The confidence boost applied when a clear S1 is much louder than S2 is now tunable via new `s1_s2_boost_ratio` and `s1_s2_boost_amount` parameters.
 - **Tuning:** The confidence curve for high BPMs (`confidence_curve_high_bpm`) has been adjusted to better reflect the new peak strength calculation.
 
-# Changelog: BPM Analysis Script
 ## Version 3.4
 This update introduces a dynamic confidence boost system that adapts to the stability of the heart rhythm, further improving the accuracy and robustness of the beat-pairing logic.
 ### ✨ New Features
@@ -482,7 +450,6 @@ This update introduces a dynamic confidence boost system that adapts to the stab
 - **Adaptive Logic:** The `find_heartbeat_peaks` function now calculates a `dynamic_boost_amount` at each step, which is then passed to the `evaluate_pairing_confidence` function.
 - **New Configuration Parameters:** Added `boost_history_window`, `boost_amount_min`, and `boost_amount_max` to `DEFAULT_PARAMS` to provide fine-grained control over the new dynamic boost feature. The previous static `s1_s2_boost_amount` parameter has been removed.
 
-# Changelog: BPM Analysis Script
 ## Version 3.5
 This update introduces a more sophisticated noise detection system and improves the quality of the visual outputs.
 ### ✨ New Features
@@ -491,4 +458,14 @@ This update introduces a more sophisticated noise detection system and improves 
 - **Improved Plot Hover Information:** The parsing logic for the hover-tooltips in the interactive HTML plot has been refactored. Multi-line debug information is now correctly displayed with line breaks, making the detailed analysis reasons much easier to read.
 - **Enhanced Debugging:** The log messages for noise rejection are now more detailed, showing the exact values used in the calculation.
 - **Algorithm Tuning:** The default `pairing_confidence_threshold` has been slightly lowered to `0.50` to better complement the more robust noise rejection logic.
+
+## Version 3.6
+This version is a major refactoring effort focused on improving code organization, readability, and maintainability. The core logic of the analysis pipeline has been broken down into smaller, more specialized helper functions, and the configuration parameters have been logically grouped.
+### 🚀 Improvements & Refactoring
+- **Modular Code Structure:**
+    - The main `analyze_wav_file` function has been streamlined into a high-level pipeline that calls a series of new, clearly defined helper functions (`_run_stage1_anchor_beat_pass`, `_determine_start_bpm`, `_run_iterative_correction_pass`, `_calculate_final_metrics`).
+    - The `plot_results`, `save_analysis_summary`, and `create_chronological_log_file` functions have also been broken down into smaller, single-responsibility helper functions (e.g., `_add_base_traces`, `_write_overall_summary`).
+    - The `_validate_lone_s1` logic has been extracted into its own dedicated function.
+- **Organized Configuration:** The `DEFAULT_PARAMS` dictionary has been completely reorganized with commented sections (e.g., "Peak & Trough Detection", "S1/S2 Pairing Logic", "Confidence Boost Logic") to make parameters easier to find and tune.
+- **No Change in Core Logic:** This update is purely organizational. The underlying algorithms for beat detection and analysis have not been changed, ensuring that results will be identical to v3.5.
 

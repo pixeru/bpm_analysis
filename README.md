@@ -1,16 +1,16 @@
-# Heartbeat BPM Analyzer v3.5
+# Heartbeat BPM Analyzer v3.6
 The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordings of heart sounds to detect heartbeats and calculate the Beats Per Minute (BPM) over time. It is designed to work with various audio file formats and provides a visual representation of the analysis, with a focus on robust, non-blocking performance.
 ## Features
 - **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A, MOV) by converting them to a standard format for analysis.
 - **Intelligent Preprocessing:** The audio processing pipeline filters the audio at its original sample rate _before_ downsampling to preserve maximum signal fidelity and prevent aliasing errors.
 - **Dynamic and State-Aware Beat Detection Algorithm:** Employs a sophisticated, stateful algorithm that maintains a "belief" about the heart rate to make smarter decisions.
-    - **Surrounding Trough Noise Check (New in v3.5):** The noise detection logic is now more robust. Instead of only checking the trough _before_ a peak, it analyzes the baseline on both sides to determine if a peak is emerging from a noisy section, preventing misclassifications.
-    - **Dynamic Rhythm-Based Confidence Boost:** The confidence boost for S1/S2 pairing adapts based on the recent history of successful pairings. In stable rhythms, the boost is stronger; in noisy sections, it is weaker to avoid errors.
+    - **Surrounding Trough Noise Check:** The noise detection logic is more robust, analyzing the baseline on both sides of a peak to prevent misclassifications in noisy sections.
+    - **Dynamic Rhythm-Based Confidence Boost:** The confidence boost for S1/S2 pairing adapts based on the recent history of successful pairings.
     - **Peak Strength Deviation:** The algorithm compares the "strength" of each peak (amplitude relative to the dynamic noise floor) instead of raw amplitude, making the analysis more robust.
     - **Smarter Post-Exertion Logic:** The "post-exertion recovery" state uses an "effective BPM" to ensure rules adapt correctly as the heart rate drops.
     - **Dynamic Confidence Curve:** The pairing logic uses a dynamic confidence model, interpolating between physiological models for resting and high heart rates.
-- **Multi-Stage Analysis Pipeline:** The core of the application is a multi-stage analysis pipeline designed for maximum accuracy:
+- **Multi-Stage Analysis Pipeline:** The core of the application is a modular, multi-stage analysis pipeline designed for maximum accuracy:
     1. **High-Confidence Preliminary Pass:** Finds only the most obvious "anchor beats."
     2. **Peak BPM & Recovery Phase Detection:** Uses anchor beats to find the point of peak exertion and define a subsequent "post-exertion recovery phase."
     3. **Global BPM & Refined Noise Floor Estimation:** Automatically estimates a global starting BPM and performs **trough sanitization** to calculate a robust dynamic noise floor.
@@ -24,11 +24,11 @@ The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordin
 - **Windowed Heart Rate Variability (HRV) Analysis:**
     - Performs a **sliding window analysis** to calculate time-varying HRV metrics (SDNN and RMSSDc).
 - **Comprehensive Visualization & Outputs:**
-    - **Interactive HTML Plot:** A rich plot showing the audio envelope, detected peaks, an **Analysis Summary** box, and improved hover-tooltips that correctly display multi-line debug information.
+    - **Interactive HTML Plot:** A rich plot showing the audio envelope, detected peaks, an **Analysis Summary** box, and improved hover-tooltips.
     - **Markdown Summary Report:** A detailed report containing all key metrics, slope analysis, and a table of BPM data.
     - **Chronological Debug Log:** A detailed, time-sorted log with justifications for every classification decision.
 ## Configuration
-All tunable parameters for the analysis engine are located in the `DEFAULT_PARAMS` dictionary near the top of the script. Each parameter is accompanied by comments explaining its purpose.
+All tunable parameters for the analysis engine are located in the `DEFAULT_PARAMS` dictionary near the top of the script. In v3.6, these parameters have been organized into logical categories for easier navigation and tuning.
 ## Dependencies
 To run this script, you will need Python and the following libraries:
 - **`numpy`**
@@ -46,7 +46,7 @@ You will also need **FFmpeg** installed and accessible in your system's PATH for
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
     ```
-    python bpm_analysis_v3.5.py
+    python bpm_analysis_v3.6.py
     ```
 4. **Use the Application:**
     - The application will attempt to automatically load a supported audio file from the same directory.
