@@ -422,3 +422,19 @@ This version introduces a significant architectural refactoring by decoupling th
     - This function is now called exclusively by the "Save All Results" button. This change improves code organization and reduces redundancy.
 - **Configuration:** A new `File Output Settings` section has been added to the `DEFAULT_PARAMS` dictionary to centralize the suffixes for all output files.
 
+# Changelog: BPM Analysis Script
+## Version 3.0
+This version introduces a major advancement in the beat detection algorithm by making it "state-aware." The pairing logic now understands the physiological concept of a post-exertion recovery period and dynamically adjusts its rules, significantly improving accuracy in recordings that include both rest and exercise.
+### ✨ New Features
+- **State-Aware S1/S2 Pairing Logic:**
+    - The core pairing function (`evaluate_pairing_confidence`) has been redesigned to operate in two states: "Normal" and "Post-Exertion Recovery."
+    - **Preliminary Recovery Phase Detection:** Before the main analysis, a new pass (`find_recovery_phase`) runs on the initial high-confidence "anchor beats" to find the recording's absolute peak BPM.
+    - The algorithm then defines a fixed-duration "recovery window" immediately following this peak.
+    - **Dynamic Rule Application:** During the main analysis pass, if a beat falls within this recovery window, the algorithm applies stricter pairing rules, strongly expecting the S1 sound to be louder than the S2 (a common physiological response). Outside of this window, it uses the standard, more flexible BPM-based rules.
+### 🚀 Improvements & Refactoring
+- **Smarter Analysis Pipeline:** The `analyze_wav_file` function now orchestrates this more complex, two-part analysis: a preliminary pass to determine the physiological state (find the recovery window) followed by the main, state-aware beat classification pass.
+- **Refined Confidence Model:** The `calculate_blended_confidence` function has been re-tuned to better model the amplitude drop between a true S1 and S2 sound, improving its baseline accuracy.
+- **Code Organization:** Several parts of the main `find_heartbeat_peaks` function were refactored into smaller, more specialized helper functions (`should_veto_by_lookahead`, `calculate_preceding_trough_noise`) for clarity and maintainability.
+### ⚙️ New Configuration Parameters
+- A new `recovery_phase_duration_sec` parameter has been added to `DEFAULT_PARAMS`. This controls how long the stricter "Post-Exertion Recovery" rules are applied after the peak BPM is detected.
+

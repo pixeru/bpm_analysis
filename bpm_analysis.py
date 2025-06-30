@@ -90,11 +90,6 @@ DEFAULT_PARAMS = {
     # Increase: Allows the S1-S2 interval to be a larger portion of the cardiac cycle.
     # Decrease: Restricts the S1-S2 interval to be a smaller fraction of the cycle, useful for higher heart rates.
 
-    "pairing_confidence_threshold": 0.52,
-    # The confidence score required to classify two adjacent peaks as an S1-S2 pair.
-    # Increase: Requires stronger evidence for pairing. Results in fewer S1-S2 pairs and more "Lone S1" beats.
-    # Decrease: Easier to form S1-S2 pairs. Risks incorrectly pairing a true S1 with a nearby noise peak.
-
     "trough_noise_multiplier": 3.0,
     # A peak is considered "noisy" if the trough preceding it has an amplitude N-times higher than the dynamic noise floor.
     # Increase: Requires the trough to be much louder to be considered noisy. Less likely to classify peaks as noise.
@@ -124,6 +119,14 @@ DEFAULT_PARAMS = {
     # Confidence adjustment factor if the S2/S1 ratio is exceeded
     "confidence_adjustment_low_bpm": 0.8, # Gentle adjustment (20% reduction) if exceeded at low BPM.
     "confidence_adjustment_high_bpm": 0.4, # Harsh adjustment (60% reduction) if exceeded at high BPM.
+
+    # we might need to make this linear and not a set number of seconds
+    "recovery_phase_duration_sec": 120.0, # For Post-Exertion State Detection, Duration (in seconds) of the high-contractility state after peak BPM is detected.
+
+    "pairing_confidence_threshold": 0.52,
+    # The confidence score required to classify two adjacent peaks as an S1-S2 pair.
+    # Increase: Requires stronger evidence for pairing. Results in fewer S1-S2 pairs and more "Lone S1" beats.
+    # Decrease: Easier to form S1-S2 pairs. Risks incorrectly pairing a true S1 with a nearby noise peak.
 
     # Dynamic HRV-Based Outlier Rejection Parameters
     "rr_interval_max_decrease_pct": 0.45, # A new RR interval can't be more than 45% shorter than the previous one.
@@ -369,37 +372,47 @@ def update_long_term_bpm(new_rr_sec, current_long_term_bpm, params):
     new_bpm = current_long_term_bpm + limited_change
     return max(params['min_bpm'], min(new_bpm, params['max_bpm']))
 
-
-def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelope, dynamic_noise_floor, long_term_bpm, params):
+def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelope, dynamic_noise_floor,
+                              long_term_bpm, params, sample_rate,
+                              peak_bpm_time_sec, recovery_end_time_sec):
     """
-    Evaluates the confidence of an S1-S2 pair using a dynamic, BPM-dependent model
-    to represent myocardial contractility.
+    Evaluates the confidence of an S1-S2 pair using a state-aware, BPM-dependent model
+    that accounts for a high-contractility recovery phase post-exertion.
     """
     s1_amp = audio_envelope[s1_idx]
     s2_amp = audio_envelope[s2_idx]
     reason = ""
-    penalty_applied = False
+    penalty_applied = False # We can rename this to has_unexpected_ratio later
 
     # Base confidence from amplitude deviation
     confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm)
     reason += f"| Base Pairing Conf: {confidence:.2f} "
 
-    # --- Dynamic Contractility Logic ---
-    # Define the BPM range for our model
-    bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
+    # --- State-Aware Contractility Logic ---
+    current_beat_time_sec = s1_idx / sample_rate
+    is_in_recovery = False
 
-    # Define the expected S2/S1 ratio at those BPM points
-    ratio_points = [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']]
+    # Check if a recovery phase was detected and if we are currently in it
+    if peak_bpm_time_sec is not None and recovery_end_time_sec is not None:
+        if peak_bpm_time_sec < current_beat_time_sec < recovery_end_time_sec:
+            is_in_recovery = True
 
-    # Define the confidence adjustment factor at those BPM points
-    adjustment_points = [params['confidence_adjustment_low_bpm'], params['confidence_adjustment_high_bpm']]
+    if is_in_recovery:
+        # STATE: Post-Exertion Recovery. Contractility is assumed to be high.
+        # We enforce the rules for HIGH BPM, regardless of the current long_term_bpm.
+        reason += "| Inferred Recovery State "
+        max_expected_s2_s1_ratio = params['s2_s1_ratio_high_bpm']
+        adjustment_factor = params['confidence_adjustment_high_bpm']
+    else:
+        # STATE: Normal. Use the standard, flexible BPM-based interpolation.
+        bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
+        ratio_points = [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']]
+        adjustment_points = [params['confidence_adjustment_low_bpm'], params['confidence_adjustment_high_bpm']]
 
-    # Use linear interpolation to get the rules for the CURRENT long_term_bpm
-    # This creates the smooth sliding scale for the 100-130 BPM transition zone
-    max_expected_s2_s1_ratio = np.interp(long_term_bpm, bpm_points, ratio_points)
-    adjustment_factor = np.interp(long_term_bpm, bpm_points, adjustment_points)
+        max_expected_s2_s1_ratio = np.interp(long_term_bpm, bpm_points, ratio_points)
+        adjustment_factor = np.interp(long_term_bpm, bpm_points, adjustment_points)
 
-    # Check if the observed S2/S1 ratio exceeds our dynamic expectation
+    # Check if the observed S2/S1 ratio exceeds our state-aware expectation
     current_s2_s1_ratio = s2_amp / (s1_amp + 1e-9)
     if current_s2_s1_ratio > max_expected_s2_s1_ratio:
         confidence *= adjustment_factor
@@ -407,7 +420,7 @@ def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelo
         reason += (f"| ADJUSTED (S2/S1 Ratio {current_s2_s1_ratio:.1f}x "
                    f"> Expected {max_expected_s2_s1_ratio:.1f}x at {long_term_bpm:.0f} BPM) ")
 
-    # --- Standard Boost Logic (when S1 > S2) ---
+    # Standard Boost Logic (when S1 > S2)
     elif s1_amp > (s2_amp * params.get('s1_s2_boost_ratio', 1.2)):
         confidence = min(1.0, confidence + 0.15)
         reason += f"| BOOSTED (S1 amp {s1_amp:.0f} > 1.2x S2 amp {s2_amp:.0f}) "
@@ -438,7 +451,8 @@ def is_rhythmically_plausible(new_s1_idx, last_s1_idx, long_term_bpm, sample_rat
     return True, ""
 
 
-def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=None, precomputed_noise_floor=None, precomputed_troughs=None):
+def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=None, precomputed_noise_floor=None, precomputed_troughs=None,
+                         peak_bpm_time_sec=None, recovery_end_time_sec=None):
     """ Main logic to classify raw peaks into S1, S2, and Noise by calling helper functions."""
     analysis_data = {}
 
@@ -507,8 +521,11 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                 smoothed_dev_series[i],
                 audio_envelope,
                 dynamic_noise_floor,
-                long_term_bpm,  # Pass the current BPM belief
-                params
+                long_term_bpm,
+                params,
+                sample_rate,
+                peak_bpm_time_sec,
+                recovery_end_time_sec
             )
             reason += pair_reason
             is_paired = interval_sec <= s1_s2_max_interval and pairing_confidence >= params['pairing_confidence_threshold']
@@ -1246,7 +1263,6 @@ def find_major_hr_inclines(smoothed_bpm_series, min_duration_sec=10, min_bpm_inc
     major_inclines.sort(key=lambda x: x['slope_bpm_per_sec'], reverse=True)
     return major_inclines
 
-
 def find_major_hr_declines(smoothed_bpm_series, min_duration_sec=10, min_bpm_decrease=15):
     """ Identifies significant, sustained periods of heart rate decrease (recovery)."""
     if smoothed_bpm_series.empty or len(smoothed_bpm_series) < 2:
@@ -1466,6 +1482,28 @@ def calculate_hrr(smoothed_bpm_series, interval_sec=60):
         'interval_sec': interval_sec
     }
 
+def find_recovery_phase(bpm_series, bpm_times_sec, params):
+    """
+    Analyzes a preliminary BPM series to find the peak heart rate and define
+    the subsequent recovery phase window.
+    Returns the start and end time of the recovery phase in seconds.
+    """
+    duration = params.get("recovery_phase_duration_sec", 120.0)
+
+    # Check if there's enough data to perform this analysis
+    if bpm_times_sec is None or len(bpm_times_sec) < 2:
+        logging.warning("Not enough preliminary beats to determine a recovery phase.")
+        return None, None
+
+    # Find the time of the peak BPM
+    peak_idx = np.argmax(bpm_series.values)
+    peak_time_sec = bpm_times_sec[peak_idx]
+    recovery_end_time_sec = peak_time_sec + duration
+
+    logging.info(f"Peak BPM detected in preliminary pass at {peak_time_sec:.2f}s.")
+    logging.info(f"High-contractility recovery state defined from {peak_time_sec:.2f}s to {recovery_end_time_sec:.2f}s.")
+
+    return peak_time_sec, recovery_end_time_sec
 
 def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signature for GUI compatibility
     """ Main analysis pipeline that orchestrates multiple analysis passes."""
@@ -1482,6 +1520,9 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
 
     # Run the first pass to get a reliable "rhythm skeleton"
     anchor_beats, _, _ = find_heartbeat_peaks(audio_envelope, sample_rate, params_pass_1)
+    # --- Use anchor beats to find the recovery phase ---
+    prelim_bpm_series, prelim_bpm_times = calculate_bpm_series(anchor_beats, sample_rate, params)
+    peak_bpm_time_sec, recovery_end_time_sec = find_recovery_phase(prelim_bpm_series, prelim_bpm_times, params)
 
     global_bpm_estimate = None
     if len(anchor_beats) >= 10: # Need enough beats for a reliable estimate
@@ -1513,21 +1554,22 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
 
     # --- STAGE 3: PRIMARY ANALYSIS PASS ---
     logging.info("--- STAGE 3: Running Main Analysis Pass with refined inputs ---")
-
     s1_peaks_pass1, all_raw_peaks, analysis_data = find_heartbeat_peaks(
         audio_envelope,
         sample_rate,
         params,
         start_bpm_hint=final_start_bpm,
         precomputed_noise_floor=sanitized_noise_floor,
-        precomputed_troughs=sanitized_troughs
+        precomputed_troughs=sanitized_troughs,
+        peak_bpm_time_sec=peak_bpm_time_sec,
+        recovery_end_time_sec=recovery_end_time_sec
     )
 
     # --- STAGE 4: POST-CORRECTION PASS (PEAK VALIDATION) ---
     # This stage corrects for rhythm based on amplitude conflicts.
     s1_peaks_pass2 = correct_peaks_by_rhythm(s1_peaks_pass1, audio_envelope, sample_rate, params)
 
-    # ========================== NEW ITERATIVE STAGE ==========================
+    # ========================== ITERATIVE STAGE ==========================
     # --- STAGE 5: CONTEXTUAL CORRECTION PASS (Iterative) ---
     # This loop will continue until a full pass makes zero new corrections,
     # ensuring the local pairing ratio is always based on the latest data.
@@ -1560,7 +1602,6 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
 
     # Update the main analysis_data with the final corrected debug info for the plot
     analysis_data["beat_debug_info"] = corrected_debug_info
-    # =======================================================================
 
     # --- FINAL CALCULATIONS AND OUTPUT ---
     # Note: We now use 'final_peaks' from the correction pass for all subsequent calculations.
