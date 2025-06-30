@@ -326,3 +326,23 @@ This version introduces a significant architectural refactoring to decouple the 
     - This function is called by the new "Save All Results" button and takes the stored analysis results and a user-specified base path as input. This change improves code organization and reduces redundancy.
 - **Configuration:** A new `File Output Settings` section has been added to the `DEFAULT_PARAMS` dictionary to centralize the suffixes for all output files.
 
+# Changelog: BPM Analysis Script
+## Version 2.4
+This release focuses on improving the core signal processing pipeline for higher fidelity, making the analysis logic more robust, and adding a new "Peak Exertion Rate" metric.
+### ✨ New Features
+- **Peak Exertion Rate Analysis:**
+    - A new `find_peak_exertion_rate` function has been added. It uses a sliding window to find the single steepest, most intense period of heart rate increase across the entire recording.
+    - This metric is now visualized on the plot as a distinct, solid purple line, complementing the existing "Peak Recovery Rate" visualization.
+### 🚀 Improvements & Refactoring
+- **Intelligent Preprocessing Pipeline:**
+    - The `preprocess_audio` function has been re-ordered to perform the bandpass filter on the full-resolution audio _before_ downsampling. This significantly improves signal fidelity and prevents the loss of important frequency information.
+    - A new safety check has been added to automatically calculate and apply a maximum safe downsampling factor, preventing potential aliasing errors from user-configured parameters.
+- **Robust Slope Detection:**
+    - The `find_major_hr_inclines` and `find_major_hr_declines` functions have been refactored. Instead of looking at consecutive point-to-point changes, they now use `scipy.signal.find_peaks` on the smoothed BPM series itself.
+    - This allows the algorithm to robustly identify major start (troughs) and end (peaks) points of a slope, making it far less susceptible to being thrown off by minor fluctuations in the BPM graph.
+- **S2 Amplitude Penalty:** The previous hard rejection rule for an S2 peak being larger than an S1 peak has been converted to a "soft" penalty. Now, if a candidate S2 is too large, its `pairing_confidence` is reduced. The pairing is only rejected if this penalized score falls below the confidence threshold, providing a more nuanced decision.
+- **Bug Fixes & Minor Changes:**
+    - Fixed a bug in the chronological log where the "Raw Peak" amplitude was sometimes missing.
+    - The `calculate_blended_confidence` function's dependency on the `long_term_bpm` has been removed to make its logic more direct and based purely on signal properties.
+    - The list of supported audio file types in the GUI has been expanded to include `.mov`.
+

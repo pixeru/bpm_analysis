@@ -38,7 +38,7 @@ except ImportError:
 # --- Centralized Configuration for Easy Tuning (don't remove the comments)---
 DEFAULT_PARAMS = {
     # Preprocessing Parameters
-    "downsample_factor": 100,     # The factor by which to reduce the audio's sample rate. higher = less detail, faster processing, lower file size
+    "downsample_factor": 300,     # The factor by which to reduce the audio's sample rate. higher = less detail, faster processing, lower file size
     "bandpass_freqs": (20, 150),  # (low_hz, high_hz)
     # =================================================================================
     # Core Beat Detection Parameters
@@ -169,22 +169,45 @@ def preprocess_audio(file_path, params):
         audio_data = np.mean(audio_data, axis=1)
 
     lowcut, highcut = bandpass_freqs
-    nyquist = 0.5 * sample_rate
+
+    # Check if the downsample factor is too aggressive for the filter settings.
+    max_safe_downsample = int((sample_rate / (highcut * 2)) - 1)
+
+    if downsample_factor > max_safe_downsample:
+        logging.warning(
+            f"Original 'downsample_factor' of {downsample_factor} is too high for a "
+            f"{highcut}Hz filter with a {sample_rate}Hz sample rate."
+        )
+        downsample_factor = max(1, max_safe_downsample)
+        logging.warning(f"Adjusting 'downsample_factor' to a safe value of {downsample_factor}.")
+
+    if downsample_factor > 1:
+        new_sample_rate = sample_rate // downsample_factor
+        audio_downsampled = audio_data[::downsample_factor]
+    else:
+        new_sample_rate = sample_rate
+        audio_downsampled = audio_data
+
+    nyquist = 0.5 * new_sample_rate
     low, high = lowcut / nyquist, highcut / nyquist
+
+    # This check now prevents the crash even if logic above fails.
+    if high >= 1.0:
+        raise ValueError(f"Cannot create a {highcut}Hz filter. The effective sample rate of {new_sample_rate}Hz is too low.")
+
     b, a = butter(2, [low, high], btype='band')
-    audio_filtered = filtfilt(b, a, audio_data)
+    audio_filtered = filtfilt(b, a, audio_downsampled)
 
     if save_debug_file:
         debug_path = f"{os.path.splitext(file_path)[0]}_filtered_debug.wav"
         normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
-        wavfile.write(debug_path, sample_rate, normalized_audio)
-    new_sample_rate = sample_rate // downsample_factor
-    audio_downsampled = audio_filtered[::downsample_factor]
-    audio_abs = np.abs(audio_downsampled)
-    window_size = new_sample_rate // 10  # 100ms moving average for envelope
-    audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
-    return audio_envelope, new_sample_rate
+        wavfile.write(debug_path, new_sample_rate, normalized_audio)
 
+    audio_abs = np.abs(audio_filtered)
+    window_size = new_sample_rate // 10
+    audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
+
+    return audio_envelope, new_sample_rate
 
 def _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params):
     """
@@ -635,7 +658,8 @@ def calculate_bpm_series(peaks, sample_rate, params):
 
 def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times,
                  sample_rate, file_name, params, hrv_summary=None, windowed_hrv_df=None,
-                 major_inclines=None, major_declines=None, hrr_stats=None, peak_recovery_stats=None):
+                 major_inclines=None, major_declines=None, hrr_stats=None, peak_recovery_stats=None,
+                 peak_exertion_stats=None):
     # This start_datetime is only used as a base. Its date (1970-01-01) will not be displayed.
     start_datetime = datetime.datetime.fromtimestamp(0)
 
@@ -715,8 +739,8 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
         fig.add_trace(go.Scatter(x=lt_times_dt, y=lt_series.values, name="Long-Term BPM", line=dict(color='orange', width=2, dash='dot')), secondary_y=True)
     if windowed_hrv_df is not None and not windowed_hrv_df.empty:
         hrv_times_dt = pd.to_datetime([start_datetime + datetime.timedelta(seconds=t) for t in windowed_hrv_df['time']])
-        fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['rmssdc'], name="Corrected RMSSD (RMSSDc)", line=dict(color='cyan', width=2), visible='legendonly'), secondary_y=True)
-        fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['sdnn'], name="Windowed SDNN", line=dict(color='magenta', width=2), visible='legendonly'), secondary_y=True)
+        fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['rmssdc'], name="RMSSD", line=dict(color='cyan', width=2), visible='legendonly'), secondary_y=True)
+        fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['sdnn'], name="SDNN", line=dict(color='magenta', width=2), visible='legendonly'), secondary_y=True)
 
     if not smoothed_bpm.empty:
         max_bpm_val, min_bpm_val = smoothed_bpm.max(), smoothed_bpm.min()
@@ -724,7 +748,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
         fig.add_annotation(x=max_bpm_time, y=max_bpm_val, text=f"Max: {max_bpm_val:.1f} BPM", showarrow=True, arrowhead=1, ax=20, ay=-40, font=dict(color="#e36f6f"), yref="y2")
         fig.add_annotation(x=min_bpm_time, y=min_bpm_val, text=f"Min: {min_bpm_val:.1f} BPM", showarrow=True, arrowhead=1, ax=20, ay=40, font=dict(color="#a3d194"), yref="y2")
 
-    plot_title = f"Heartbeat Analysis - {os.path.basename(file_name)} (v7.4 - Recovery Metrics)"
+    plot_title = f"Heartbeat Analysis - {os.path.basename(file_name)} (v7.5)"
 
     if hrv_summary:
         avg_bpm_val, min_bpm_val, max_bpm_val = hrv_summary.get('avg_bpm'), hrv_summary.get('min_bpm'), hrv_summary.get('max_bpm')
@@ -735,7 +759,7 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
         if avg_bpm_val is not None: annotation_text += f"Avg/Min/Max BPM: {avg_bpm_val:.1f} / {min_bpm_val:.1f} / {max_bpm_val:.1f}<br>"
         if hrr_val is not None: annotation_text += f"<b>1-Min HRR: {hrr_val:.1f} BPM Drop</b><br>"
         if peak_slope_val is not None: annotation_text += f"<b>Peak Recovery Rate: {peak_slope_val:.2f} BPM/sec</b><br>"
-        if avg_rmssdc_val is not None: annotation_text += f"Avg. Corrected RMSSD (RMSSDc): {avg_rmssdc_val:.2f}<br>"
+        if avg_rmssdc_val is not None: annotation_text += f"Avg. Corrected RMSSD: {avg_rmssdc_val:.2f}<br>"
         if avg_sdnn_val is not None: annotation_text += f"Avg. Windowed SDNN: {avg_sdnn_val:.2f} ms"
         fig.add_annotation(text=annotation_text, align='left', showarrow=False, xref='paper', yref='paper', x=0.02, y=0.98, bordercolor='black', borderwidth=1, bgcolor='rgba(255, 253, 231, 0.4)')
 
@@ -748,8 +772,8 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
                 y=[incline['start_bpm'], incline['end_bpm']],
                 mode='lines',
                 line=dict(color="purple", width=4, dash="dash"),
-                name='Exertion Slopes',
-                legendgroup='Exertion Slopes',
+                name='Exertion',
+                legendgroup='Exertion',
                 showlegend=(i == 0),
                 visible='legendonly',
                 yaxis='y2',
@@ -772,8 +796,8 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
                 y=[decline['start_bpm'], decline['end_bpm']],
                 mode='lines',
                 line=dict(color="#2ca02c", width=4, dash="dash"),
-                name='Recovery Slopes',
-                legendgroup='Recovery Slopes',
+                name='Recovery',
+                legendgroup='Recovery',
                 showlegend=(i == 0),
                 visible='legendonly',
                 yaxis='y2',
@@ -795,13 +819,34 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
             y=[stats['start_bpm'], stats['end_bpm']],
             mode='lines',
             line=dict(color="#ff69b4", width=5, dash="solid"), # Bright pink solid line
-            name='Peak Recovery Rate',
-            legendgroup='Peak Recovery Rate',
+            name='Peak Recovery Slope',
+            legendgroup='Steepest Slopes',
             visible='legendonly',
             yaxis='y2',
             hovertemplate=(
-                "<b>Peak Recovery Rate</b><br>" +
+                "<b>Peak Recovery Slope</b><br>" +
                 "Slope: %{customdata[0]:.2f} BPM/sec<br>" +
+                "Duration: %{customdata[1]:.1f}s" +
+                "<extra></extra>"
+            ),
+            customdata=np.array([[stats['slope_bpm_per_sec'], stats['duration_sec']]]*2)
+        ))
+
+    # --- Visualize peak_exertion_stats ---
+    if peak_exertion_stats:
+        stats = peak_exertion_stats
+        fig.add_trace(go.Scatter(
+            x=[stats['start_time'], stats['end_time']],
+            y=[stats['start_bpm'], stats['end_bpm']],
+            mode='lines',
+            line=dict(color="#9d32a8", width=5, dash="solid"), # Purple solid line
+            name='Peak Exertion Slope',
+            legendgroup='Steepest Slopes',
+            visible='legendonly',
+            yaxis='y2',
+            hovertemplate=(
+                "<b>Peak Exertion Slope</b><br>" +
+                "Slope: +%{customdata[0]:.2f} BPM/sec<br>" +
                 "Duration: %{customdata[1]:.1f}s" +
                 "<extra></extra>"
             ),
@@ -840,100 +885,101 @@ def save_bpm_to_csv(bpm_series, time_points, output_path):
     logging.info(f"BPM data saved to {output_path}")
 
 def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, analysis_data, smoothed_bpm, output_log_path, file_name):
-    time_axis = np.arange(len(audio_envelope)) / sample_rate
+    """
+    Creates a chronological debug log using efficient, vectorized pandas operations.
+    """
+    logging.info(f"Generating readable debug log at '{output_log_path}'...")
     debug_info = analysis_data.get('beat_debug_info', {})
-    dynamic_noise_floor_series = analysis_data.get('dynamic_noise_floor_series')
-    lt_bpm_series = analysis_data.get("long_term_bpm_series", pd.Series(dtype=np.float64))
-    dev_times = analysis_data.get('deviation_times', np.array([]))
-    dev_values = analysis_data.get('deviation_series', np.array([]))
-    dev_series = pd.Series(dev_values, index=dev_times)
-    loggable_events = []
 
+    events = []
     for p in all_raw_peaks:
-        reason = debug_info.get(p)
-        if reason and not reason.startswith('Unknown'):
-            loggable_events.append({
-                'time': p / sample_rate,
-                'type': 'Peak',
-                'amp': audio_envelope[p],
-                'reason': reason
-            })
-
+        reason = debug_info.get(p, 'Unknown')
+        if reason != 'Unknown':
+            events.append({'time': p / sample_rate, 'type': 'Peak', 'amp': audio_envelope[p], 'reason': reason})
     if 'trough_indices' in analysis_data:
         for p in analysis_data['trough_indices']:
-            loggable_events.append({
-                'time': p / sample_rate,
-                'type': 'Trough',
-                'amp': audio_envelope[p]
-            })
+            events.append({'time': p / sample_rate, 'type': 'Trough', 'amp': audio_envelope[p], 'reason': ''})
 
-    loggable_events.sort(key=itemgetter('time'))
-    logging.info(f"Generating readable debug log at '{output_log_path}'...")
+    if not events:
+        with open(output_log_path, "w", encoding="utf-8") as log_file:
+            log_file.write("# No significant events (peaks or troughs) were detected to log.\n")
+        return
+
+    events_df = pd.DataFrame(events).sort_values(by='time').set_index('time')
+
+    master_df = pd.DataFrame(index=np.arange(len(audio_envelope)) / sample_rate)
+    master_df['envelope'] = audio_envelope
+    if 'dynamic_noise_floor_series' in analysis_data:
+        master_df['noise_floor'] = analysis_data['dynamic_noise_floor_series'].values
+
+    if not smoothed_bpm.empty:
+        smoothed_bpm_sec_index = pd.Series(
+            data=smoothed_bpm.values,
+            index=smoothed_bpm.index.astype(np.int64) // 10**9
+        )
+        if not smoothed_bpm_sec_index.index.is_unique:
+            smoothed_bpm_sec_index = smoothed_bpm_sec_index.groupby(level=0).mean()
+        master_df['smoothed_bpm'] = smoothed_bpm_sec_index
+
+    if 'long_term_bpm_series' in analysis_data:
+        master_df['lt_bpm'] = analysis_data['long_term_bpm_series']
+    if 'deviation_times' in analysis_data:
+        dev_series = pd.Series(analysis_data['deviation_series'], index=analysis_data['deviation_times'])
+        master_df['deviation'] = dev_series
+
+    master_df.sort_index(inplace=True)
+    merged_df = pd.merge_asof(
+        left=events_df,
+        right=master_df.ffill(),
+        left_index=True,
+        right_index=True,
+        direction='nearest',
+        tolerance=pd.Timedelta(seconds=0.5).total_seconds()
+    )
 
     with open(output_log_path, "w", encoding="utf-8") as log_file:
         log_file.write(f"# Chronological Debug Log for {os.path.basename(file_name)}\n")
         log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} with Engine v7.4\n\n")
 
-        if not loggable_events:
-            log_file.write("No significant events (peaks or troughs) were detected to log.\n")
-            return
-
-        for event in loggable_events:
-            t = event['time']
-            envelope_idx = np.abs(time_axis - t).argmin()
-            envelope_val = audio_envelope[envelope_idx]
-            noise_floor_val = dynamic_noise_floor_series.iloc[
-                envelope_idx] if dynamic_noise_floor_series is not None else 'N/A'
-
-            time_as_dt = datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t)
-
-            smoothed_val = smoothed_bpm.reindex([time_as_dt], method='nearest', tolerance=pd.Timedelta(seconds=0.5)).iloc[0] if not smoothed_bpm.empty else np.nan
-            lt_bpm_val = lt_bpm_series.reindex([t], method='nearest', tolerance=0.5).iloc[0] if not lt_bpm_series.empty else np.nan
-            dev_val = dev_series.reindex([t], method='nearest', tolerance=0.5).iloc[0] if not dev_series.empty else np.nan
-
-
+        for t, row in merged_df.iterrows():
             log_file.write(f"## Time: `{t:.4f}s`\n")
+            reason = row.get('reason', '')
 
-            if event['type'] == 'Peak':
-                reason = event['reason']
+            if row['type'] == 'Peak':
                 status_line = ""
+                # This logic formats the multi-line reason string
                 if '. ' in reason:
                     if '. Justification: ' in reason:
                         parts = reason.split('. Justification: ', 1)
-                        status = parts[0].strip()
-                        details = parts[1].strip().replace(' | ', '\n- ')
+                        status = parts[0].strip(); details = parts[1].strip().replace(' | ', '\n- ')
                         status_line = f"**{status}.**\n- **Justification:** {details}"
                     else:
                         parts = reason.split('. ', 1)
-                        status = parts[0].strip()
-                        details = parts[1].strip().replace(' | ', '\n- ')
+                        status = parts[0].strip(); details = parts[1].strip().replace(' | ', '\n- ')
                         status_line = f"**{status}.**\n- {details}"
                 elif '(' in reason and ')' in reason:
-                    if 'Rejected as S1' in reason:
-                        status_line = f"**{reason}**"
-                    else:
-                        parts = reason.split('(', 1)
-                        status = parts[0].strip()
-                        details = parts[1].strip(')').replace(' | ', '\n- ')
-                        status_line = f"**{status}**\n- {details}"
+                    parts = reason.split('(', 1)
+                    status = parts[0].strip(); details = parts[1].strip(')').replace(' | ', '\n- ')
+                    status_line = f"**{status}**\n- {details}"
                 else:
                     status_line = f"**{reason}**"
 
-
                 log_file.write(f"{status_line}\n")
-                log_file.write(f"**Audio Envelope**: `{envelope_val:.2f}`\n")
-                log_file.write(f"**Noise Floor**: `{noise_floor_val:.2f}`\n")
-                log_file.write(f"**Raw Peak** (Amp: {event['amp']:.2f})\n")
+                if 'envelope' in row and not pd.isna(row['envelope']): log_file.write(f"**Audio Envelope**: `{row['envelope']:.2f}`\n")
+                if 'noise_floor' in row and not pd.isna(row['noise_floor']): log_file.write(f"**Noise Floor**: `{row['noise_floor']:.2f}`\n")
+
+                # --- FIX: Restored the missing Raw Peak line ---
+                if 'amp' in row and not pd.isna(row['amp']): log_file.write(f"**Raw Peak** (Amp: {row['amp']:.2f})\n")
 
                 if 'S1' in reason:
-                    if not pd.isna(smoothed_val): log_file.write(f"**Smoothed BPM**: {smoothed_val:.2f}\n")
-                    if not pd.isna(lt_bpm_val): log_file.write(f"**Long-Term BPM (Belief)**: {lt_bpm_val:.2f}\n")
-                    if not pd.isna(dev_val): log_file.write(f"**Norm. Deviation**: {dev_val * 100:.2f}%\n")
+                    if 'smoothed_bpm' in row and not pd.isna(row['smoothed_bpm']): log_file.write(f"**Smoothed BPM**: {row['smoothed_bpm']:.2f}\n")
+                    if 'lt_bpm' in row and not pd.isna(row['lt_bpm']): log_file.write(f"**Long-Term BPM (Belief)**: {row['lt_bpm']:.2f}\n")
+                    if 'deviation' in row and not pd.isna(row['deviation']): log_file.write(f"**Norm. Deviation**: {row['deviation'] * 100:.2f}%\n")
 
-            elif event['type'] == 'Trough':
-                log_file.write(f"**Trough Detected** (Amp: {event['amp']:.2f})\n")
-                log_file.write(f"**Audio Envelope**: `{envelope_val:.2f}`\n")
-                log_file.write(f"**Noise Floor**: `{noise_floor_val:.2f}`\n")
+            elif row['type'] == 'Trough':
+                log_file.write(f"**Trough Detected** (Amp: {row['amp']:.2f})\n")
+                if 'envelope' in row and not pd.isna(row['envelope']): log_file.write(f"**Audio Envelope**: `{row['envelope']:.2f}`\n")
+                if 'noise_floor' in row and not pd.isna(row['noise_floor']): log_file.write(f"**Noise Floor**: `{row['noise_floor']:.2f}`\n")
 
             log_file.write("\n")
 
@@ -1132,6 +1178,63 @@ def find_peak_recovery_rate(smoothed_bpm_series, window_sec=20):
 
     return best_period
 
+def find_peak_exertion_rate(smoothed_bpm_series, window_sec=20):
+    """ Finds the steepest slope of heart rate increase across the entire recording."""
+    if smoothed_bpm_series.empty or len(smoothed_bpm_series) < 2:
+        return None
+
+    # Use the entire series for exertion analysis
+    exertion_series = smoothed_bpm_series
+
+    # Convert the series to a more accessible format (numpy arrays)
+    times_sec = (exertion_series.index - exertion_series.index[0]).total_seconds()
+    bpm_values = exertion_series.values
+
+    # Ensure there's enough data for at least one window
+    if times_sec[-1] < window_sec:
+        logging.warning(f"Not enough data ({times_sec[-1]:.1f}s) to calculate a {window_sec}s peak exertion rate.")
+        return None
+
+    steepest_slope = 0 # Looking for the most POSITIVE slope
+    best_period = None
+
+    # Use a sliding window to find the steepest slope
+    for i in range(len(times_sec) - 1):
+        # Find the end index of the window
+        end_time = times_sec[i] + window_sec
+        end_idx_candidates = np.where(times_sec >= end_time)[0]
+
+        if len(end_idx_candidates) == 0:
+            break
+
+        end_idx = end_idx_candidates[0]
+
+        # Get start and end values for this window
+        start_bpm, end_bpm = bpm_values[i], bpm_values[end_idx]
+        start_t, end_t = times_sec[i], times_sec[end_idx]
+
+        # Calculate the slope (BPM per second)
+        duration = end_t - start_t
+        if duration > 0:
+            slope = (end_bpm - start_bpm) / duration
+
+            # We are looking for the most POSITIVE slope
+            if slope > steepest_slope:
+                steepest_slope = slope
+                best_period = {
+                    'start_time': exertion_series.index[i],
+                    'end_time': exertion_series.index[end_idx],
+                    'start_bpm': start_bpm,
+                    'end_bpm': end_bpm,
+                    'slope_bpm_per_sec': slope,
+                    'duration_sec': duration
+                }
+
+    if best_period:
+        logging.info(f"Found peak exertion rate: {best_period['slope_bpm_per_sec']:.2f} BPM/sec over a {best_period['duration_sec']:.1f}s window.")
+
+    return best_period
+
 def calculate_hrr(smoothed_bpm_series, interval_sec=60):
     """ Calculates the standard Heart Rate Recovery (HRR) over a fixed interval. """
     if smoothed_bpm_series.empty or len(smoothed_bpm_series) < 2:
@@ -1243,6 +1346,7 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
     major_declines = find_major_hr_declines(smoothed_bpm, min_duration_sec=10, min_bpm_decrease=15)
     hrr_stats = calculate_hrr(smoothed_bpm)
     peak_recovery_stats = find_peak_recovery_rate(smoothed_bpm)
+    peak_exertion_stats = find_peak_exertion_rate(smoothed_bpm)
     windowed_hrv_df = calculate_windowed_hrv(final_peaks, sample_rate, params)
 
     hrv_summary_stats = {}
@@ -1260,7 +1364,7 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
     plot_results(audio_envelope, final_peaks, all_raw_peaks, analysis_data, smoothed_bpm, bpm_times,
                  sample_rate, wav_file_path, params, hrv_summary=hrv_summary_stats, windowed_hrv_df=windowed_hrv_df,
                  major_inclines=major_inclines, major_declines=major_declines, hrr_stats=hrr_stats,
-                 peak_recovery_stats=peak_recovery_stats)
+                 peak_recovery_stats=peak_recovery_stats, peak_exertion_stats=peak_exertion_stats)
 
     output_log_path = f"{file_name_no_ext}_Debug_Log.md"
     create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, analysis_data, smoothed_bpm, output_log_path, wav_file_path)
@@ -1270,7 +1374,7 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint): # We keep the signa
 class BPMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Heartbeat BPM Analyzer v7.4 (Recovery Metrics)") # --- UPDATED Version
+        self.root.title("Heartbeat BPM Analyzer v7.5 (Slope Metrics)")
         self.root.geometry("550x350")
         self.style = ttkb.Style(theme='minty')
         self.current_file = None
@@ -1331,7 +1435,7 @@ class BPMApp:
             self.root.after(100, self.process_log_queue)
 
     def select_file(self):
-        filetypes = [('Audio files', '*.wav *.mp3 *.m4a *.flac *.ogg *.mp4 *.mkv'), ('All files', '*.*')]
+        filetypes = [('Audio files', '*.wav *.mp3 *.m4a *.flac *.ogg *.mp4 *.mkv *.mov'), ('All files', '*.*')]
         filename = filedialog.askopenfilename(title="Select audio file", filetypes=filetypes)
         if filename:
             self.current_file = filename
@@ -1340,7 +1444,7 @@ class BPMApp:
             self._update_status(f"Ready to analyze: {os.path.basename(filename)}")
 
     def _find_initial_audio_file(self):
-        supported = ('.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4')
+        supported = ('.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.mkv', '.mov')
         try:
             for filename in os.listdir(os.getcwd()):
                 if filename.lower().endswith(supported):
