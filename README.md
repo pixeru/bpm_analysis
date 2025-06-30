@@ -1,21 +1,43 @@
-# Changelog: BPM Analysis Script
-## Version 0.2
-This update transitions the script from a command-line tool to a graphical user interface (GUI) application, improving usability and adding new features for more accurate analysis.
-### ✨ New Features
-- **Graphical User Interface (GUI):** The script is now a user-friendly desktop application built with `tkinter` and `ttkbootstrap`.
-    - **File Browser:** Users can now browse and select audio files directly from the application.
-    - **Auto-File Detection:** The application automatically finds and loads the first supported audio file in the current directory on startup.
-- **BPM Hint:** A new input field allows users to provide an optional "Starting BPM" hint. This helps the algorithm more accurately identify the initial S1-S2 heart sound interval, improving peak detection for recordings where the heart rate is known.
-### 🚀 Improvements
-- **Peak Detection Algorithm:**
-    - The `find_heartbeat_peaks` function was enhanced to use the new user-provided BPM hint to calculate a more precise S1-S2 interval threshold.
-    - In the absence of a hint, the automatic detection logic was made more robust by analyzing beat cycle estimates (systolic + diastolic intervals) rather than just the median of all peak intervals.
-- **Plotting and Visualization:**
-    - The x-axis of the output plot is now more informative, displaying time in both total seconds and a `minutes:seconds` format for easier interpretation of longer recordings.
-    - The plot's y-axis range for signal amplitude was adjusted for better visualization of the waveform.
-- **User Experience:**
-    - The `main` function was refactored to launch the `BPMApp` GUI instead of automatically processing all files in a directory.
-    - The application now provides real-time status updates (e.g., "Analyzing...", "Complete") and displays clear error messages to the user.
-### 🐛 Bug Fixes
-- The `downsample_factor` in the core processing parameters was changed from `10` in `v0.1` to `50` in `v0.2` within the `preprocess_audio` function and changed from `100` to `100` in the main function. This change likely addresses performance on larger files.
-- The script now correctly handles the case where `pydub`/`FFmpeg` are not installed when attempting to convert non-WAV files, showing an error message in the GUI instead of just in the console.
+# Heartbeat BPM Analyzer
+The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordings of heart sounds to detect heartbeats and calculate the Beats Per Minute (BPM) over time. It is designed to work with various audio file formats and provides a visual representation of the analysis.
+## Features
+- **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
+- **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A) by converting them to a standard format for analysis.
+- **Advanced Peak Detection:** Employs a sophisticated, multi-step algorithm to accurately identify heartbeats (peaks) in the audio signal:
+    - **Adaptive S1-S2 Pairing:** Differentiates between the two main heart sounds (S1 and S2) and adapts its strategy for high vs. moderate heart rates.
+    - **Beat Rescue Logic:** Re-analyzes sections of the audio where a beat might have been missed due to noise or a weak signal.
+- **BPM Hint:** Users can provide an estimated starting BPM to guide the algorithm, improving accuracy for difficult recordings.
+- **Interactive Visualization:** Generates an interactive HTML plot showing:
+    - The audio signal's envelope.
+    - All raw peaks detected.
+    - The final, filtered heartbeats.
+    - A smoothed BPM trendline.
+- **Data Export:** Saves the calculated BPM data to a CSV file for further analysis.
+## Dependencies
+To run this script, you will need Python and the following libraries:
+- **`numpy`**: For numerical operations.
+- **`pandas`**: For data manipulation and creating the signal envelope.
+- **`scipy`**: For signal processing (filtering and peak finding).
+- **`plotly`**: For creating the interactive plots.
+- **`ttkbootstrap`**: For the modern GUI theme.
+- **`pydub`**: For converting non-WAV audio files.
+You will also need **FFmpeg** installed and accessible in your system's PATH for `pydub` to function correctly.
+## How to Use
+1. **Install Dependencies:**
+    ```
+    pip install numpy pandas scipy plotly ttkbootstrap pydub
+    ```
+2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
+3. **Run the Script:**
+    ```
+    python bpm_analysis_v0.4.py
+    ```
+4. **Use the Application:**
+    - The application will attempt to automatically load a supported audio file from the same directory.
+    - If no file is loaded, click **Browse** to select an audio file.
+    - (Optional) Enter an estimated starting BPM in the "Starting BPM" field.
+    - Click **Analyze**.
+5. **View Results:**
+    - Check the console for detailed debug output.
+    - An HTML plot file (e.g., `your_audio_file_bpm_plot.html`) will be saved in the same directory as the script.
+    - A CSV file with the BPM data (e.g., `your_audio_file_bpm_analysis.csv`) will also be created.
