@@ -203,3 +203,13 @@ This is a major architectural update focused on improving application stability,
     - The main analysis functions now accept the `params` dictionary, eliminating the need to pass numerous individual arguments.
 - **GUI Status Updates:** The GUI status bar is now more informative, providing real-time updates as the analysis progresses through different stages (e.g., "Converting file...", "Processing and analyzing...").
 
+# Changelog: BPM Analysis Script
+## Version 1.6
+This version focuses on improving the tunability and maintainability of the core algorithm by externalizing a key parameter and providing extensive documentation for all configuration settings.
+### ✨ New Features
+- **Tunable Lookahead Veto:** The multiplier used in the "Trough-based Lookahead Veto" is no longer a hardcoded value. It has been extracted into the `DEFAULT_PARAMS` dictionary as `trough_veto_multiplier`, allowing users to easily adjust the aggressiveness of this noise rejection heuristic.
+### 🚀 Improvements
+- **Exhaustive Parameter Documentation:** The `DEFAULT_PARAMS` dictionary has been thoroughly commented. Each parameter now has a detailed explanation of its function, its impact on the analysis, and the trade-offs involved in increasing or decreasing its value. This dramatically improves the usability and maintainability of the script for developers and advanced users.
+- **S2 Beat Justification:** The full justification string (including confidence scores, BPM belief, etc.) for an S1-S2 pairing decision is now correctly stored for the S2 peak. This makes the reasoning for S2 classification fully visible in both the plot's hover-label and the Markdown debug log.
+- **Algorithm Tuning:** The default `pairing_confidence_threshold` has been lowered from `0.6` to `0.55`, making the algorithm slightly more inclined to form S1-S2 pairs.
+

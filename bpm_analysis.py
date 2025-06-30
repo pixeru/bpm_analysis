@@ -19,7 +19,7 @@ import threading
 import sys
 import queue
 
-# --- Reminder to future maintainers, do not remove the debug code from this WIP version of the project ---
+# --- Do not remove the debug code from this project! ---
 # --- Setup Professional Logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -35,37 +35,99 @@ except ImportError:
     logging.warning("FFmpeg is also required for audio conversion (add to system PATH).")
     AudioSegment = None
 
-# --- Centralized Configuration for Easy Tuning ---
+# --- Centralized Configuration for Easy Tuning (don't remove the comments)---
 DEFAULT_PARAMS = {
-    # Preprocessing
-    "downsample_factor": 100,
+    # Preprocessing Parameters
+    "downsample_factor": 100,     # The factor by which to reduce the audio's sample rate. higher = less detail, faster processing, lower file size
     "bandpass_freqs": (20, 150),  # (low_hz, high_hz)
+    # =================================================================================
+    # Core Beat Detection Parameters
+    # These settings govern the main algorithm for finding and classifying peaks.
+    # =================================================================================
+    "min_bpm": 40,   # The absolute minimum BPM the algorithm will consider valid for the long-term belief.
+    "max_bpm": 240,  # The absolute maximum BPM the algorithm will consider valid for the long-term belief.
+    "min_peak_distance_sec": 0.05,
+    # The minimum time allowed between any two raw peaks found in the signal.
+    # Increase: Prevents a single, wide heartbeat sound from being detected as multiple peaks.
+    # Decrease: Allows detection of very close peaks, useful for high BPMs, but risks detecting noise as peaks.
 
-    # Core Beat Detection
-    "min_bpm": 40,
-    "max_bpm": 240,
-    "min_peak_distance_sec": 0.05, # Min separation between any two raw peaks
-    "noise_floor_quantile": 0.20,  # Quantile for dynamic noise floor calculation
-    "noise_window_sec": 10,        # Rolling window for the noise floor
-    "trough_prominence_quantile": 0.05, # Quantile to determine a 'trough'
-    "peak_prominence_quantile": 0.1,  # First-pass prominence filter for peaks
-    "deviation_smoothing_factor": 0.05, # Smoothing for amplitude deviation series (as % of peaks)
+    "noise_floor_quantile": 0.20,
+    # The quantile used to calculate the dynamic noise floor from audio troughs. (0.2 = 20th percentile).
+    # Increase: Raises the noise floor, making the algorithm less sensitive. Requires peaks to be taller to be considered.
+    # Decrease: Lowers the noise floor, making the algorithm more sensitive. More likely to detect smaller peaks.
+    "noise_window_sec": 10,
+    # The size of the rolling window (in seconds) for calculating the dynamic noise floor.
+    # Increase: The noise floor adapts more slowly to changes in background noise, resulting in a smoother, more stable floor.
+    # Decrease: The noise floor adapts very quickly to local changes in noise level.
+    "trough_prominence_quantile": 0.05,
+    # The prominence required for a dip in the signal to be considered a 'trough' for noise floor calculation.
+    # Increase: Requires troughs to be much deeper to be identified. Finds fewer, more significant troughs.
+    # Decrease: Allows shallower dips to be considered troughs. Finds more troughs, but can make false positives.
+    "peak_prominence_quantile": 0.1,
+    # The prominence required for a signal spike to be considered a 'peak' in the first pass.
+    # Increase: Requires peaks to stand out more from their surroundings. Filters out minor bumps more aggressively.
+    # Decrease: Allows less prominent peaks to be included in the analysis, increasing sensitivity.
 
-    # S1/S2 Pairing Logic
-    "s1_s2_interval_cap_sec": 0.4, # Hard cap on S1-S2 interval
-    "s1_s2_interval_rr_fraction": 0.65, # Max S1-S2 interval as fraction of beat-to-beat interval
-    "pairing_confidence_threshold": 0.6,
-    "trough_noise_multiplier": 3.0, # Trough amp must be N-times floor to be considered noisy
+    "trough_veto_multiplier": 2,
+    # Lookahead Veto Logic: If `N * (current_peak - trough) < (next_peak - trough)`, the current peak is vetoed as noise.
+    # This rule helps reject a small noise peak that occurs just before a large, real peak.
+    # Increase: Makes the veto harder to trigger. Fewer peaks will be vetoed.
+    # Decrease: Makes the veto easier to trigger. More aggressive at rejecting small peaks that precede large ones.
+
+    "deviation_smoothing_factor": 0.05,
+    # Controls the amount of smoothing applied to the peak-to-peak amplitude deviation series.
+    # Increase: More smoothing. The S1/S2 pairing confidence will be based on the general trend of amplitude changes.
+    # Decrease: Less smoothing. Pairing confidence will be highly influenced by the amplitude change between two adjacent peaks.
+
+    # =================================================================================
+    # S1/S2 Pairing Logic Parameters
+    # These settings control how the algorithm decides if two peaks are an S1/S2 pair or a lone S1.
+    # =================================================================================
+    "s1_s2_interval_cap_sec": 0.4,
+    # The absolute maximum time (in seconds) allowed between a detected S1 and a subsequent S2.
+    # Increase: Allows pairing of S1-S2 events that are further apart, which may be needed for very slow heart rates.
+    # Decrease: Enforces a stricter time limit for pairing, preventing a distant noise peak from being classified as an S2.
+    "s1_s2_interval_rr_fraction": 0.65,
+    # The S1-S2 interval cannot be longer than this fraction of the current beat-to-beat (RR) interval.
+    # Increase: Allows the S1-S2 interval to be a larger portion of the cardiac cycle.
+    # Decrease: Restricts the S1-S2 interval to be a smaller fraction of the cycle, useful for higher heart rates.
+
+    "pairing_confidence_threshold": 0.55,
+    # The confidence score required to classify two adjacent peaks as an S1-S2 pair.
+    # Increase: Requires stronger evidence for pairing. Results in fewer S1-S2 pairs and more "Lone S1" beats.
+    # Decrease: Easier to form S1-S2 pairs. Risks incorrectly pairing a true S1 with a nearby noise peak.
+
+    "trough_noise_multiplier": 3.0,
+    # A peak is considered "noisy" if the trough preceding it has an amplitude N-times higher than the dynamic noise floor.
+    # Increase: Requires the trough to be much louder to be considered noisy. Less likely to classify peaks as noise.
+    # Decrease: Even a slightly elevated trough can mark an area as noisy, making noise classification more likely.
+
     "noise_confidence_threshold": 0.7,
-    "strong_peak_override_ratio": 6.0, # Peak amp N-times floor bypasses noise rules
+    # If the calculated "noise confidence" for a peak exceeds this value, it will be classified as noise.
+    # Increase: Harder to reject a peak. The algorithm needs to be more certain it's noise.
+    # Decrease: Easier to reject a peak as noise, making the filter more aggressive.
 
-    # Long-Term BPM Belief
-    "long_term_bpm_learning_rate": 0.05, # How much a new beat influences the belief
-    "max_bpm_change_per_beat": 3.0, # Speed limit on BPM change
+    "strong_peak_override_ratio": 6.0,
+    # A peak whose amplitude is N-times the noise floor will bypass the noise-rejection rules and be kept.
+    # Increase: Requires a peak to be exceptionally tall to bypass noise rules.
+    # Decrease: Allows moderately tall peaks to be kept even if they are in a section considered noisy.
 
-    # Output & Post-processing
-    "output_smoothing_window_sec": 5, # Smoothing for the final BPM graph
-    "save_filtered_wav": True # Save the bandpass-filtered audio for debugging
+    # =================================================================================
+    # Long-Term BPM Belief Parameters
+    # These settings control the "memory" or "belief" state of the algorithm's BPM calculation.
+    # =================================================================================
+    "long_term_bpm_learning_rate": 0.05,
+    # Controls how much a new beat influences the algorithm's long-term BPM belief (like an exponential moving average).
+    # Increase: The BPM belief adapts very quickly to changes. The 'Long-Term BPM' line will closely follow instantaneous BPM.
+    # Decrease: The BPM belief is more stable and changes slowly, making it robust against single outlier beats.
+
+    "max_bpm_change_per_beat": 3.0,
+    # A "speed limit" on how much the long-term BPM belief can change from one beat to the next.
+    # Increase: Allows the BPM belief to make larger jumps, tracking rapid heart rate changes more closely.
+    # Decrease: Forces the BPM belief to be smoother, preventing single incorrect detections from skewing the result.
+
+    "output_smoothing_window_sec": 5,
+    "save_filtered_wav": True
 }
 
 
@@ -219,8 +281,13 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                 trough_between_idx = sorted_troughs[trough_search_start_idx]
                 if trough_between_idx < next_peak_idx:
                     current_peak_amp, next_peak_amp, trough_amp = audio_envelope[current_peak_idx], audio_envelope[next_peak_idx], audio_envelope[trough_between_idx]
-                    if 2 * (current_peak_amp - trough_amp) < (next_peak_amp - trough_amp):
-                        reason = (f"Noise (Vetoed by Lookahead). Condition: 2*({current_peak_amp:.1f}-{trough_amp:.1f}) < ({next_peak_amp:.1f}-{trough_amp:.1f})")
+
+                    veto_multiplier = params['trough_veto_multiplier']
+                    lhs = veto_multiplier * (current_peak_amp - trough_amp)
+                    rhs = next_peak_amp - trough_amp
+
+                    if lhs < rhs:
+                        reason = (f"Noise (Vetoed by Lookahead). Condition: {lhs:.1f} < {rhs:.1f}")
                         beat_debug_info[current_peak_idx] = reason
                         i += 1
                         continue
@@ -281,7 +348,7 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
             s1_idx, s2_idx = current_peak_idx, next_peak_idx
             candidate_beats.append(s1_idx)
             beat_debug_info[s1_idx] = f"S1 (Paired). {reason.lstrip(' |')}"
-            beat_debug_info[s2_idx] = f"S2 (Paired to S1 at {s1_idx/sample_rate:.2f}s)"
+            beat_debug_info[s2_idx] = f"S2 (Paired). Justification: {reason.lstrip(' |')}"
 
             if len(candidate_beats) > 1:
                 # Update long-term BPM belief
