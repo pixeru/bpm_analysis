@@ -42,7 +42,7 @@ DEFAULT_PARAMS = {
     # =================================================================================
     "downsample_factor": 300,     # Factor to reduce sample rate. Higher = faster processing, less detail.
     "bandpass_freqs": (20, 150),  # (low_hz, high_hz) for the bandpass filter.
-    "save_filtered_wav": True,    # If True, saves a .wav file of the filtered audio for debugging.
+    "save_filtered_wav": False,    # If True, saves a .wav file of the filtered audio for debugging.
 
     # =================================================================================
     # 2. Signal Feature Detection
@@ -83,20 +83,26 @@ DEFAULT_PARAMS = {
     "confidence_curve_high_bpm": [0.1, 0.5, 0.75, 0.65, 0],      # Y-axis curve for HIGH heart rates (rewards S1 > S2).
 
     # --- 4.3. Physiology-Based Confidence Adjustment ---
-    "enable_stability_pre_adjustment": True,  # Master switch for the stability adjustment logic.
     "stability_history_window": 20,         # Number of recent beats used to determine rhythm stability.
-    "stability_confidence_floor": 0.50,     # At 0% pairing success, confidence is multiplied by this (e.g., a 50% reduction).
-    "stability_confidence_ceiling": 1.10,   # At 100% pairing success, confidence is multiplied by this (e.g., a 10% boost).
+    "stability_confidence_floor": 0.60,     # At 0% pairing success, confidence is multiplied by this (e.g., a 50% reduction).
+    "stability_confidence_ceiling": 1.25,   # At 100% pairing success, confidence is multiplied by this (e.g., a 10% boost).
     "s1_s2_boost_ratio": 1.2,               # S1 strength must be > (S2 strength * this value) to get a confidence boost.
     "boost_amount_min": 0.10,               # Additive confidence boost for a "good" pair in an unstable section.
     "boost_amount_max": 0.35,               # Additive confidence boost for a "good" pair in a stable section.
-    "penalty_amount_min": 0.15,             # Subtractive confidence penalty for a "bad" pair in a stable section.
-    "penalty_amount_max": 0.40,             # Subtractive confidence penalty for a "bad" pair in an unstable section.
+    "penalty_amount_min": 0.10,             # Subtractive confidence penalty for a "bad" pair in a stable section.
+    "penalty_amount_max": 0.25,             # Subtractive confidence penalty for a "bad" pair in an unstable section.
     "s2_s1_ratio_low_bpm": 1.5,             # At low BPM, allows S2 to be up to 1.5x S1 strength before penalty.
     "s2_s1_ratio_high_bpm": 1.1,            # At high BPM, expects S2 to be no more than 1.1x S1 strength.
     "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
     "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
     "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
+
+    # --- 4.4. Kick-Start Mechanism to Recover from Pairing Failure ---
+    "kickstart_check_threshold": 0.3,           # Only run the check if pairing_ratio is BELOW this value.
+    "kickstart_history_beats": 4,               # How many of the most recent beats to check.
+    "kickstart_min_s1_candidates": 3,           # At least this many of the recent beats must be "Lone S1s" to be considered.
+    "kickstart_min_matches": 3,                 # How many must match the "S1 -> Noise" pattern to trigger.
+    "kickstart_override_ratio": 0.60,           # The temporary pairing ratio to use if kick-start is triggered.
 
     # =================================================================================
     # 5. Rhythm Plausibility & Validation
@@ -132,7 +138,7 @@ DEFAULT_PARAMS = {
     "output_smoothing_window_sec": 5,        # Time window (seconds) for smoothing the final BPM curve for display.
     "hrv_window_size_beats": 40,             # Sliding window size (in beats) for HRV calculation.
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
-    "plot_amplitude_scale_factor": 100.0,    # Adjusts the default y-axis range of the signal amplitude plot.
+    "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
     "plot_downsample_audio_envelope": True,  # If True, downsamples audio line traces for faster plotting.
     "plot_downsample_factor": 5,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
 }
@@ -400,12 +406,12 @@ def _adjust_confidence_with_stability_and_ratio(confidence, s1_idx, s2_idx, audi
 
     # --- 1. Universal Stability Pre-Adjustment ---
     # Do not apply this logic for the first 5 beats, as the rhythm is not yet established.
-    if params.get("enable_stability_pre_adjustment", True) and beat_count >= 5:
+    if beat_count >= 5:
         floor = params.get("stability_confidence_floor", 0.85)
         ceiling = params.get("stability_confidence_ceiling", 1.10)
         stability_factor = np.interp(pairing_ratio, [0.0, 1.0], [floor, ceiling])
         confidence *= stability_factor
-        reason += f"\n- Stability Pre-Adjust: Confidence modified by {stability_factor:.2f}x based on pairing ratio of {pairing_ratio:.0%}."
+        reason += f"\n- Stability Pre-Adjust: Confidence modified by {stability_factor:.2f}x based on pairing ratio of {pairing_ratio:.0%} to new confidence:{confidence:.0%}"
 
     # --- 2. Calculate Peak Strengths and Expected Ratio ---
     s1_strength = max(0, audio_envelope[s1_idx] - dynamic_noise_floor.iloc[s1_idx])
@@ -422,10 +428,20 @@ def _adjust_confidence_with_stability_and_ratio(confidence, s1_idx, s2_idx, audi
 
     # --- 3. Apply Final Dynamic Boost or Penalty Amount ---
     if current_s2_s1_strength_ratio > max_expected_s2_s1_ratio:
-        # PENALTY: S2 is stronger than expected. Penalty is harsher in unstable sections.
+        # PENALTY: S2 is stronger than expected.
+        # The penalty is scaled by the severity of the violation.
         min_penalty = params.get("penalty_amount_min", 0.15)
         max_penalty = params.get("penalty_amount_max", 0.40)
-        penalty_amount = np.interp(pairing_ratio, [0.0, 1.0], [max_penalty, min_penalty]) # Inverse relationship
+        violation_severity = current_s2_s1_strength_ratio / max_expected_s2_s1_ratio
+
+        # A minor violation (severity near 1.0) gets a small penalty.
+        # A major violation (e.g., severity of 3.0 or more) gets the maximum penalty.
+        # The divisor (2.0) controls how quickly the penalty ramps up; a smaller number means it ramps up faster.
+        severity_scale = np.clip((violation_severity - 1.0) / 2.0, 0, 1)
+
+        penalty_range = max_penalty - min_penalty
+        penalty_amount = min_penalty + (severity_scale * penalty_range)
+
         confidence -= penalty_amount
         reason += f"\n- PENALIZED by {penalty_amount:.2f} (S2 strength ratio {current_s2_s1_strength_ratio:.1f}x > expected {max_expected_s2_s1_ratio:.1f}x)."
 
@@ -435,7 +451,8 @@ def _adjust_confidence_with_stability_and_ratio(confidence, s1_idx, s2_idx, audi
         max_boost = params.get("boost_amount_max", 0.35)
         boost_amount = np.interp(pairing_ratio, [0.0, 1.0], [min_boost, max_boost])
         confidence += boost_amount
-        reason += f"\n- BOOSTED by {boost_amount:.2f} (S1 clearly stronger)."
+        actual_s1_s2_ratio = s1_strength / (s2_strength + 1e-9)
+        reason += f"\n- BOOSTED by {boost_amount:.2f} (S1 strength {actual_s1_s2_ratio:.1f}x > S2)."
 
     return max(0.0, min(1.0, confidence)), reason # Ensure confidence stays between 0 and 1
 
@@ -494,17 +511,27 @@ def _validate_lone_s1(current_peak_idx, all_peaks, candidate_beats, long_term_bp
         next_raw_peak_idx = all_peaks[current_peak_all_peaks_idx + 1]
         forward_interval_sec = (next_raw_peak_idx - current_peak_idx) / sample_rate
         expected_rr_sec = 60.0 / long_term_bpm
-        min_forward_interval = expected_rr_sec * params.get('lone_s1_forward_check_pct', 0.6)
+        min_forward_interval = expected_rr_sec * params.get('lone_s1_forward_check_pct', 0.60)
 
         if forward_interval_sec < min_forward_interval:
-            implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
-            rejection_detail = (
-                f"Rejected Lone S1: Peak is too close to the next, implying an unrealistic BPM spike.\n"
-                f"  - Justification: Forward interval:{forward_interval_sec:.3f}s is < minimum allowed:({min_forward_interval:.3f}s).\n"
-                f"  - Implication: Instantaneous {implied_bpm:.0f}BPM, from the current trend of {long_term_bpm:.0f}BPM."
-            )
-            return False, rejection_detail
+            # --- Sanity Check ---
+            # The interval is short. Before rejecting, check if the next peak is just insignificant noise.
+            # If our current S1 peak is much stronger, we override the rejection.
+            current_peak_amp = audio_envelope[current_peak_idx]
+            next_peak_amp = audio_envelope[next_raw_peak_idx]
 
+            # This ratio can be tuned in params, e.g., 1.7 means the current peak must be 70% stronger.
+            rejection_override_ratio = 1.4
+
+            # Only reject if the next peak is of similar or greater strength.
+            if not (current_peak_amp > (next_peak_amp * rejection_override_ratio)):
+                implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
+                rejection_detail = (
+                    f"Rejected Lone S1: Peak is too close to the next, implying an unrealistic BPM spike.\n"
+                    f"  - Justification: Forward interval:{forward_interval_sec:.3f}s is < minimum allowed:({min_forward_interval:.3f}s).\n"
+                    f"  - Implication: Instantaneous {implied_bpm:.0f}BPM, from the current trend of {long_term_bpm:.0f}BPM."
+                )
+                return False, rejection_detail
     # It passed all three checks
     return True, ""
 
@@ -545,10 +572,45 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
     long_term_bpm = float(start_bpm_hint) if start_bpm_hint else 80.0
     candidate_beats, beat_debug_info, long_term_bpm_history = [], {}, []
     sorted_troughs = sorted(trough_indices)
+    consecutive_rr_rejections = 0
     i = 0
     while i < len(all_peaks):
         # --- DYNAMIC STABILITY CALCULATION ---
         pairing_ratio = _calculate_pairing_ratio(candidate_beats, beat_debug_info, params)
+
+        # --- KICK-START MECHANISM ---
+        # If pairing has failed consistently, look for a pattern of Lone S1 -> Noise,
+        # which suggests S2s are being missed. If found, temporarily boost the pairing ratio.
+        if pairing_ratio < params.get("kickstart_check_threshold", 0.3):
+            history = params.get("kickstart_history_beats", 4)
+            min_s1s = params.get("kickstart_min_s1_candidates", 3)
+            min_matches = params.get("kickstart_min_matches", 3)
+
+            if len(candidate_beats) >= history:
+                # Get recent beats that were classified as Lone S1
+                recent_lone_s1s = [
+                    idx for idx in candidate_beats[-history:]
+                    if "Lone S1" in beat_debug_info.get(idx, "")
+                ]
+
+                # For each Lone S1, check if the next raw peak was labeled as Noise
+                if len(recent_lone_s1s) >= min_s1s:
+                    matches = 0
+                    for s1_idx in recent_lone_s1s:
+                        current_raw_idx = np.searchsorted(all_peaks, s1_idx)
+                        if current_raw_idx < len(all_peaks) - 1:
+                            next_raw_peak_idx = all_peaks[current_raw_idx + 1]
+                            if "Noise" in beat_debug_info.get(next_raw_peak_idx, ""):
+                                matches += 1
+
+                    # If the pattern is consistent, trigger the kick-start
+                    if matches >= min_matches:
+                        override_ratio = params.get("kickstart_override_ratio", 0.6)
+                        logging.info(
+                            f"KICK-START: Found {matches}/{len(recent_lone_s1s)} S1->Noise patterns. "
+                            f"Temporarily overriding pairing ratio from {pairing_ratio:.2f} to {override_ratio}."
+                        )
+                        pairing_ratio = override_ratio
 
         current_peak_idx = all_peaks[i]
         reason = ""
@@ -605,6 +667,7 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                 candidate_beats.append(current_peak_idx)
                 beat_debug_info[current_peak_idx] = f"S1 (Paired). {reason.lstrip(' |')}"
                 beat_debug_info[next_peak_idx] = f"S2 (Paired). Justification: {reason.lstrip(' |')}"
+                consecutive_rr_rejections = 0 # Reset counter on a successful pair
                 i += 2
             else:
                 # --- LONE S1 VALIDATION ---
@@ -612,11 +675,31 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                     current_peak_idx, all_peaks, candidate_beats, long_term_bpm,
                     audio_envelope, dynamic_noise_floor, sample_rate, params
                 )
+
                 if is_valid:
                     candidate_beats.append(current_peak_idx)
                     beat_debug_info[current_peak_idx] = f"Lone S1. {reason.lstrip(' |')}"
+                    consecutive_rr_rejections = 0 # Reset counter on a successful beat
                 else:
-                    beat_debug_info[current_peak_idx] = f"Noise ({rejection_detail}). Original pairing reason: [{reason.lstrip(' |')}]"
+                    # Cascade failure reset logic
+                    is_rr_rejection = "outside plausible range" in rejection_detail
+                    trigger_count = params.get("cascade_reset_trigger_count", 2)
+
+                    if is_rr_rejection and consecutive_rr_rejections >= trigger_count:
+                        # We've failed multiple times in a row. Override the rejection to re-anchor the rhythm.
+                        logging.info(
+                            f"CASCADE RESET: Forcing peak at {current_peak_idx/sample_rate:.2f}s as Lone S1 to break failure loop."
+                        )
+                        candidate_beats.append(current_peak_idx)
+                        beat_debug_info[current_peak_idx] = f"Lone S1 (Corrected by Cascade Reset). Original Rejection: [{rejection_detail}]"
+                        consecutive_rr_rejections = 0 # Reset counter after the correction
+                    else:
+                        # Standard rejection logic
+                        beat_debug_info[current_peak_idx] = f"Noise ({rejection_detail}). Original pairing reason: [{reason.lstrip(' |')}]"
+                        if is_rr_rejection:
+                            consecutive_rr_rejections += 1
+                        else:
+                            consecutive_rr_rejections = 0 # Reset if it was rejected for a different reason
                 i += 1
 
         # --- C. Update Long-Term BPM Belief ---
@@ -775,10 +858,10 @@ def _fix_rhythmic_discontinuities(s1_peaks, all_raw_peaks, debug_info, audio_env
                     corrections_made += 1
                     peaks_to_add.add(candidate_s1)
                     peaks_to_remove.add(candidate_s2)
-                    original_reason_A = corrected_debug_info.get(candidate_s1, "Noise")
-                    corrected_debug_info[candidate_s1] = f"S1 (Paired - Corrected from Gap). Original: [{original_reason_A}]"
-                    original_reason_B = corrected_debug_info.get(candidate_s2, "Noise")
-                    corrected_debug_info[candidate_s2] = f"S2 (Paired - Corrected from Gap). Original: [{original_reason_B}]"
+                    base_reason_A = corrected_debug_info.get(candidate_s1, "Noise").split(". Original: [")[0]
+                    corrected_debug_info[candidate_s1] = f"S1 (Paired - Corrected from Gap). Original: [{base_reason_A}]"
+                    base_reason_B = corrected_debug_info.get(candidate_s2, "Noise").split(". Original: [")[0]
+                    corrected_debug_info[candidate_s2] = f"S2 (Paired - Corrected from Gap). Original: [{base_reason_B}]"
                     break
                 else:
                     corrected_debug_info[candidate_s1] += f" | Correction Pass: REJECTED ({strength_msg}, {ratio_msg})"
@@ -809,8 +892,8 @@ def _fix_rhythmic_discontinuities(s1_peaks, all_raw_peaks, debug_info, audio_env
             if is_strong_s1 and is_ratio_plausible:
                 log_debug(f"  - SUCCESS: Conditions met. Re-labeling Beat B as S2.")
                 corrections_made += 1
-                original_reason_B = corrected_debug_info.get(beat_B_idx, "Lone S1")
-                corrected_debug_info[beat_B_idx] = f"S2 (Paired - Corrected from Conflict). Original: [{original_reason_B}]"
+                base_reason_B = corrected_debug_info.get(beat_B_idx, "Lone S1").split(". Original: [")[0]
+                corrected_debug_info[beat_B_idx] = f"S2 (Paired - Corrected from Conflict). Original: [{base_reason_B}]"
             else:
                 if s2_amp > s1_amp:
                     log_debug(f"  - UNRESOLVABLE: Keeping stronger peak at {beat_B_idx/sample_rate:.2f}s.")

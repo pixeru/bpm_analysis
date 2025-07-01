@@ -501,3 +501,15 @@ This version focuses on improving performance, refining the analysis pipeline lo
 - **Efficient Logging:** The log generation process was refactored to use `itertuples()` and a dedicated parsing function (`_parse_reason_string`) for improved performance and cleaner code.
 - **Performance Timing:** The `analyze_wav_file` function now measures and logs its total execution time, providing useful performance metrics.
 
+## Version 4.0
+This is a major update focused on improving the algorithm's resilience and robustness. It introduces several self-correction mechanisms designed to recover from periods of ambiguous or noisy audio where previous versions might have failed.
+### ✨ New Features
+- **Rhythm Recovery & Self-Correction:** The core analysis loop is now equipped with two new mechanisms to prevent analysis failure:
+    - **"Kick-Start" Mechanism:** If the algorithm detects a consistent failure to pair S1 and S2 beats, it intelligently identifies this pattern and temporarily boosts its own pairing confidence to "kick-start" the rhythm detection again.
+    - **"Cascade Reset" Logic:** A new safeguard that detects when multiple beats in a row are being rejected due to rhythmic implausibility. After a set number of consecutive failures, it will force the acceptance of a beat to re-anchor the rhythm and prevent a cascading failure loop.
+- **Proportional Penalty System:** The confidence penalty applied to an unexpectedly loud S2 peak is no longer a fixed adjustment. The penalty now scales proportionally with the severity of the S2/S1 amplitude violation, applying a larger penalty for more egregious violations and a smaller one for borderline cases.
+### 🚀 Improvements & Refactoring
+- **Smarter `Lone S1` Validation:** The forward-looking check for `Lone S1` peaks now includes a sanity check. It will override a rejection if the current peak is significantly stronger than the next, preventing a strong beat from being incorrectly discarded due to a small, subsequent noise peak.
+- **Algorithm Tuning:** The parameters for the stability-based confidence adjustment (`stability_confidence_floor`, `stability_confidence_ceiling`, and penalty amounts) have been fine-tuned to better complement the new self-correction features.
+- **Correction Pass Re-Disabled:** The post-processing correction pass (`enable_correction_pass`) has been disabled by default again, as the new, more robust primary analysis logic makes it largely redundant.
+
