@@ -30,7 +30,6 @@ This version focuses on improving the core beat detection algorithm to handle ca
     - This refinement makes the algorithm more resilient to artifacts and noise that might have caused weaker heartbeats to be initially overlooked.
 ### 🐛 Bug Fixes
 - A potential bug in the final filtering stage was addressed to prevent duplicate peaks from being added to the final list after the new "beat rescue" logic has been applied.
-_(No other significant changes were made to the GUI or other functions.)_
 
 ## Version 0.4
 This version introduces a more intelligent and adaptive peak detection algorithm, specifically designed to improve accuracy for recordings with very high heart rates. It also includes more detailed debugging output.
@@ -41,7 +40,6 @@ This version introduces a more intelligent and adaptive peak detection algorithm
     - **Moderate BPM Mode:** For lower heart rates, the algorithm continues to use the more flexible, dynamically-calculated S1-S2 interval from previous versions.
 - **Initial Peak Finding:** The parameters for the initial `find_peaks` function (`prominence` and `height`) have been made less strict. This allows the algorithm to capture more potential raw peaks at the start, which gives the downstream adaptive logic and beat rescue logic more data to work with, improving the chances of finding the correct beats.
 - **Debugging:** Extensive `print` statements have been added throughout the `find_heartbeat_peaks` function to provide a detailed, step-by-step log of the detection process. This is invaluable for troubleshooting and understanding how the final set of peaks was chosen.
-_(No other significant changes were made to the GUI or other functions.)_
 
 ## Version 0.5
 This version represents a significant architectural improvement to the core beat detection algorithm, replacing the semi-static logic with a fully dynamic approach that is much more responsive to heart rate variability.
@@ -232,20 +230,20 @@ This version introduces Heart Rate Variability (HRV) analysis as a major new fea
 
 ## Version 1.9
 This update introduces a more sophisticated multi-stage analysis pipeline, significantly improving the algorithm's robustness, accuracy, and ability to handle noisy or complex recordings without manual tuning.
-#### **Major Enhancements**
+### ✨ New Features
 - **Multi-Stage Analysis Pipeline:** The core analysis logic has been refactored from a single pass into a four-stage process to make more intelligent, context-aware decisions.
     1. **Stage 1: High-Confidence First Pass & Auto-BPM-Estimation:** The analyzer first performs a "high-confidence" pass with stricter parameters to find only the most obvious "anchor" beats. It uses the rhythm of these beats to automatically estimate a global BPM for the entire recording. This reduces the reliance on the optional "Starting BPM" hint.
     2. **Stage 2: Trough Sanitization & Refined Noise Floor:** The algorithm for calculating the dynamic noise floor has been completely redesigned. It now uses a "trough sanitization" technique to identify and discard false troughs (i.e., small divots within a larger heartbeat sound), resulting in a much more accurate and stable noise floor, especially in noisy audio.
     3. **Stage 3: Main Analysis Pass:** The primary beat detection and classification algorithm now runs using the refined inputs from the first two stages (the auto-estimated BPM and the sanitized noise floor), leading to more accurate S1/S2 pairing and noise rejection.
     4. **Stage 4: Rhythm-Based Post-Correction:** A new final pass has been added to validate the detected S1 beats based on rhythmic plausibility. If two beats are detected too close together, this stage intelligently discards the one with the lower amplitude, correcting for errors where a single beat was split into two.
-#### **New Configuration Parameters**
+### 🚀 Improvements
+- **Plotting:** The Y-axis of the interactive HTML plot now uses a percentile-based quantile for auto-scaling, making it more robust to single large outlier peaks in the audio envelope.
+- **Parameter Tuning:** Minor adjustments were made to `trough_veto_multiplier` and `s1_s2_interval_rr_fraction` for better general performance.
+### ⚙️ New Configuration Parameters
 - To support the new pipeline, several advanced parameters have been added to the `DEFAULT_PARAMS` dictionary for fine-tuning:
     - `trough_rejection_multiplier`: Controls the sensitivity of the new trough sanitization algorithm.
     - `rr_correction_threshold_pct`: Sets the threshold for the new rhythm-based post-correction pass.
     - `enable_bpm_boost`: Allows a specific heuristic in the pairing logic to be enabled or disabled for advanced testing.
-#### **Minor Improvements**
-- **Plotting:** The Y-axis of the interactive HTML plot now uses a percentile-based quantile for auto-scaling, making it more robust to single large outlier peaks in the audio envelope.
-- **Parameter Tuning:** Minor adjustments were made to `trough_veto_multiplier` and `s1_s2_interval_rr_fraction` for better general performance.
 
 ## Version 2.0
 This release introduces a major new analytical capability: **Windowed Heart Rate Variability (HRV) Analysis**. This moves beyond a single HRV summary for the entire recording to provide a dynamic, time-varying view of HRV.
@@ -468,4 +466,17 @@ This version is a major refactoring effort focused on improving code organizatio
     - The `_validate_lone_s1` logic has been extracted into its own dedicated function.
 - **Organized Configuration:** The `DEFAULT_PARAMS` dictionary has been completely reorganized with commented sections (e.g., "Peak & Trough Detection", "S1/S2 Pairing Logic", "Confidence Boost Logic") to make parameters easier to find and tune.
 - **No Change in Core Logic:** This update is purely organizational. The underlying algorithms for beat detection and analysis have not been changed, ensuring that results will be identical to v3.5.
+
+# Changelog: BPM Analysis Script
+## Version 3.7
+This version introduces a completely rewritten and significantly more powerful post-processing system for correcting rhythmic errors, making the final beat detection more robust and accurate.
+### ✨ New Features
+- **Unified Rhythmic Correction System:** The previous correction functions (`correct_peaks_by_rhythm` and `correct_beats_with_local_context`) have been replaced by a single, more intelligent function: `_fix_rhythmic_discontinuities`.
+- **Bi-Directional Error Fixing:** This new system is capable of fixing two types of common errors:
+    1. **Missed Beats:** It detects abnormally _long_ R-R intervals and searches the gap for plausible S1/S2 pairs that were initially misclassified as noise.
+    2. **Misclassified Beats:** It detects abnormally _short_ R-R intervals (e.g., two adjacent S1 peaks) and attempts to reclassify the second peak as an S2, resolving the conflict.
+- **Correction Pass Enabled by Default:** Due to its enhanced reliability, this new correction pass is now enabled by default (`enable_correction_pass`: `True`).
+### 🚀 Improvements & Refactoring
+- **New Configuration Parameters:** Added several new parameters to `DEFAULT_PARAMS` under the "Post-Processing & Correction Passes" section to provide fine-grained control over the new correction logic (e.g., `rr_correction_long_interval_pct`, `penalty_waiver_strength_ratio`).
+- **Enhanced Logging:** The correction pass now has a dedicated `correction_log_level` parameter to provide verbose debugging output, showing exactly why a discontinuity was or was not fixed.
 

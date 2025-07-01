@@ -193,14 +193,35 @@ DEFAULT_PARAMS = {
 
     # =================================================================================
     # 10. Post-Processing & Correction Passes
-    # Settings for the final analysis passes that use local context to fix errors.
+    # These settings control the final analysis pass that identifies and fixes rhythmic discontinuities
     # =================================================================================
-    "rr_correction_threshold_pct": 0.60, # For post-correction pass, an RR interval shorter than N% of the median is flagged for correction.
-    "enable_correction_pass": False,          # Master switch to enable/disable the contextual correction feature.
-    "correction_pass_window_beats": 40,       # The size of the moving window (in beats) to calculate the local pairing ratio.
-    "correction_pass_ratio_threshold": 0.70,  # If the local pairing ratio is above this, the context is considered "high confidence".
-    "penalty_waiver_strength_ratio": 4.0, # S1 peak must be this many times > noise floor to allow a penalty waiver.
-    "penalty_waiver_max_s2_s1_ratio": 2.5, # Even if waived, penalty still applies if S2 is more than N times larger than S1.
+    "enable_correction_pass": True,
+    "rr_correction_threshold_pct": 0.40,
+    # Defines how short an R-R interval must be to be flagged as a "discontinuity."
+    # The check is: Interval < (Median R-R Interval * this_value).
+    # Decrease: Makes the check more sensitive, flagging more minor BPM spikes for review.
+    # Increase: Makes the check less sensitive, only flagging the most severe and obvious spikes.
+
+    "penalty_waiver_strength_ratio": 4.0,
+    # The "Value" check. To justify fixing a discontinuity, the S1 peak must be strong.
+    # This value is the required signal-to-noise ratio (Peak Amp / Noise Floor Amp).
+    # Increase: Requires a much stronger, clearer S1 signal to allow a correction. More conservative.
+    # Decrease: Allows corrections to be anchored to weaker S1 signals. More aggressive.
+
+    "penalty_waiver_max_s2_s1_ratio": 2.5,
+    # The "Ratio" check. This is a safety rail to prevent a huge noise spike from being
+    # incorrectly labeled as an S2. The correction is only allowed if S2_amp / S1_amp is less than this value.
+    # Increase: Allows a potential S2 to be much larger than its S1, making corrections easier.
+    # Decrease: Enforces a stricter amplitude relationship, making corrections harder.
+
+    "rr_correction_long_interval_pct": 1.70,
+    # The "long interval" check. An R-R interval is flagged for review if it is
+    # longer than (Median R-R Interval * this_value). This is designed to find
+    # gaps where beats may have been missed.
+    # Decrease: Makes the check more sensitive, flagging smaller gaps.
+    # Increase: Only flags the most significant gaps for review.
+
+    "correction_log_level": "DEBUG", # Set to "DEBUG" for verbose, "INFO" by default
 
     # =================================================================================
     # 11. Output & HRV Settings
@@ -802,67 +823,138 @@ def correct_peaks_by_rhythm(peaks, audio_envelope, sample_rate, params):
         logging.info("Correction pass complete. No rhythmic conflicts found.")
     return np.array(corrected_peaks)
 
-def correct_beats_with_local_context(s1_peaks, all_raw_peaks, beat_debug_info, params):
+def _fix_rhythmic_discontinuities(s1_peaks, all_raw_peaks, debug_info, audio_envelope, dynamic_noise_floor, params, sample_rate):
     """
-    Performs a second analysis pass to correct misclassified beats using local rhythm context.
-
-    This function identifies 'Lone S1' beats that are likely part of a missed pair
-    by analyzing the pairing success rate in their local neighborhood.
+    Identifies and attempts to fix rhythmic discontinuities by re-evaluating misclassified peaks.
+    This version handles both abnormally SHORT and abnormally LONG R-R intervals.
     """
-    if not params.get("enable_correction_pass", False) or len(s1_peaks) < params["correction_pass_window_beats"]:
-        logging.info("Correction pass skipped (disabled or not enough beats).")
-        return s1_peaks, beat_debug_info, 0
+    log_level = params.get("correction_log_level", "INFO").upper()
+    def log_debug(msg):
+        if log_level == "DEBUG":
+            logging.info(f"[Correction DEBUG] {msg}")
 
-    logging.info("--- STAGE 5: Running Correction Pass with Local Rhythm Context ---")
+    if len(s1_peaks) < 3:
+        return s1_peaks, debug_info, 0
 
-    pairing_success = [1 if "S1 (Paired)" in beat_debug_info.get(peak_idx, "") else 0 for peak_idx in s1_peaks]
-    pairing_series = pd.Series(pairing_success, name="pairing_ratio")
-    window_size = params["correction_pass_window_beats"]
-    local_pairing_ratio = pairing_series.rolling(window=window_size, min_periods=max(1, window_size // 2)).mean().bfill().ffill()
+    rr_intervals_sec = np.diff(s1_peaks) / sample_rate
+    # Filter out extreme outliers before calculating the median to get a more stable value
+    q1, q3 = np.percentile(rr_intervals_sec, [25, 75])
+    iqr = q3 - q1
+    stable_rr_intervals = rr_intervals_sec[(rr_intervals_sec > (q1 - 1.5 * iqr)) & (rr_intervals_sec < (q3 + 1.5 * iqr))]
 
-    if local_pairing_ratio.empty:
-        logging.warning("Could not calculate local pairing ratio. Skipping correction.")
-        return s1_peaks, beat_debug_info, 0
+    if len(stable_rr_intervals) < 1:
+        log_debug("Not enough stable R-R intervals to determine median. Skipping correction.")
+        return s1_peaks, debug_info, 0
 
-    corrected_debug_info = beat_debug_info.copy()
-    raw_peaks_list = all_raw_peaks.tolist()
+    median_rr_sec = np.median(stable_rr_intervals)
+    short_conflict_threshold_sec = median_rr_sec * params["rr_correction_threshold_pct"]
+    long_conflict_threshold_sec = median_rr_sec * params.get("rr_correction_long_interval_pct", 1.7)
+
+    log_debug(f"Median R-R: {median_rr_sec:.3f}s. Short Threshold: < {short_conflict_threshold_sec:.3f}s. Long Threshold: > {long_conflict_threshold_sec:.3f}s.")
+
+    corrected_debug_info = debug_info.copy()
+    peaks_to_add = set()
+    peaks_to_remove = set()
     corrections_made = 0
-    s1_peak_to_position = {peak: i for i, peak in enumerate(s1_peaks)}
 
-    for s1_peak_idx in s1_peaks:
-        if beat_debug_info.get(s1_peak_idx, "").startswith("Lone S1"):
-            try:
-                current_raw_idx = raw_peaks_list.index(s1_peak_idx)
-                if current_raw_idx + 1 < len(raw_peaks_list):
-                    next_raw_peak = raw_peaks_list[current_raw_idx + 1]
-                else:
+    # --- Pass 1: Look for LONG intervals (missed beats) ---
+    raw_peaks_set = set(all_raw_peaks)
+    for i in range(len(s1_peaks) - 1):
+        s1_start_idx = s1_peaks[i]
+        s1_end_idx = s1_peaks[i+1]
+        interval_sec = (s1_end_idx - s1_start_idx) / sample_rate
+
+        if interval_sec > long_conflict_threshold_sec:
+            log_debug(f"Found LONG interval of {interval_sec:.3f}s between beats at {s1_start_idx/sample_rate:.2f}s and {s1_end_idx/sample_rate:.2f}s. Investigating gap...")
+
+            # Find all raw peaks within this gap that were labeled as Noise
+            gap_candidates = [p for p in all_raw_peaks if s1_start_idx < p < s1_end_idx and "Noise" in debug_info.get(p, "")]
+            log_debug(f"Found {len(gap_candidates)} potential candidates in the gap.")
+
+            for j, candidate_s1 in enumerate(gap_candidates):
+                # Check if this candidate is already part of a fix
+                if candidate_s1 in peaks_to_add or candidate_s1 in peaks_to_remove:
                     continue
-            except ValueError:
-                continue
 
-            if beat_debug_info.get(next_raw_peak, "").startswith("Noise (Rejected Failed S2 Candidate)"):
-                s1_position = s1_peak_to_position.get(s1_peak_idx)
-                if s1_position is None: continue
+                # Check if the *next* raw peak could be its S2
+                current_raw_idx = np.searchsorted(all_raw_peaks, candidate_s1)
+                if current_raw_idx + 1 >= len(all_raw_peaks):
+                    continue
+                candidate_s2 = all_raw_peaks[current_raw_idx + 1]
 
-                current_local_ratio = local_pairing_ratio.iloc[s1_position]
+                # Ensure the S2 candidate is also in the gap and labeled as Noise
+                if candidate_s2 >= s1_end_idx or "Noise" not in debug_info.get(candidate_s2, ""):
+                    continue
 
-                if current_local_ratio >= params["correction_pass_ratio_threshold"]:
+                log_debug(f"  - Evaluating potential pair: S1 at {candidate_s1/sample_rate:.2f}s and S2 at {candidate_s2/sample_rate:.2f}s")
+
+                # --- Apply the Waiver Logic ---
+                s1_amp = audio_envelope[candidate_s1]
+                s2_amp = audio_envelope[candidate_s2]
+                noise_at_s1 = dynamic_noise_floor.iloc[candidate_s1]
+
+                is_strong_s1 = (s1_amp - noise_at_s1) > (params["penalty_waiver_strength_ratio"] * noise_at_s1)
+                is_ratio_plausible = (s2_amp / (s1_amp + 1e-9)) < params["penalty_waiver_max_s2_s1_ratio"]
+
+                log_debug(f"    - Strength check: {'PASS' if is_strong_s1 else 'FAIL'}. Ratio check: {'PASS' if is_ratio_plausible else 'FAIL'}.")
+
+                if is_strong_s1 and is_ratio_plausible:
+                    log_debug(f"    - SUCCESS: Conditions met. Re-labeling pair.")
                     corrections_made += 1
+                    peaks_to_add.add(candidate_s1)
+                    # Mark the S2 as "used" so it can't be part of another pair
+                    peaks_to_remove.add(candidate_s2)
 
-                    original_reason = corrected_debug_info[s1_peak_idx]
-                    corrected_debug_info[s1_peak_idx] = f"S1 (Paired - Corrected). Original: [{original_reason}]"
+                    # Update debug info
+                    original_reason_A = corrected_debug_info.get(candidate_s1, "Noise")
+                    corrected_debug_info[candidate_s1] = f"S1 (Paired - Corrected from Gap). Original: [{original_reason_A}]"
+                    original_reason_B = corrected_debug_info.get(candidate_s2, "Noise")
+                    corrected_debug_info[candidate_s2] = f"S2 (Paired - Corrected from Gap). Original: [{original_reason_B}]"
+                    # We found a pair, break from the inner loop to avoid creating overlapping pairs from the same gap
+                    break
 
-                    original_noise_reason = corrected_debug_info[next_raw_peak]
-                    corrected_debug_info[next_raw_peak] = f"S2 (Paired - Corrected). Justification: High local pairing ratio ({current_local_ratio:.2f}). Original: [{original_noise_reason}]"
+    # --- Pass 2: Look for SHORT intervals (adjacent S1s) ---
+    temp_s1_list = sorted(list(set(s1_peaks) | peaks_to_add))
+    final_s1_peaks = []
+    if not temp_s1_list: return np.array([]), corrected_debug_info, corrections_made
 
-    logging.info(f"Correction pass complete. Relabeled {corrections_made} S1/S2 pairs.")
+    final_s1_peaks.append(temp_s1_list[0])
+    for i in range(1, len(temp_s1_list)):
+        beat_A_idx = final_s1_peaks[-1]
+        beat_B_idx = temp_s1_list[i]
+        interval_sec = (beat_B_idx - beat_A_idx) / sample_rate
 
-    final_s1_peaks = np.array(sorted([
-        peak for peak, reason in corrected_debug_info.items()
-        if reason.startswith("S1 (Paired") or reason.startswith("Lone S1")
-    ]))
+        if interval_sec < short_conflict_threshold_sec:
+            log_debug(f"Found SHORT interval of {interval_sec:.3f}s between beats at {beat_A_idx/sample_rate:.2f}s and {beat_B_idx/sample_rate:.2f}s. Evaluating...")
+            # This is the original logic for fixing two S1s that are too close
+            s1_amp = audio_envelope[beat_A_idx]
+            s2_amp = audio_envelope[beat_B_idx]
+            noise_at_s1 = dynamic_noise_floor.iloc[beat_A_idx]
+            is_strong_s1 = (s1_amp - noise_at_s1) > (params["penalty_waiver_strength_ratio"] * noise_at_s1)
+            is_ratio_plausible = (s2_amp / (s1_amp + 1e-9)) < params["penalty_waiver_max_s2_s1_ratio"]
 
-    return final_s1_peaks, corrected_debug_info, corrections_made
+            log_debug(f"  - Strength check: {'PASS' if is_strong_s1 else 'FAIL'}. Ratio check: {'PASS' if is_ratio_plausible else 'FAIL'}.")
+
+            if is_strong_s1 and is_ratio_plausible:
+                log_debug(f"  - SUCCESS: Conditions met. Re-labeling Beat B as S2.")
+                corrections_made += 1
+                # Update debug info for the S2
+                original_reason_B = corrected_debug_info.get(beat_B_idx, "Lone S1")
+                corrected_debug_info[beat_B_idx] = f"S2 (Paired - Corrected from Conflict). Original: [{original_reason_B}]"
+                # Don't add beat_B_idx to the final list, as it's now an S2
+            else:
+                 # Conflict is unresolvable, keep the stronger of the two peaks
+                if s2_amp > s1_amp:
+                    log_debug(f"  - UNRESOLVABLE: Keeping stronger peak at {beat_B_idx/sample_rate:.2f}s.")
+                    final_s1_peaks[-1] = beat_B_idx # Replace the last one
+                else:
+                    log_debug(f"  - UNRESOLVABLE: Keeping stronger peak at {beat_A_idx/sample_rate:.2f}s.")
+                    pass # Keep the original and discard B
+        else:
+            final_s1_peaks.append(beat_B_idx)
+
+
+    return np.array(sorted(final_s1_peaks)), corrected_debug_info, corrections_made
 
 def calculate_windowed_hrv(s1_peaks, sample_rate, params):
     """ Calculates HRV metrics using R-R intervals based on changing heart rate """
@@ -1482,18 +1574,36 @@ def _determine_start_bpm(start_bpm_hint, global_bpm_estimate):
     logging.warning("Could not determine starting BPM. Using fallback default of 80.0 BPM.")
     return 80.0
 
-def _run_iterative_correction_pass(s1_peaks, all_raw_peaks, debug_info, params):
-    """Runs the contextual correction pass iteratively until it stabilizes."""
+# --- Replace the existing _run_iterative_correction_pass function ---
+
+def _run_iterative_correction_pass(s1_peaks, all_raw_peaks, analysis_data, params, sample_rate):
+    """
+    Runs the contextual correction pass iteratively until it stabilizes.
+    """
+    if not params.get("enable_correction_pass", False):
+        logging.info("Correction pass skipped (disabled by parameter).")
+        return s1_peaks, analysis_data["beat_debug_info"]
+
+    logging.info("--- STAGE 5: Running Iterative Correction Pass ---")
+
     final_peaks = s1_peaks
-    corrected_debug_info = debug_info.copy()
-    max_iterations = 5  # Safeguard
+    corrected_debug_info = analysis_data["beat_debug_info"].copy()
+    max_iterations = 5  # Safeguard against infinite loops
 
     for i in range(max_iterations):
-        new_peaks, new_debug_info, corrections_made = correct_beats_with_local_context(
-            s1_peaks=final_peaks, all_raw_peaks=all_raw_peaks,
-            beat_debug_info=corrected_debug_info, params=params)
+        new_peaks, new_debug_info, corrections_made = _fix_rhythmic_discontinuities(
+            s1_peaks=final_peaks,
+            all_raw_peaks=all_raw_peaks,
+            debug_info=corrected_debug_info,
+            audio_envelope=analysis_data['audio_envelope'],
+            dynamic_noise_floor=analysis_data['dynamic_noise_floor_series'],
+            params=params,
+            sample_rate=sample_rate # Pass sample_rate
+        )
 
-        final_peaks, corrected_debug_info = new_peaks, new_debug_info
+        final_peaks = new_peaks
+        corrected_debug_info = new_debug_info
+
         logging.info(f"Correction Pass Iteration {i + 1} made {corrections_made} changes.")
         if corrections_made == 0:
             logging.info("Correction process stabilized. Exiting loop.")
@@ -1553,10 +1663,12 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint):
 
     # STAGE 4: Rhythm-based correction pass
     s1_peaks_pass2 = correct_peaks_by_rhythm(s1_peaks_pass1, audio_envelope, sample_rate, params)
+    # Add audio_envelope to analysis_data so it can be passed to the correction pass
+    analysis_data['audio_envelope'] = audio_envelope
 
     # STAGE 5: Iterative contextual correction pass
     final_peaks, final_debug_info = _run_iterative_correction_pass(
-        s1_peaks_pass2, all_raw_peaks, analysis_data["beat_debug_info"], params)
+        s1_peaks_pass2, all_raw_peaks, analysis_data, params, sample_rate)
     analysis_data["beat_debug_info"] = final_debug_info
 
     # --- FINAL CALCULATIONS AND OUTPUT ---
