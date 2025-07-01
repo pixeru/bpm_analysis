@@ -143,23 +143,31 @@ DEFAULT_PARAMS = {
     "contractility_bpm_low": 120.0,  # Below this BPM, expect S2 can be louder than S1.
     "contractility_bpm_high": 140.0, # Above this BPM, strongly expect S1 to be louder than S2.
 
-    "s2_s1_ratio_low_bpm": 1.5,   # At low BPM, allows S2 to be up to 1.5x louder than S1.
-    "s2_s1_ratio_high_bpm": 1.1,  # At high BPM, expects S2 to be no more than 1.1x louder than S1.
-
     "confidence_adjustment_low_bpm": 0.8,  # Gentle confidence reduction (20%) if ratio is exceeded at low BPM.
     "confidence_adjustment_high_bpm": 0.4, # Harsh confidence reduction (60%) if ratio is exceeded at high BPM.
 
-    "recovery_phase_duration_sec": 120.0, # Duration (in seconds) of the high-contractility state after peak BPM is detected.
+    # =================================================================================
+    # 6. S1/S2 Confidence Adjustment Model
+    # Adjusts pairing confidence based on rhythm stability and S1/S2 strength ratio.
+    # =================================================================================
+    # --- Part 1: Rhythm Stability Pre-Adjustment ---
+    "enable_stability_pre_adjustment": True,  # Master switch for the stability logic.
+    "stability_history_window": 20,         # The number of recent beats to look at to determine rhythm stability.
+    "stability_confidence_floor": 0.85,     # At 0% pairing success, base confidence is multiplied by this factor (a 15% reduction).
+    "stability_confidence_ceiling": 1.10,   # At 100% pairing success, base confidence is multiplied by this factor (a 10% increase).
 
-    # =================================================================================
-    # 7. Confidence Boost Logic
-    # Dynamically boosts pairing confidence based on recent rhythm stability.
-    # =================================================================================
-    "enable_bpm_boost": True,     # Master switch to enable/disable the BPM spike prevention boost.
-    "s1_s2_boost_ratio": 1.2,     # Apply boost if the S1 amplitude is more than 1.2 times the S2 amplitude.
-    "boost_history_window": 20,   # The number of recent beats to look at to determine rhythm stability.
-    "boost_amount_min": 0.10,     # The minimum confidence boost to apply (when pairing success is 0%).
-    "boost_amount_max": 0.35,     # The maximum confidence boost to apply (when pairing success is 100%).
+    # --- Part 2: Dynamic Boost / Penalty Amounts ---
+    "s1_s2_boost_ratio": 1.2,             # To get a boost, S1 strength must be > (S2 strength * this value).
+    "boost_amount_min": 0.10,             # The additive confidence boost for a "good" pair in an unstable section.
+    "boost_amount_max": 0.35,             # The additive confidence boost for a "good" pair in a stable section.
+
+    "penalty_amount_min": 0.15,           # The subtractive confidence penalty for a "bad" pair in a stable section.
+    "penalty_amount_max": 0.40,           # The subtractive confidence penalty for a "bad" pair in an unstable section.
+
+    # --- Part 3: S2 Strength Expectation (Physiology Model) ---
+    "s2_s1_ratio_low_bpm": 1.5,           # At low BPM, allows S2 strength to be up to 1.5x S1 strength before penalty.
+    "s2_s1_ratio_high_bpm": 1.1,          # At high BPM, expects S2 strength to be no more than 1.1x S1 strength.
+    "recovery_phase_duration_sec": 120,   # Duration (in seconds) of the high-contractility state after peak BPM.
 
     # =================================================================================
     # 8. Long-Term BPM Belief
@@ -195,7 +203,7 @@ DEFAULT_PARAMS = {
     # 10. Post-Processing & Correction Passes
     # These settings control the final analysis pass that identifies and fixes rhythmic discontinuities
     # =================================================================================
-    "enable_correction_pass": True,
+    "enable_correction_pass": False,
     "rr_correction_threshold_pct": 0.40,
     # Defines how short an R-R interval must be to be flagged as a "discontinuity."
     # The check is: Interval < (Median R-R Interval * this_value).
@@ -487,73 +495,65 @@ def update_long_term_bpm(new_rr_sec, current_long_term_bpm, params):
     new_bpm = current_long_term_bpm + limited_change
     return max(params['min_bpm'], min(new_bpm, params['max_bpm']))
 
-def evaluate_pairing_confidence(s1_idx, s2_idx, smoothed_deviation, audio_envelope, dynamic_noise_floor,
-                              long_term_bpm, dynamic_boost_amount, params, sample_rate,
-                              peak_bpm_time_sec, recovery_end_time_sec):
+def _calculate_pairing_ratio(candidate_beats, beat_debug_info, params):
+    """Calculates the recent rhythm stability as a ratio from 0.0 to 1.0."""
+    history_window = params.get("stability_history_window", 20)
+    if len(candidate_beats) < history_window:
+        # In the startup phase, assume moderate stability
+        return 0.5
+
+    recent_beats = candidate_beats[-history_window:]
+    paired_count = sum(1 for beat_idx in recent_beats if "S1 (Paired)" in beat_debug_info.get(beat_idx, ""))
+    return paired_count / history_window
+
+def _adjust_confidence_with_stability_and_ratio(confidence, s1_idx, s2_idx, audio_envelope, dynamic_noise_floor,
+                                               long_term_bpm, pairing_ratio, params, sample_rate,
+                                               peak_bpm_time_sec, recovery_end_time_sec):
     """
-    Evaluates the confidence of an S1-S2 pair using a state-aware, BPM-dependent model
-    that accounts for a high-contractility recovery phase post-exertion.
+    Applies a full suite of confidence adjustments based on rhythm stability and S1/S2 strength ratio.
+    This single function replaces the older, separate boost/penalty logic.
     """
-    s1_amp = audio_envelope[s1_idx]
-    s2_amp = audio_envelope[s2_idx]
     reason = ""
-    penalty_applied = False # We can rename this to has_unexpected_ratio later
 
+    # --- 1. Universal Stability Pre-Adjustment ---
+    if params.get("enable_stability_pre_adjustment", True):
+        floor = params.get("stability_confidence_floor", 0.85)
+        ceiling = params.get("stability_confidence_ceiling", 1.10)
+        stability_factor = np.interp(pairing_ratio, [0.0, 1.0], [floor, ceiling])
+        confidence *= stability_factor
+        reason += f"\n- Stability Pre-Adjust: Confidence modified by {stability_factor:.2f}x based on pairing ratio of {pairing_ratio:.0%}."
 
-    # Base confidence from amplitude deviation
-    threshold = params.get('pairing_confidence_threshold', 0.52)
-    confidence = calculate_blended_confidence(smoothed_deviation, long_term_bpm, params)
-    reason += f"| Base Pairing Conf: {confidence:.2f} (vs Threshold: {threshold:.2f}) "
+    # --- 2. Calculate Peak Strengths and Expected Ratio ---
+    s1_strength = max(0, audio_envelope[s1_idx] - dynamic_noise_floor.iloc[s1_idx])
+    s2_strength = max(0, audio_envelope[s2_idx] - dynamic_noise_floor.iloc[s2_idx])
+    current_s2_s1_strength_ratio = s2_strength / (s1_strength + 1e-9)
 
-    # --- State-Aware Contractility Logic ---
-    current_beat_time_sec = s1_idx / sample_rate
-    is_in_recovery = False
+    # Determine expected ratio based on BPM and recovery state
+    is_in_recovery = (peak_bpm_time_sec is not None and recovery_end_time_sec is not None and
+                      peak_bpm_time_sec < (s1_idx / sample_rate) < recovery_end_time_sec)
+    effective_bpm = max(long_term_bpm, params['contractility_bpm_low']) if is_in_recovery else long_term_bpm
+    max_expected_s2_s1_ratio = np.interp(effective_bpm,
+                                       [params['contractility_bpm_low'], params['contractility_bpm_high']],
+                                       [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']])
 
-    # Check if a recovery phase was detected and if we are currently in it
-    if peak_bpm_time_sec is not None and recovery_end_time_sec is not None:
-        if peak_bpm_time_sec < current_beat_time_sec < recovery_end_time_sec:
-            is_in_recovery = True
+    # --- 3. Apply Final Dynamic Boost or Penalty Amount ---
+    if current_s2_s1_strength_ratio > max_expected_s2_s1_ratio:
+        # PENALTY: S2 is stronger than expected. Penalty is harsher in unstable sections.
+        min_penalty = params.get("penalty_amount_min", 0.15)
+        max_penalty = params.get("penalty_amount_max", 0.40)
+        penalty_amount = np.interp(pairing_ratio, [0.0, 1.0], [max_penalty, min_penalty]) # Inverse relationship
+        confidence -= penalty_amount
+        reason += f"\n- PENALIZED by {penalty_amount:.2f} (S2 strength ratio {current_s2_s1_strength_ratio:.1f}x > expected {max_expected_s2_s1_ratio:.1f}x)."
 
-    if is_in_recovery:
-        effective_bpm_for_rules = max(long_term_bpm, params['contractility_bpm_low'])
-        reason += (
-            f"\n- STATE: Post-Exertion Recovery."
-            f"\n- Result: Effective BPM for rules is capped at a minimum of {params['contractility_bpm_low']:.0f}. (Actual: {long_term_bpm:.0f} BPM)"
-        )
-        # In recovery, the rules can relax as BPM drops, but only down to a certain point.
-        # We use the current long_term_bpm, but prevent it from dropping below our 'low contractility' threshold.
+    elif s1_strength > (s2_strength * params.get('s1_s2_boost_ratio', 1.2)):
+        # BOOST: S1 is clearly stronger. Boost is higher in stable sections.
+        min_boost = params.get("boost_amount_min", 0.10)
+        max_boost = params.get("boost_amount_max", 0.35)
+        boost_amount = np.interp(pairing_ratio, [0.0, 1.0], [min_boost, max_boost])
+        confidence += boost_amount
+        reason += f"\n- BOOSTED by {boost_amount:.2f} (S1 clearly stronger)."
 
-        bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
-        ratio_points = [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']]
-        adjustment_points = [params['confidence_adjustment_low_bpm'], params['confidence_adjustment_high_bpm']]
-        max_expected_s2_s1_ratio = np.interp(effective_bpm_for_rules, bpm_points, ratio_points)
-        adjustment_factor = np.interp(effective_bpm_for_rules, bpm_points, adjustment_points)
-    else:
-        # STATE: Normal. Use the standard, flexible BPM-based interpolation.
-        bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
-        ratio_points = [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']]
-        adjustment_points = [params['confidence_adjustment_low_bpm'], params['confidence_adjustment_high_bpm']]
-
-        max_expected_s2_s1_ratio = np.interp(long_term_bpm, bpm_points, ratio_points)
-        adjustment_factor = np.interp(long_term_bpm, bpm_points, adjustment_points)
-
-    # Check if the observed S2/S1 ratio exceeds our state-aware expectation
-    current_s2_s1_ratio = s2_amp / (s1_amp + 1e-9)
-    if current_s2_s1_ratio > max_expected_s2_s1_ratio:
-        confidence *= adjustment_factor
-        penalty_applied = True
-        reason += (
-            f"\n- ADJUSTED (Next peak is too loud to be a plausible S2 at this BPM)."
-            f"\n- Justification: S2/S1 Ratio {current_s2_s1_ratio:.1f}x > Expected {max_expected_s2_s1_ratio:.1f}x at {long_term_bpm:.0f} BPM."
-            f"\n- Result: Confidence adjusted to {confidence:.2f}."
-        )
-    # Standard Boost Logic (when S1 > S2)
-    elif s1_amp > (s2_amp * params.get('s1_s2_boost_ratio', 1.2)):
-        # Use the new dynamic_boost_amount instead of a fixed value
-        confidence = min(1.0, confidence + dynamic_boost_amount)
-        reason += f"| BOOSTED to {confidence:.2f} (S1 > S2, Dynamic Boost: {dynamic_boost_amount:.2f}) "
-
-    return confidence, reason, penalty_applied
+    return max(0, min(1.0, confidence)), reason # Ensure confidence stays between 0 and 1
 
 def is_rhythmically_plausible(new_s1_idx, last_s1_idx, long_term_bpm, sample_rate, params):
     """
@@ -667,23 +667,9 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
     sorted_troughs = sorted(trough_indices)
     i = 0
     while i < len(all_peaks):
-        # --- DYNAMIC BOOST CALCULATION ---
-        pairing_ratio = 0.0
-        history_window = params.get('boost_history_window', 20)
-
-        # Check if we are in the "startup phase" (not enough history yet)
-        if len(candidate_beats) < history_window:
-            # Use the default high startup boost
-            dynamic_boost_amount = params.get('boost_startup_amount', 0.25)
-        else:
-            recent_beats = candidate_beats[-history_window:]
-            paired_count = sum(1 for beat_idx in recent_beats if "S1 (Paired)" in beat_debug_info.get(beat_idx, ""))
-            pairing_ratio = paired_count / history_window
-
-            # Interpolate the boost amount based on the pairing ratio
-            min_boost = params.get('boost_amount_min', 0.05)
-            max_boost = params.get('boost_amount_max', 0.25)
-            dynamic_boost_amount = np.interp(pairing_ratio, [0.0, 1.0], [min_boost, max_boost])
+        # --- DYNAMIC STABILITY CALCULATION ---
+        # This is now refactored into its own function for clarity.
+        pairing_ratio = _calculate_pairing_ratio(candidate_beats, beat_debug_info, params)
 
         current_peak_idx = all_peaks[i]
         reason = ""
@@ -719,19 +705,22 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
         else:
             next_peak_idx = all_peaks[i + 1]
             interval_sec = (next_peak_idx - current_peak_idx) / sample_rate
-
-            # The deviation series index is now time-based, so we find the nearest value.
             current_time = current_peak_idx / sample_rate
             deviation_value = smoothed_dev_series.asof(current_time)
 
+            # --- Calculate base confidence ---
+            base_confidence = calculate_blended_confidence(deviation_value, long_term_bpm, params)
+            reason += f"| Base Conf: {base_confidence:.2f} (vs Threshold: {params['pairing_confidence_threshold']:.2f}) "
 
-            pairing_confidence, pair_reason, penalty_applied = evaluate_pairing_confidence(
-                current_peak_idx, next_peak_idx, deviation_value, audio_envelope,
-                dynamic_noise_floor, long_term_bpm, dynamic_boost_amount, params,
+            # --- Apply the new unified adjustment logic ---
+            final_confidence, adjust_reason = _adjust_confidence_with_stability_and_ratio(
+                base_confidence, current_peak_idx, next_peak_idx, audio_envelope,
+                dynamic_noise_floor, long_term_bpm, pairing_ratio, params,
                 sample_rate, peak_bpm_time_sec, recovery_end_time_sec
             )
-            reason += pair_reason
-            is_paired = interval_sec <= s1_s2_max_interval and pairing_confidence >= params['pairing_confidence_threshold']
+            reason += adjust_reason
+
+            is_paired = interval_sec <= s1_s2_max_interval and final_confidence >= params['pairing_confidence_threshold']
 
             if is_paired:
                 candidate_beats.append(current_peak_idx)
@@ -744,7 +733,6 @@ def find_heartbeat_peaks(audio_envelope, sample_rate, params, start_bpm_hint=Non
                     current_peak_idx, all_peaks, candidate_beats, long_term_bpm,
                     audio_envelope, dynamic_noise_floor, sample_rate, params
                 )
-
                 if is_valid:
                     candidate_beats.append(current_peak_idx)
                     beat_debug_info[current_peak_idx] = f"Lone S1. {reason.lstrip(' |')}"
@@ -1029,7 +1017,6 @@ def calculate_bpm_series(peaks, sample_rate, params):
     return smoothed_bpm, peak_times[1:][valid_diffs]
 
 # --- Plotting Helper Functions ---
-
 def _add_base_traces(fig, time_axis_dt, audio_envelope, analysis_data):
     """Adds the audio envelope, troughs, and noise floor traces to the plot."""
     fig.add_trace(go.Scatter(x=time_axis_dt, y=audio_envelope, name="Audio Envelope", line=dict(color="#47a5c4")), secondary_y=False)
@@ -1219,7 +1206,6 @@ def plot_results(audio_envelope, peaks, all_raw_peaks, analysis_data, smoothed_b
 
 
 # --- Summary Report Helper Functions ---
-
 def _write_summary_header(f, file_name):
     f.write(f"# Analysis Report for: {os.path.basename(file_name)}\n")
     f.write(f"*Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
@@ -1336,7 +1322,7 @@ def _prepare_log_data(audio_envelope, sample_rate, all_raw_peaks, analysis_data,
             lt_bpm_series = lt_bpm_series.groupby(level=0).mean()
         master_df['lt_bpm'] = lt_bpm_series
 
-    # Handle deviation_series (which is now guaranteed to be a Series)
+    # Handle deviation_series
     if 'deviation_series' in analysis_data and not analysis_data['deviation_series'].empty:
         dev_series = analysis_data['deviation_series']
         if not dev_series.index.is_unique:
@@ -1356,8 +1342,10 @@ def _write_log_events(log_file, merged_df, file_name):
         log_file.write(f"## Time: `{t:.4f}s`\n")
         reason = row.get('reason', '')
 
+        # --- Write the primary event status (Peak type or Trough) ---
         status_line = ""
         if row['type'] == 'Peak':
+            # This logic formats the multi-line reasons nicely
             if '. Justification: ' in reason:
                 parts = reason.split('. Justification: ', 1)
                 details = parts[1].strip().replace(' | ', '\n- ')
@@ -1377,12 +1365,24 @@ def _write_log_events(log_file, merged_df, file_name):
         else: # Trough
              log_file.write(f"**Trough Detected** (Amp: {row['amp']:.2f})\n")
 
+        # --- Write Signal and BPM details for the event's timestamp ---
         if 'envelope' in row and not pd.isna(row['envelope']): log_file.write(f"**Audio Envelope**: `{row['envelope']:.2f}`\n")
         if 'noise_floor' in row and not pd.isna(row['noise_floor']): log_file.write(f"**Noise Floor**: `{row['noise_floor']:.2f}`\n")
-        if 'S1' in reason:
-            if 'smoothed_bpm' in row and not pd.isna(row['smoothed_bpm']): log_file.write(f"**Average BPM (Smoothed)**: {row['smoothed_bpm']:.2f}\n")
-            if 'lt_bpm' in row and not pd.isna(row['lt_bpm']): log_file.write(f"**Long-Term BPM (Belief)**: {row['lt_bpm']:.2f}\n")
-            if 'deviation' in row and not pd.isna(row['deviation']): log_file.write(f"**Norm. Deviation**: {row['deviation'] * 100:.2f}%\n")
+
+        # This block now runs for ANY peak event to provide full context.
+        if row['type'] == 'Peak':
+            # Write Average BPM (Smoothed) if available
+            if 'smoothed_bpm' in row and not pd.isna(row['smoothed_bpm']):
+                log_file.write(f"**Average BPM (Smoothed)**: `{row['smoothed_bpm']:.1f}`\n")
+
+            # Write Long-Term BPM (Belief) if available
+            if 'lt_bpm' in row and not pd.isna(row['lt_bpm']):
+                log_file.write(f"**Long-Term BPM (Belief)**: `{row['lt_bpm']:.1f}`\n")
+
+            # Write Deviation if available
+            if 'deviation' in row and not pd.isna(row['deviation']):
+                log_file.write(f"**Norm. Deviation**: {row['deviation'] * 100:.1f}%\n")
+
         log_file.write("\n")
 
 def create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, analysis_data, smoothed_bpm, output_log_path, file_name):
@@ -1679,7 +1679,7 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint):
 
     metrics = _calculate_final_metrics(final_peaks, sample_rate, params)
 
-    # --- Save Reports and Plots (Corrected Function Calls) ---
+    # --- Save Reports and Plots ---
     output_summary_path = f"{file_name_no_ext}_Analysis_Summary.md"
     save_analysis_summary(
         output_path=output_summary_path,
@@ -1717,7 +1717,7 @@ def analyze_wav_file(wav_file_path, params, start_bpm_hint):
     create_chronological_log_file(audio_envelope, sample_rate, all_raw_peaks, analysis_data, metrics['smoothed_bpm'], output_log_path, wav_file_path)
 
 
-# --- GUI Class (unchanged) ---
+# --- GUI Class ---
 class BPMApp:
     def __init__(self, root):
         self.root = root

@@ -467,7 +467,6 @@ This version is a major refactoring effort focused on improving code organizatio
 - **Organized Configuration:** The `DEFAULT_PARAMS` dictionary has been completely reorganized with commented sections (e.g., "Peak & Trough Detection", "S1/S2 Pairing Logic", "Confidence Boost Logic") to make parameters easier to find and tune.
 - **No Change in Core Logic:** This update is purely organizational. The underlying algorithms for beat detection and analysis have not been changed, ensuring that results will be identical to v3.5.
 
-# Changelog: BPM Analysis Script
 ## Version 3.7
 This version introduces a completely rewritten and significantly more powerful post-processing system for correcting rhythmic errors, making the final beat detection more robust and accurate.
 ### ✨ New Features
@@ -479,4 +478,15 @@ This version introduces a completely rewritten and significantly more powerful p
 ### 🚀 Improvements & Refactoring
 - **New Configuration Parameters:** Added several new parameters to `DEFAULT_PARAMS` under the "Post-Processing & Correction Passes" section to provide fine-grained control over the new correction logic (e.g., `rr_correction_long_interval_pct`, `penalty_waiver_strength_ratio`).
 - **Enhanced Logging:** The correction pass now has a dedicated `correction_log_level` parameter to provide verbose debugging output, showing exactly why a discontinuity was or was not fixed.
+
+## Version 3.8
+This version introduces a complete overhaul of the S1/S2 pairing confidence logic, replacing the previous system with a more sophisticated and unified adjustment model.
+### ✨ New Features
+- **Unified Confidence Adjustment Model:** The `evaluate_pairing_confidence` function has been refactored. It now uses a new helper function, `_adjust_confidence_with_stability_and_ratio`, to apply a more nuanced set of rules:
+    1. **Stability Pre-Adjustment:** The base confidence score is first scaled up or down based on the recent stability of the rhythm (the pairing success rate).
+    2. **Dynamic Boost/Penalty:** After the pre-adjustment, a dynamic boost (for good pairs) or penalty (for bad pairs) is applied. The magnitude of this adjustment is also influenced by rhythm stability, making it more aggressive in unstable sections and more subtle in stable ones.
+### 🚀 Improvements & Refactoring
+- **New Configuration Group:** The `DEFAULT_PARAMS` dictionary now has a dedicated section, `6. S1/S2 Confidence Adjustment Model`, which centralizes all parameters related to the new confidence logic for easier tuning.
+- **Improved Code Clarity:** The logic for calculating rhythm stability has been extracted into its own helper function, `_calculate_pairing_ratio`, making the main analysis loop cleaner and easier to follow.
+- **Enhanced Debugging:** The debug log now provides more detailed insight into the confidence adjustment, showing the stability factor and the final boost or penalty amount applied.
 
