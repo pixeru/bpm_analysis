@@ -490,3 +490,14 @@ This version introduces a complete overhaul of the S1/S2 pairing confidence logi
 - **Improved Code Clarity:** The logic for calculating rhythm stability has been extracted into its own helper function, `_calculate_pairing_ratio`, making the main analysis loop cleaner and easier to follow.
 - **Enhanced Debugging:** The debug log now provides more detailed insight into the confidence adjustment, showing the stability factor and the final boost or penalty amount applied.
 
+## Version 3.9
+This version focuses on improving performance, refining the analysis pipeline logic, and enhancing the quality and efficiency of the output logs.
+### ✨ New Features
+- **Plotting Performance Optimization:** Introduced optional downsampling for the audio envelope and noise floor traces in the HTML plot. This significantly improves rendering speed and reduces file size for long recordings, making the application more responsive.
+- **Enhanced Debug Logs:** The chronological debug log is now more informative, providing the full context of all relevant metrics (Smoothed BPM, Long-Term BPM Belief, and Normalized Deviation) for every detected peak event.
+### 🚀 Improvements & Refactoring
+- **Refined Analysis Pipeline:** The main `analyze_wav_file` function was restructured to be more sequential and logical. It now explicitly calculates the noise floor _before_ running the high-confidence pass, making the data dependency clearer.
+- **Safer Rhythmic Correction:** The `_fix_rhythmic_discontinuities` function now applies a margin to the start and end of the beat list, preventing it from making corrections in these potentially unstable zones.
+- **Efficient Logging:** The log generation process was refactored to use `itertuples()` and a dedicated parsing function (`_parse_reason_string`) for improved performance and cleaner code.
+- **Performance Timing:** The `analyze_wav_file` function now measures and logs its total execution time, providing useful performance metrics.
+
