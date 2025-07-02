@@ -513,3 +513,13 @@ This is a major update focused on improving the algorithm's resilience and robus
 - **Algorithm Tuning:** The parameters for the stability-based confidence adjustment (`stability_confidence_floor`, `stability_confidence_ceiling`, and penalty amounts) have been fine-tuned to better complement the new self-correction features.
 - **Correction Pass Re-Disabled:** The post-processing correction pass (`enable_correction_pass`) has been disabled by default again, as the new, more robust primary analysis logic makes it largely redundant.
 
+## Version 4.1
+This version introduces a more advanced, gradient-based confidence model for validating single heartbeats (`Lone S1` peaks) and adds a new penalty system for S1-S2 pairing, further improving the nuance and accuracy of the core algorithm.
+### ✨ New Features
+- **Lone S1 Gradient Confidence Engine:** The previous binary pass/fail validation for `Lone S1` peaks has been replaced by a more sophisticated scoring system. The new `calculate_lone_s1_confidence` function calculates a weighted confidence score based on both rhythmic timing and amplitude consistency, providing a more nuanced and less brittle classification.
+- **Interval-Based Pairing Penalty:** A new graduated penalty system (`_apply_interval_penalty`) has been added to the S1-S2 pairing logic. This system reduces the confidence score for pairs that are too far apart in time, making the algorithm less likely to form implausible pairs, especially in noisy sections.
+### 🚀 Improvements & Refactoring
+- **New Configuration Parameters:** Added two new dedicated sections to `DEFAULT_PARAMS`:
+    - `4.4. Interval-Based Confidence Penalty`: For tuning the new interval penalty.
+    - `5.4. Lone S1 Gradient Confidence Engine`: For fine-tuning the weights and curves of the new `Lone S1` confidence model.
+- **Algorithm Tuning:** The `stability_confidence_floor` and `penalty_amount_max` parameters have been adjusted to better balance the new confidence and penalty systems.
