@@ -31,12 +31,12 @@ class PeakType(Enum):
     @classmethod
     def is_s1(cls, peak_type_str: str) -> bool:
         """Check if a string corresponds to any S1 type."""
-        return "S1" in peak_type_str
+        return peak_type_str.strip().startswith("S1") or peak_type_str.strip().startswith("Lone S1")
 
     @classmethod
     def is_s2(cls, peak_type_str: str) -> bool:
         """Check if a string corresponds to any S2 type."""
-        return "S2" in peak_type_str
+        return peak_type_str.strip().startswith("S2")
 
 def _parse_reason_string(reason: str) -> Tuple[str, str]:
     """A helper to decouple reason string parsing, used by Plotter and ReportGenerator."""
@@ -122,6 +122,7 @@ class PeakClassifier:
             return self.state['all_peaks'], self.state['all_peaks'], {"beat_debug_info": {}}
 
         while self.state['loop_idx'] < len(self.state['all_peaks']):
+            self._kickstart_check()
             current_peak_idx = self.state['all_peaks'][self.state['loop_idx']]
             is_last_peak = self.state['loop_idx'] >= len(self.state['all_peaks']) - 1
 
@@ -133,6 +134,36 @@ class PeakClassifier:
             self._update_long_term_bpm()
 
         return self._finalize_results()
+
+    def _kickstart_check(self):
+        """Specialized recovery function to kick-start the algorithm if it gets stuck."""
+        pairing_ratio = self._calculate_pairing_ratio()
+        if pairing_ratio >= self.params.get("kickstart_check_threshold", 0.3):
+            return
+
+        history = self.params.get("kickstart_history_beats", 4)
+        if len(self.state['candidate_beats']) < history:
+            return
+
+        min_s1s = self.params.get("kickstart_min_s1_candidates", 3)
+        recent_lone_s1s = [idx for idx in self.state['candidate_beats'][-history:] if "Lone S1" in self.state['beat_debug_info'].get(idx, "")]
+        if len(recent_lone_s1s) < min_s1s:
+            return
+
+        min_matches = self.params.get("kickstart_min_matches", 3)
+        matches = 0
+        for s1_idx in recent_lone_s1s:
+            current_raw_idx = np.searchsorted(self.state['all_peaks'], s1_idx)
+            if current_raw_idx < len(self.state['all_peaks']) - 1:
+                next_raw_peak_idx = self.state['all_peaks'][current_raw_idx + 1]
+                if "Noise" in self.state['beat_debug_info'].get(next_raw_peak_idx, ""):
+                    matches += 1
+
+        if matches >= min_matches:
+            override_ratio = self.params.get("kickstart_override_ratio", 0.6)
+            logging.info(f"KICK-START: Found {matches}/{len(recent_lone_s1s)} S1->Noise patterns. Overriding pairing ratio to {override_ratio}.")
+            # This is a temporary state change, so we don't store the override ratio in self.state
+            self.state['pairing_ratio_override'] = override_ratio
 
     def _handle_last_peak(self, peak_idx: int):
         """Classify the final peak in the sequence."""
@@ -219,13 +250,21 @@ class PeakClassifier:
             self.state['beat_debug_info'][peak_idx] = f"{PeakType.LONE_S1_VALIDATED.value}. Pairing Justification: [{pairing_failure_reason.lstrip(' |')}]"
             self.state['consecutive_rr_rejections'] = 0
         else:
-            self.state['consecutive_rr_rejections'] += 1
+            # Only increment the rejection counter for rhythm-based failures.
+            is_rhythm_rejection = "Rhythm Fit" in rejection_detail
+            if is_rhythm_rejection:
+                self.state['consecutive_rr_rejections'] += 1
+            else:
+                self.state['consecutive_rr_rejections'] = 0 # Reset for other failure types
+
+            # Check if the cascade reset should be triggered.
             if self.state['consecutive_rr_rejections'] >= self.params.get("cascade_reset_trigger_count", 3):
-                logging.info(f"CASCADE RESET: Forcing peak at {peak_idx/self.sample_rate:.2f}s as Lone S1.")
+                logging.info(f"CASCADE RESET: Forcing peak at {peak_idx/self.sample_rate:.2f}s as Lone S1 due to repeated rhythmic failures.")
                 self.state['candidate_beats'].append(peak_idx)
                 self.state['beat_debug_info'][peak_idx] = f"{PeakType.LONE_S1_CASCADE.value}. Rejection: [{rejection_detail}]. Pairing Justification: [{pairing_failure_reason.lstrip(' |')}]"
-                self.state['consecutive_rr_rejections'] = 0
+                self.state['consecutive_rr_rejections'] = 0 # Reset the counter after forcing the peak
             else:
+                # Otherwise, just mark it as noise.
                 self.state['beat_debug_info'][peak_idx] = f"Noise ({rejection_detail}). Pairing Justification: [{pairing_failure_reason.lstrip(' |')}]"
 
     def _validate_lone_s1(self, current_peak_idx: int) -> Tuple[bool, str]:
@@ -356,46 +395,84 @@ class Plotter:
 
     def _add_peak_traces(self, all_raw_peaks, debug_info, audio_envelope):
         """Adds S1, S2, and Noise peak markers to the plot."""
-        # This combines _categorize_peaks and _add_peak_traces logic
-        peak_categories = {pt.name: {'indices': [], 'customdata': []} for pt in [PeakType.S1_PAIRED, PeakType.S2_PAIRED, PeakType.NOISE]}
-        peak_map = { PeakType.S1_PAIRED.value: PeakType.S1_PAIRED, "Lone S1": PeakType.S1_PAIRED, PeakType.S2_PAIRED.value: PeakType.S2_PAIRED }
+        # A much more robust way to categorize peaks for plotting
+        s1_peaks = {'indices': [], 'customdata': []}
+        s2_peaks = {'indices': [], 'customdata': []}
+        noise_peaks = {'indices': [], 'customdata': []}
 
-        for peak_idx in all_raw_peaks:
-            reason_str = debug_info.get(peak_idx, 'Unknown')
+        classified_indices = set()
+
+        # Iterate through the final classifications, which is the source of truth
+        for peak_idx, reason_str in debug_info.items():
             peak_type, details = _parse_reason_string(reason_str)
-
-            category = PeakType.NOISE
-            if PeakType.is_s1(peak_type): category = PeakType.S1_PAIRED
-            elif PeakType.is_s2(peak_type): category = PeakType.S2_PAIRED
-
             custom_data = (peak_type, peak_idx / self.sample_rate, audio_envelope[peak_idx], details.replace('\n', '<br>'))
-            peak_categories[category.name]['indices'].append(peak_idx)
-            peak_categories[category.name]['customdata'].append(custom_data)
+            classified_indices.add(peak_idx)
+
+            if PeakType.is_s1(peak_type):
+                s1_peaks['indices'].append(peak_idx)
+                s1_peaks['customdata'].append(custom_data)
+            elif PeakType.is_s2(peak_type):
+                s2_peaks['indices'].append(peak_idx)
+                s2_peaks['customdata'].append(custom_data)
+            else: # Anything else that has a debug entry but isn't S1/S2 is Noise
+                noise_peaks['indices'].append(peak_idx)
+                noise_peaks['customdata'].append(custom_data)
+
+        # Now, catch any raw peaks that were never classified (e.g., filtered out early)
+        # and ensure they are plotted as noise.
+        for peak_idx in all_raw_peaks:
+            if peak_idx not in classified_indices:
+                custom_data = ("Unclassified", peak_idx / self.sample_rate, audio_envelope[peak_idx], "Peak was not evaluated by the classifier.")
+                noise_peaks['indices'].append(peak_idx)
+                noise_peaks['customdata'].append(custom_data)
+
 
         hovertemplate = "<b>Type:</b> %{customdata[0]}<br><b>Time:</b> %{customdata[1]:.2f}s<br><b>Amp:</b> %{customdata[2]:.0f}<br><b>Details:</b><br>%{customdata[3]}<extra></extra>"
 
         # S1 Beats
-        if peak_categories[PeakType.S1_PAIRED.name]['indices']:
-            s1_indices = np.array(peak_categories[PeakType.S1_PAIRED.name]['indices'])
-            s1_times = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (s1_indices / self.sample_rate)])
-            self.fig.add_trace(go.Scatter(x=s1_times, y=audio_envelope[s1_indices], mode='markers', name='S1 Beats', marker=dict(color='#e36f6f', size=8, symbol='diamond'), customdata=np.stack(peak_categories[PeakType.S1_PAIRED.name]['customdata']), hovertemplate=hovertemplate), secondary_y=False)
+        if s1_peaks['indices']:
+            indices = np.array(s1_peaks['indices'])
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (indices / self.sample_rate)])
+            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[indices], mode='markers', name='S1 Beats',
+                                        marker=dict(color='#e36f6f', size=8, symbol='diamond'),
+                                        customdata=np.stack(s1_peaks['customdata']),
+                                        hovertemplate=hovertemplate), secondary_y=False)
 
         # S2 Beats
-        if peak_categories[PeakType.S2_PAIRED.name]['indices']:
-            s2_indices = np.array(peak_categories[PeakType.S2_PAIRED.name]['indices'])
-            s2_times = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (s2_indices / self.sample_rate)])
-            self.fig.add_trace(go.Scatter(x=s2_times, y=audio_envelope[s2_indices], mode='markers', name='S2 Beats', marker=dict(color='orange', symbol='circle', size=6), customdata=np.stack(peak_categories[PeakType.S2_PAIRED.name]['customdata']), hovertemplate=hovertemplate), secondary_y=False)
+        if s2_peaks['indices']:
+            indices = np.array(s2_peaks['indices'])
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (indices / self.sample_rate)])
+            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[indices], mode='markers', name='S2 Beats',
+                                        marker=dict(color='orange', symbol='circle', size=6),
+                                        customdata=np.stack(s2_peaks['customdata']),
+                                        hovertemplate=hovertemplate), secondary_y=False)
 
         # Noise Peaks
-        if peak_categories[PeakType.NOISE.name]['indices']:
-            noise_indices = np.array(peak_categories[PeakType.NOISE.name]['indices'])
-            noise_times = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (noise_indices / self.sample_rate)])
-            self.fig.add_trace(go.Scatter(x=noise_times, y=audio_envelope[noise_indices], mode='markers', name='Noise/Rejected', marker=dict(color='grey', symbol='x', size=6), customdata=np.stack(peak_categories[PeakType.NOISE.name]['customdata']), hovertemplate=hovertemplate), secondary_y=False)
+        if noise_peaks['indices']:
+            indices = np.array(noise_peaks['indices'])
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (indices / self.sample_rate)])
+            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[indices], mode='markers', name='Noise/Rejected',
+                                        marker=dict(color='grey', symbol='x', size=6),
+                                        customdata=np.stack(noise_peaks['customdata']),
+                                        hovertemplate=hovertemplate), secondary_y=False)
 
     def _add_bpm_hrv_traces(self, smoothed_bpm, analysis_data, windowed_hrv_df):
         """Adds BPM, BPM trend, and HRV traces."""
         if smoothed_bpm is not None and not smoothed_bpm.empty:
             self.fig.add_trace(go.Scatter(x=smoothed_bpm.index, y=smoothed_bpm.values, name="Average BPM", line=dict(color="#4a4a4a", width=3)), secondary_y=True)
+
+        if "long_term_bpm_series" in analysis_data and not analysis_data["long_term_bpm_series"].empty:
+            lt_series = analysis_data["long_term_bpm_series"]
+            # Create datetime index for plotting
+            start_datetime = datetime.datetime.fromtimestamp(0)
+            lt_times_dt = pd.to_datetime([start_datetime + datetime.timedelta(seconds=t) for t in lt_series.index])
+            self.fig.add_trace(go.Scatter(
+                x=lt_times_dt,
+                y=lt_series.values,
+                name="BPM Trend (Belief)",
+                line=dict(color='orange', width=2, dash='dot'),
+                visible='legendonly'),
+                secondary_y=True)
         if windowed_hrv_df is not None and not windowed_hrv_df.empty and 'time' in windowed_hrv_df and 'rmssdc' in windowed_hrv_df and 'sdnn' in windowed_hrv_df:
             hrv_times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in windowed_hrv_df['time']])
             self.fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['rmssdc'], name="RMSSDc", line=dict(color='cyan', width=2), visible='legendonly'), secondary_y=True)
@@ -582,7 +659,7 @@ class ReportGenerator:
                 log_file.write(f"**{peak_type}**\n")
                 if details:
                     # Format nested details for better readability
-                    formatted_details = details.replace(' | ', '\n- ').replace('\n- - ', '\n  - ')
+                    formatted_details = details.replace(' | ', '\n- ').replace('\n- - ', '\n\t- ')
                     log_file.write(f"- {formatted_details}\n")
             else:  # Trough
                 log_file.write("**Trough Detected**\n")
@@ -604,8 +681,7 @@ class ReportGenerator:
                     elif name == "Norm. Deviation":
                         log_file.write(f"- **{name}**: {value * 100:.1f}%\n")
                     else:
-                        log_file.write(f"- **{name}**: `{value:.0f}`\n")
-            log_file.write("\n---\n\n")
+                        log_file.write(f"- **{name}**: `{value:.1f}`\n")
 
     def _write_summary_header(self, f):
         f.write(f"# Analysis Report for: {os.path.basename(self.file_name)}\n")
@@ -918,7 +994,7 @@ def _apply_interval_penalty(confidence: float, interval_sec: float, s1_s2_max_in
         return confidence, ""
 
     # Calculate how far into the "penalty zone" the interval is (from 0.0 to 1.0).
-    exceedance_scale = (interval_sec - penalty_zone_start) / (penalty_zone_end - penalty_zone_end + 1e-9)
+    exceedance_scale = (interval_sec - penalty_zone_start) / (penalty_zone_end - penalty_zone_start + 1e-9)
     exceedance_scale = np.clip(exceedance_scale, 0, 1)
 
     # The penalty is scaled linearly across the zone.
@@ -1529,12 +1605,3 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
-
-
-def main():
-    root = ttkb.Window(themename="minty")
-    app = BPMApp(root)
-    root.mainloop()
-
-if __name__ == "__main__":
-    main()
