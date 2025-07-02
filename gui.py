@@ -8,7 +8,18 @@ from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 from config import DEFAULT_PARAMS
+from dataclasses import dataclass
+from enum import Enum, auto
 
+class UIMessageType(Enum):
+    STATUS = auto()
+    ANALYSIS_COMPLETE = auto()
+    ERROR = auto()
+
+@dataclass
+class UIMessage:
+    type: UIMessageType
+    data: any = None
 
 class BPMApp:
     def __init__(self, root):
@@ -58,17 +69,17 @@ class BPMApp:
     def process_log_queue(self):
         try:
             while not self.log_queue.empty():
-                message_type, data = self.log_queue.get(0)
+                msg: UIMessage = self.log_queue.get(0)
 
-                if message_type == "status":
-                    self.status_var.set(data)
-                elif message_type == "analysis_complete":
+                if msg.type == UIMessageType.STATUS:
+                    self.status_var.set(msg.data)
+                elif msg.type == UIMessageType.ANALYSIS_COMPLETE:
                     self.status_var.set("Analysis complete!")
                     self.analyze_btn.config(state=tk.NORMAL)
-                elif message_type == "error":
+                elif msg.type == UIMessageType.ERROR:
                      self.status_var.set("An error occurred. Check logs.")
                      self.analyze_btn.config(state=tk.NORMAL)
-                     messagebox.showerror("Analysis Error", data)
+                     messagebox.showerror("Analysis Error", msg.data)
 
         finally:
             self.root.after(100, self.process_log_queue)
@@ -127,32 +138,19 @@ class BPMApp:
             wav_path = os.path.join(converted_dir, f"{os.path.basename(base_name)}.wav")
 
             if ext.lower() != '.wav':
-                self.log_queue.put(("status", "Converting file to WAV..."))
-                # Assumes convert_to_wav is imported
+                self.log_queue.put(UIMessage(UIMessageType.STATUS, "Converting file to WAV..."))
                 if not convert_to_wav(self.current_file, wav_path):
-                    self.log_queue.put(("error", "File conversion failed."))
+                    self.log_queue.put(UIMessage(UIMessageType.ERROR, "File conversion failed."))
                     return
             else:
                 import shutil
                 shutil.copy(self.current_file, wav_path)
 
-            self.log_queue.put(("status", "Processing and analyzing heartbeat..."))
+            self.log_queue.put(UIMessage(UIMessageType.STATUS, "Processing and analyzing heartbeat..."))
             # Assumes analyze_wav_file is imported
             analyze_wav_file(wav_path, self.params, start_bpm_hint)
-            self.log_queue.put(("analysis_complete", None))
+            self.log_queue.put(UIMessage(UIMessageType.ANALYSIS_COMPLETE))
 
         except Exception as e:
             error_info = f"An error occurred:\n{str(e)}"
-            self.log_queue.put(("error", error_info))
-            # Assumes logging is configured
-            # logging.error(f"Full analysis error: {traceback.format_exc()}")
-
-# To run this GUI, you would have a main script like this:
-#
-# import ttkbootstrap as ttkb
-# from gui import BPMApp
-#
-# if __name__ == "__main__":
-#     root = ttkb.Window(themename="minty")
-#     app = BPMApp(root)
-#     root.mainloop()
+            self.log_queue.put(UIMessage(UIMessageType.ERROR, error_info))

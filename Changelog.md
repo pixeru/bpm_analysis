@@ -535,3 +535,11 @@ This is a major architectural update that modularizes the entire codebase for im
     - **Type Hinting:** Function signatures throughout the `bpm_analysis.py` module have been updated with Python's type hints (e.g., `def function(param: str) -> bool:`), making the code more self-documenting and easier to understand.
     - **Descriptive Constants:** "Magic strings" used for peak classification (e.g., "S1 (Paired)") have been replaced with descriptive constants (e.g., `PEAK_S1_PAIRED`) to prevent typos and improve readability.
 
+## Version 4.3
+This is a maintenance and refactoring release focused on improving the internal code structure and removing obsolete code for better long-term maintainability. The core analysis logic remains unchanged.
+
+### 🚀 Improvements & Refactoring
+- class PeakClassifier: Encapsulates the logic for classifying raw audio peaks into S1, S2, and Noise. This class manages the state of the analysis loop, including BPM belief, beat candidates, and debug information.
+- class Plotter: Handles the creation and generation of the final analysis plot.
+- class ReportGenerator: Handles the creation of text-based analysis reports.
+
