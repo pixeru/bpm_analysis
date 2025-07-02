@@ -523,3 +523,15 @@ This version introduces a more advanced, gradient-based confidence model for val
     - `4.4. Interval-Based Confidence Penalty`: For tuning the new interval penalty.
     - `5.4. Lone S1 Gradient Confidence Engine`: For fine-tuning the weights and curves of the new `Lone S1` confidence model.
 - **Algorithm Tuning:** The `stability_confidence_floor` and `penalty_amount_max` parameters have been adjusted to better balance the new confidence and penalty systems.
+
+## Version 4.2
+This is a major architectural update that modularizes the entire codebase for improved organization, readability, and maintainability. The core analysis logic remains the same as v4.1, but the project structure has been completely overhauled.
+### ✨ New Features & Refactoring
+- **Modular Codebase:** The single-script application has been split into three distinct, single-responsibility files:
+    - `config.py`: Now exclusively contains the `DEFAULT_PARAMS` dictionary for all tunable parameters.
+    - `gui.py`: Contains the `BPMApp` class and all code related to the Tkinter GUI. This is now the main entry point for running the application.
+    - `bpm_analysis.py`: Contains all core signal processing, analysis, and reporting functions.
+- **Improved Code Clarity:**
+    - **Type Hinting:** Function signatures throughout the `bpm_analysis.py` module have been updated with Python's type hints (e.g., `def function(param: str) -> bool:`), making the code more self-documenting and easier to understand.
+    - **Descriptive Constants:** "Magic strings" used for peak classification (e.g., "S1 (Paired)") have been replaced with descriptive constants (e.g., `PEAK_S1_PAIRED`) to prevent typos and improve readability.
+
