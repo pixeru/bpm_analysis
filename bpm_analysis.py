@@ -62,7 +62,7 @@ logging.basicConfig(
 try:
     from pydub import AudioSegment
 except ImportError:
-    logging.warning("Pydub library not found. Install with 'pip install pydub'.")
+    logging.warning("Pydub library not found. Audio conversion will be limited to WAV files only.")
     AudioSegment = None
 
 # --- Core Classes for Analysis Pipeline ---
@@ -884,7 +884,8 @@ class ReportGenerator:
 def convert_to_wav(file_path: str, target_path: str) -> bool:
     """Converts a given audio file to WAV format."""
     if not AudioSegment:
-        raise ImportError("Pydub/FFmpeg is required for audio conversion.")
+        logging.error("Pydub/FFmpeg is required for audio conversion. Please install pydub and FFmpeg.")
+        return False
 
     logging.info(f"Converting {os.path.basename(file_path)} to WAV format...")
     try:
