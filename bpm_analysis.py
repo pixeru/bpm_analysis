@@ -10,10 +10,9 @@ import datetime
 import logging
 import sys
 import time
-import ttkbootstrap as ttkb
-from gui import BPMApp
 from typing import List, Dict, Tuple, Optional
 from enum import Enum
+import json
 
 # --- Enums and Global Helpers ---
 class PeakType(Enum):
@@ -301,10 +300,11 @@ class PeakClassifier:
 
 class Plotter:
     """Handles the creation and generation of the final analysis plot."""
-    def __init__(self, file_name: str, params: Dict, sample_rate: int):
+    def __init__(self, file_name: str, params: Dict, sample_rate: int, output_directory: str):
         self.file_name = file_name
         self.params = params
         self.sample_rate = sample_rate
+        self.output_directory = output_directory # Add this line
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     def plot_and_save(self, audio_envelope: np.ndarray, all_raw_peaks: np.ndarray, analysis_data: Dict,
@@ -321,7 +321,8 @@ class Plotter:
 
         self._configure_layout()
 
-        output_html_path = f"{os.path.splitext(self.file_name)[0]}_bpm_plot.html"
+        base_name = os.path.basename(os.path.splitext(self.file_name)[0])
+        output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {'scrollZoom': True, 'toImageButtonOptions': {'filename': plot_title, 'format': 'png', 'scale': 2}}
         self.fig.write_html(output_html_path, config=plot_config)
@@ -568,24 +569,40 @@ class Plotter:
 
 class ReportGenerator:
     """Handles the creation of text-based analysis reports."""
-    def __init__(self, file_name: str):
+    def __init__(self, file_name: str, output_directory: str):
         self.file_name = file_name
+        self.output_directory = output_directory
         self.file_name_no_ext = os.path.splitext(file_name)[0]
+        self.base_name = os.path.basename(self.file_name_no_ext)
+
+    def save_analysis_settings(self, start_bpm_hint: Optional[float]):
+        """Saves the user-configurable settings to a JSON file."""
+        settings_path = os.path.join(self.output_directory, f"{self.base_name}_Analysis_Settings.json")
+        settings_to_save = {'start_bpm_hint': start_bpm_hint}
+        try:
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings_to_save, f, indent=4)
+            logging.info(f"Analysis settings saved to {settings_path}")
+        except Exception as e:
+            logging.error(f"Could not save analysis settings file. Error: {e}")
 
     def save_analysis_summary(self, final_metrics: Dict):
         """Saves a comprehensive Markdown summary of the analysis results."""
-        output_path = f"{self.file_name_no_ext}_Analysis_Summary.md"
+        output_path = os.path.join(self.output_directory, f"{self.base_name}_Analysis_Summary.md")
+
         with open(output_path, "w", encoding="utf-8") as f:
             self._write_summary_header(f)
             self._write_overall_summary(f, final_metrics.get('hrv_summary'), final_metrics.get('hrr_stats'))
-            self._write_steepest_slopes(f, final_metrics.get('peak_exertion_stats'), final_metrics.get('peak_recovery_stats'))
+            self._write_steepest_slopes(f, final_metrics.get('peak_exertion_stats'),
+                                        final_metrics.get('peak_recovery_stats'))
             self._write_significant_changes(f, final_metrics.get('major_inclines'), final_metrics.get('major_declines'))
             self._write_heartbeat_data_table(f, final_metrics.get('smoothed_bpm'), final_metrics.get('bpm_times'))
+
         logging.info(f"Markdown analysis summary saved to {output_path}")
 
     def create_chronological_log(self, audio_envelope: np.ndarray, sample_rate: int, all_raw_peaks: np.ndarray, analysis_data: Dict, final_metrics: Dict):
         """Creates a detailed, readable debug log file."""
-        output_log_path = f"{self.file_name_no_ext}_Debug_Log.md"
+        output_log_path = os.path.join(self.output_directory, f"{self.base_name}_Debug_Log.md")
         logging.info(f"Generating readable debug log at '{output_log_path}'...")
         merged_df = self._prepare_log_data(audio_envelope, sample_rate, all_raw_peaks, analysis_data, final_metrics.get('smoothed_bpm'), final_metrics.get('bpm_times'))
         with open(output_log_path, "w", encoding="utf-8") as log_file:
@@ -782,7 +799,7 @@ def convert_to_wav(file_path: str, target_path: str) -> bool:
         logging.error(f"Could not convert file {file_path}. Error: {e}")
         return False
 
-def preprocess_audio(file_path: str, params: Dict) -> Tuple[np.ndarray, int]:
+def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tuple[np.ndarray, int]:
     """Reads, filters, and prepares the audio envelope for analysis."""
     downsample_factor = params['downsample_factor']
     bandpass_freqs = params['bandpass_freqs']
@@ -831,6 +848,12 @@ def preprocess_audio(file_path: str, params: Dict) -> Tuple[np.ndarray, int]:
     audio_abs = np.abs(audio_filtered)
     window_size = new_sample_rate // 10
     audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
+
+    if params['save_filtered_wav']:
+        base_name = os.path.basename(os.path.splitext(file_path)[0])
+        debug_path = os.path.join(output_directory, f"{base_name}_filtered_debug.wav")
+        normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
+        wavfile.write(debug_path, new_sample_rate, normalized_audio)
 
     return audio_envelope, new_sample_rate
 
@@ -1562,13 +1585,13 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     return metrics
 
 
-def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float]):
+def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str):
     """Main analysis pipeline that orchestrates the refactored classes."""
     start_time = time.time()
-    logging.info(f"--- Processing file: {os.path.basename(wav_file_path)} ---")
+    logging.info(f"--- Processing file: {os.path.basename(original_file_path)} ---")
 
     # STAGE 1: Initialization
-    audio_envelope, sample_rate = preprocess_audio(wav_file_path, params)
+    audio_envelope, sample_rate = preprocess_audio(wav_file_path, params, output_directory)
     noise_floor, troughs = _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params)
 
     start_bpm, peak_time, recovery_time = _run_preliminary_pass(
@@ -1596,12 +1619,13 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     logging.info("--- STAGE 6: Calculating Metrics and Generating Outputs ---")
     final_metrics = _calculate_final_metrics(final_peaks, sample_rate, params)
 
-    plotter = Plotter(wav_file_path, params, sample_rate)
+    plotter = Plotter(original_file_path, params, sample_rate, output_directory)
     plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
 
-    reporter = ReportGenerator(wav_file_path)
+    reporter = ReportGenerator(original_file_path, output_directory)
     reporter.save_analysis_summary(final_metrics)
     reporter.create_chronological_log(audio_envelope, sample_rate, all_raw_peaks, analysis_data, final_metrics)
+    reporter.save_analysis_settings(start_bpm_hint)
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
