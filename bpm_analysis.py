@@ -217,11 +217,17 @@ class PeakClassifier:
         min_peak_dist_samples = int(self.params['min_peak_distance_sec'] * self.sample_rate)
         peaks, _ = find_peaks(self.audio_envelope, height=height_threshold, prominence=prominence_thresh, distance=min_peak_dist_samples)
         logging.info(f"Found {len(peaks)} raw peaks using dynamic height threshold.")
+        logging.info(f"Raw peak detection: min_peak_distance_sec={self.params['min_peak_distance_sec']}s -> {min_peak_dist_samples} samples")
         return peaks
 
     def _attempt_s1_s2_pairing(self, s1_candidate_idx: int, s2_candidate_idx: int, pairing_ratio: float) -> Tuple[bool, str]:
         """Calculates the confidence score for pairing two candidate peaks."""
         interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
+        min_peak_distance_sec = self.params['min_peak_distance_sec']
+        min_peak_distance_calc = f"min_peak_distance_sec={min_peak_distance_sec}s (from params)"
+        distance_check = "PASS" if interval_sec >= min_peak_distance_sec else "FAIL"
+        distance_info = f"Interval {interval_sec:.3f}s vs {min_peak_distance_calc} -> {distance_check}"
+        
         deviation_value = self.state['smoothed_dev_series'].asof(s1_candidate_idx / self.sample_rate)
 
         confidence = calculate_blended_confidence(deviation_value, self.state['long_term_bpm'], self.params)
@@ -241,6 +247,10 @@ class PeakClassifier:
 
         is_paired = confidence >= self.params['pairing_confidence_threshold']
         reason += f"\n- Final Score: {confidence:.2f} vs Threshold {self.params['pairing_confidence_threshold']:.2f} -> {'Paired' if is_paired else 'Not Paired'}"
+        
+        # Add the distance check information to the reason
+        reason = f"{distance_info}\n{reason}"
+        
         return is_paired, reason
 
     def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
@@ -314,6 +324,11 @@ def format_pairing_details_list(details_str: str) -> List[str]:
     confidence = 0.0
 
     try:
+        # Check if the first line contains distance information
+        if "Interval" in lines[0] and "vs min_peak_distance_sec" in lines[0]:
+            output_lines.append(f"    - {lines[0]}")
+            lines = lines[1:]  # Remove the distance line from processing
+        
         match = re.search(r'([\d\.]+)$', lines[0])
         if match: confidence = float(match.group(1))
         output_lines.append(f"    - {lines[0]}")
@@ -964,6 +979,7 @@ def _calculate_dynamic_noise_floor(audio_envelope: np.ndarray, sample_rate: int,
 
     # --- STEP 1: Find all potential troughs initially ---
     all_trough_indices, _ = find_peaks(-audio_envelope, distance=min_peak_dist_samples, prominence=trough_prom_thresh)
+    logging.info(f"Trough detection: min_peak_distance_sec={params['min_peak_distance_sec']}s -> {min_peak_dist_samples} samples, found {len(all_trough_indices)} initial troughs")
 
     # If we don't have enough troughs to begin with, fall back to a simple static floor.
     if len(all_trough_indices) < 5:
