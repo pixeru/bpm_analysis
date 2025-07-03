@@ -13,6 +13,7 @@ import time
 from typing import List, Dict, Tuple, Optional
 from enum import Enum
 import json
+import re
 
 # --- Enums and Global Helpers ---
 class PeakType(Enum):
@@ -181,8 +182,9 @@ class PeakClassifier:
 
         if is_paired:
             self.state['candidate_beats'].append(current_peak_idx)
-            self.state['beat_debug_info'][current_peak_idx] = f"{PeakType.S1_PAIRED.value}\n- {reason.replace(chr(10), chr(10) + '- ')}"
-            self.state['beat_debug_info'][next_peak_idx] = f"{PeakType.S2_PAIRED.value}\n- {reason.replace(chr(10), chr(10) + '- ')}"
+            reason_tag = f"PAIRING_SUCCESS_REASON§{reason}"
+            self.state['beat_debug_info'][current_peak_idx] = f"{PeakType.S1_PAIRED.value}§{reason_tag}"
+            self.state['beat_debug_info'][next_peak_idx] = f"{PeakType.S2_PAIRED.value}§{reason_tag}"
             self.state['consecutive_rr_rejections'] = 0
             self.state['loop_idx'] += 2
         else:
@@ -244,27 +246,32 @@ class PeakClassifier:
     def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
         """Validates if an unpaired peak is a Lone S1 or Noise."""
         is_valid, rejection_detail = self._validate_lone_s1(peak_idx)
+        pairing_info = f"PAIRING_FAIL_REASON§{pairing_failure_reason.lstrip(' |')}"
+
         if is_valid:
             self.state['candidate_beats'].append(peak_idx)
-            self.state['beat_debug_info'][peak_idx] = f"{PeakType.LONE_S1_VALIDATED.value}. Pairing Justification: [{pairing_failure_reason.lstrip(' |')}]"
+            # For a validated S1, the "rejection_detail" is just the success reason.
+            self.state['beat_debug_info'][
+                peak_idx] = f"{PeakType.LONE_S1_VALIDATED.value}§{pairing_info}§LONE_S1_VALIDATE_REASON§{rejection_detail}"
             self.state['consecutive_rr_rejections'] = 0
         else:
-            # Only increment the rejection counter for rhythm-based failures.
             is_rhythm_rejection = "Rhythm Fit" in rejection_detail
             if is_rhythm_rejection:
                 self.state['consecutive_rr_rejections'] += 1
             else:
-                self.state['consecutive_rr_rejections'] = 0 # Reset for other failure types
+                self.state['consecutive_rr_rejections'] = 0
 
-            # Check if the cascade reset should be triggered.
+            lone_s1_rejection_info = f"LONE_S1_REJECT_REASON§{rejection_detail}"
+
             if self.state['consecutive_rr_rejections'] >= self.params.get("cascade_reset_trigger_count", 3):
-                logging.info(f"CASCADE RESET: Forcing peak at {peak_idx/self.sample_rate:.2f}s as Lone S1 due to repeated rhythmic failures.")
+                logging.info(
+                    f"CASCADE RESET: Forcing peak at {peak_idx / self.sample_rate:.2f}s as Lone S1 due to repeated rhythmic failures.")
                 self.state['candidate_beats'].append(peak_idx)
-                self.state['beat_debug_info'][peak_idx] = f"{PeakType.LONE_S1_CASCADE.value}. Rejection: [{rejection_detail}]. Pairing Justification: [{pairing_failure_reason.lstrip(' |')}]"
-                self.state['consecutive_rr_rejections'] = 0 # Reset the counter after forcing the peak
+                self.state['beat_debug_info'][
+                    peak_idx] = f"{PeakType.LONE_S1_CASCADE.value}§{pairing_info}§{lone_s1_rejection_info}"
+                self.state['consecutive_rr_rejections'] = 0
             else:
-                # Otherwise, just mark it as noise.
-                self.state['beat_debug_info'][peak_idx] = f"Noise ({rejection_detail}). Pairing Justification: [{pairing_failure_reason.lstrip(' |')}]"
+                self.state['beat_debug_info'][peak_idx] = f"Noise§{pairing_info}§{lone_s1_rejection_info}"
 
     def _validate_lone_s1(self, current_peak_idx: int) -> Tuple[bool, str]:
         """Performs checks to determine if a peak is a valid Lone S1."""
@@ -297,6 +304,68 @@ class PeakClassifier:
         recent_beats = self.state['candidate_beats'][-history_window:]
         paired_count = sum(1 for beat_idx in recent_beats if PeakType.S1_PAIRED.value in self.state['beat_debug_info'].get(beat_idx, ""))
         return paired_count / history_window
+
+def format_pairing_details_list(details_str: str) -> List[str]:
+    """Formats S1-S2 pairing details into a list of strings."""
+    lines = [line.strip().lstrip('- ') for line in details_str.strip().split('\n') if line.strip()]
+    if not lines: return ["- S1-S2 pairing decision:", "    - No details available."]
+
+    output_lines = ["- S1-S2 pairing decision:"]
+    confidence = 0.0
+
+    try:
+        match = re.search(r'([\d\.]+)$', lines[0])
+        if match: confidence = float(match.group(1))
+        output_lines.append(f"    - {lines[0]}")
+
+        for line in lines[1:]:
+            new_confidence = confidence
+            if "Stability Pre-Adjust" in line:
+                match = re.search(r'x([\d\.]+)', line); new_confidence *= float(match.group(1)) if match else 1
+                output_lines.append(f"    - {line} -> {new_confidence:.3f}")
+            elif "PENALIZED by" in line:
+                match = re.search(r'by ([\d\.]+)', line); new_confidence -= float(match.group(1)) if match else 0
+                output_lines.append(f"    - {line} -> {new_confidence:.3f}")
+            elif "Interval PENALTY by" in line:
+                match = re.search(r'by ([\d\.]+)', line); new_confidence -= float(match.group(1)) if match else 0
+                output_lines.append(f"    - {line} -> {max(0, new_confidence):.3f}")
+            else:
+                output_lines.append(f"    - {line}")
+            confidence = new_confidence
+    except (ValueError, IndexError):
+        return ["- S1-S2 pairing decision:", f"    - {details_str}"]
+    return output_lines
+
+def format_lone_s1_details_list(details_str: str) -> List[str]:
+    """Formats Lone S1 validation details into a list of strings."""
+    output_lines = ["- Lone S1 decision:"]
+    try:
+        main_match = re.search(r'^(.*?)\s*\((.*)\)$', details_str)
+        if not main_match:
+            return ["- Lone S1 decision:", f"\t- {details_str}"]
+
+        decision_summary, reasons_text = main_match.group(1).strip().rstrip('.'), main_match.group(2)
+        reason_components = reasons_text.split(', ')
+        for component in reason_components:
+            parts = component.split('=', 1)
+            if len(parts) == 2:
+                name, value_str = parts[0].strip(), parts[1].strip()
+                score_match = re.match(r'([\d\.]+)', value_str)
+                score = score_match.group(1) if score_match else "N/A"
+                output_lines.append(f"\t- {name}: {value_str} -> {score}")
+            else:
+                output_lines.append(f"\t- {component}")
+
+        score_match = re.search(r'(.*):\s*Confidence\s*([\d\.]+)\s*<\s*Threshold\s*([\d\.]+)', decision_summary)
+        if score_match:
+            decision_type, confidence, threshold = score_match.group(1).strip(), score_match.group(2), score_match.group(3)
+            outcome = f"Noise ({decision_type})"
+            output_lines.append(f"\t- Final Score: Confidence {confidence} vs Threshold {threshold} -> {outcome}")
+        else:
+            output_lines.append(f"\t- Final Decision: {decision_summary}")
+    except Exception:
+        return ["- Lone S1 decision:", f"\t- {details_str}"]
+    return output_lines
 
 class Plotter:
     """Handles the creation and generation of the final analysis plot."""
@@ -395,67 +464,104 @@ class Plotter:
                 secondary_y=False)
 
     def _add_peak_traces(self, all_raw_peaks, debug_info, audio_envelope):
-        """Adds S1, S2, and Noise peak markers to the plot."""
-        # A much more robust way to categorize peaks for plotting
+        """Adds S1, S2, and Noise peak markers to the plot with detailed hover info."""
         s1_peaks = {'indices': [], 'customdata': []}
         s2_peaks = {'indices': [], 'customdata': []}
         noise_peaks = {'indices': [], 'customdata': []}
 
         classified_indices = set()
 
-        # Iterate through the final classifications, which is the source of truth
+        # --- Generate detailed hover text for each classified peak ---
         for peak_idx, reason_str in debug_info.items():
-            peak_type, details = _parse_reason_string(reason_str)
-            custom_data = (peak_type, peak_idx / self.sample_rate, audio_envelope[peak_idx], details.replace('\n', '<br>'))
-            classified_indices.add(peak_idx)
+            hover_text_parts = []
+            parts = reason_str.split('§')
+            final_peak_type, details_list = parts[0], parts[1:]
 
+            # Add basic peak info
+            hover_text_parts.append(f"<b>Type:</b> {final_peak_type}")
+            hover_text_parts.append(f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s")
+            hover_text_parts.append(f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}")
+            hover_text_parts.append("---")  # Visual separator
+
+            # Add detailed, formatted reasons from the debug string
+            i = 0
+            while i < len(details_list):
+                tag = details_list[i]
+                value = details_list[i + 1] if (i + 1) < len(details_list) else ""
+                formatted_lines = []
+
+                if "PAIRING" in tag:
+                    formatted_lines = format_pairing_details_list(value)
+                elif "LONE_S1_REJECT_REASON" in tag:
+                    formatted_lines = format_lone_s1_details_list(value)
+                elif "LONE_S1_VALIDATE_REASON" in tag:
+                    formatted_lines = ["- Lone S1 decision:", f"&nbsp;&nbsp;&nbsp;&nbsp;- Validated: {value}"]
+                elif "ORIGINAL_REASON" in tag:
+                    formatted_lines = ["- Original Classification:",
+                                       f"&nbsp;&nbsp;&nbsp;&nbsp;- {value.replace('`', '')}"]
+
+                if formatted_lines:
+                    # Convert the list of strings to a single HTML block
+                    sub_text = "<br>".join(l.replace('\t', '&nbsp;&nbsp;&nbsp;&nbsp;') for l in formatted_lines)
+                    hover_text_parts.append(sub_text)
+                i += 2
+
+            # Join all parts into a single HTML string for the tooltip
+            full_hover_text = "<br>".join(hover_text_parts)
+            classified_indices.add(peak_idx)
+            peak_type, _ = _parse_reason_string(reason_str)
+
+            # Assign the peak to the correct category for plotting
             if PeakType.is_s1(peak_type):
                 s1_peaks['indices'].append(peak_idx)
-                s1_peaks['customdata'].append(custom_data)
+                s1_peaks['customdata'].append(full_hover_text)
             elif PeakType.is_s2(peak_type):
                 s2_peaks['indices'].append(peak_idx)
-                s2_peaks['customdata'].append(custom_data)
-            else: # Anything else that has a debug entry but isn't S1/S2 is Noise
+                s2_peaks['customdata'].append(full_hover_text)
+            else:
                 noise_peaks['indices'].append(peak_idx)
-                noise_peaks['customdata'].append(custom_data)
+                noise_peaks['customdata'].append(full_hover_text)
 
-        # Now, catch any raw peaks that were never classified (e.g., filtered out early)
-        # and ensure they are plotted as noise.
+        # --- Handle any raw peaks that were never classified ---
         for peak_idx in all_raw_peaks:
             if peak_idx not in classified_indices:
-                custom_data = ("Unclassified", peak_idx / self.sample_rate, audio_envelope[peak_idx], "Peak was not evaluated by the classifier.")
+                hover_text = (f"<b>Type:</b> Unclassified<br>"
+                              f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s<br>"
+                              f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}<br>"
+                              "<b>Details:</b> Peak was not evaluated by the classifier.")
                 noise_peaks['indices'].append(peak_idx)
-                noise_peaks['customdata'].append(custom_data)
+                noise_peaks['customdata'].append(hover_text)
 
+        # A simplified hovertemplate that displays the pre-formatted custom data
+        hovertemplate = "%{customdata}<extra></extra>"
 
-        hovertemplate = "<b>Type:</b> %{customdata[0]}<br><b>Time:</b> %{customdata[1]:.2f}s<br><b>Amp:</b> %{customdata[2]:.0f}<br><b>Details:</b><br>%{customdata[3]}<extra></extra>"
-
-        # S1 Beats
+        # --- Add traces to the plot ---
         if s1_peaks['indices']:
-            indices = np.array(s1_peaks['indices'])
-            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (indices / self.sample_rate)])
-            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[indices], mode='markers', name='S1 Beats',
-                                        marker=dict(color='#e36f6f', size=8, symbol='diamond'),
-                                        customdata=np.stack(s1_peaks['customdata']),
-                                        hovertemplate=hovertemplate), secondary_y=False)
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
+                                       (np.array(s1_peaks['indices']) / self.sample_rate)])
+            self.fig.add_trace(
+                go.Scatter(x=times_dt, y=audio_envelope[s1_peaks['indices']], mode='markers', name='S1 Beats',
+                           marker=dict(color='#e36f6f', size=8, symbol='diamond'),
+                           customdata=s1_peaks['customdata'],
+                           hovertemplate=hovertemplate), secondary_y=False)
 
-        # S2 Beats
         if s2_peaks['indices']:
-            indices = np.array(s2_peaks['indices'])
-            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (indices / self.sample_rate)])
-            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[indices], mode='markers', name='S2 Beats',
-                                        marker=dict(color='orange', symbol='circle', size=6),
-                                        customdata=np.stack(s2_peaks['customdata']),
-                                        hovertemplate=hovertemplate), secondary_y=False)
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
+                                       (np.array(s2_peaks['indices']) / self.sample_rate)])
+            self.fig.add_trace(
+                go.Scatter(x=times_dt, y=audio_envelope[s2_peaks['indices']], mode='markers', name='S2 Beats',
+                           marker=dict(color='orange', symbol='circle', size=6),
+                           customdata=s2_peaks['customdata'],
+                           hovertemplate=hovertemplate), secondary_y=False)
 
-        # Noise Peaks
         if noise_peaks['indices']:
-            indices = np.array(noise_peaks['indices'])
-            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (indices / self.sample_rate)])
-            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[indices], mode='markers', name='Noise/Rejected',
-                                        marker=dict(color='grey', symbol='x', size=6),
-                                        customdata=np.stack(noise_peaks['customdata']),
-                                        hovertemplate=hovertemplate), secondary_y=False)
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
+                                       (np.array(noise_peaks['indices']) / self.sample_rate)])
+            self.fig.add_trace(
+                go.Scatter(x=times_dt, y=audio_envelope[noise_peaks['indices']], mode='markers', name='Noise/Rejected',
+                           marker=dict(color='grey', symbol='x', size=6),
+                           customdata=noise_peaks['customdata'],
+                           hovertemplate=hovertemplate), secondary_y=False)
 
     def _add_bpm_hrv_traces(self, smoothed_bpm, analysis_data, windowed_hrv_df):
         """Adds BPM, BPM trend, and HRV traces."""
@@ -617,88 +723,82 @@ class ReportGenerator:
         events = []
         debug_info = analysis_data.get('beat_debug_info', {})
 
-        # Create a list of all peak and trough events
         for p in all_raw_peaks:
-            reason = debug_info.get(p, 'Unknown')
-            if reason != 'Unknown':
+            reason = debug_info.get(p)
+            if reason:
                 events.append({'time': p / sample_rate, 'type': 'Peak', 'amp': audio_envelope[p], 'reason': reason})
         if 'trough_indices' in analysis_data:
             for p in analysis_data['trough_indices']:
                 events.append({'time': p / sample_rate, 'type': 'Trough', 'amp': audio_envelope[p], 'reason': ''})
 
-        if not events:
-            return None
-
-        # Create a DataFrame of events, sorted by time
+        if not events: return None
         events_df = pd.DataFrame(events).sort_values(by='time').set_index('time')
 
-        # Create a master DataFrame with continuous signals
         master_df = pd.DataFrame(index=np.arange(len(audio_envelope)) / sample_rate)
-        master_df['envelope'] = audio_envelope
         if 'dynamic_noise_floor_series' in analysis_data:
             master_df['noise_floor'] = analysis_data['dynamic_noise_floor_series'].values
-
-        # Add BPM and other time-series data, ensuring unique indices
         if smoothed_bpm is not None and not smoothed_bpm.empty:
-            smoothed_bpm_sec_index = pd.Series(data=smoothed_bpm.values, index=bpm_times)
-            if not smoothed_bpm_sec_index.index.is_unique:
-                smoothed_bpm_sec_index = smoothed_bpm_sec_index.groupby(level=0).mean()
+            smoothed_bpm_sec_index = pd.Series(data=smoothed_bpm.values, index=bpm_times).groupby(level=0).mean()
             master_df['smoothed_bpm'] = smoothed_bpm_sec_index
-
         if 'long_term_bpm_series' in analysis_data and not analysis_data['long_term_bpm_series'].empty:
-            lt_bpm_series = analysis_data['long_term_bpm_series']
-            if not lt_bpm_series.index.is_unique:
-                lt_bpm_series = lt_bpm_series.groupby(level=0).mean()
-            master_df['lt_bpm'] = lt_bpm_series
+            master_df['lt_bpm'] = analysis_data['long_term_bpm_series'].groupby(level=0).mean()
 
-        if 'deviation_series' in analysis_data and not analysis_data['deviation_series'].empty:
-            dev_series = analysis_data['deviation_series']
-            if not dev_series.index.is_unique:
-                dev_series = dev_series.groupby(level=0).mean()
-            master_df['deviation'] = dev_series
+        master_df.ffill(inplace=True)
 
-        # Merge the event data with the continuous data at the nearest timestamp
-        master_df.sort_index(inplace=True)
-        return pd.merge_asof(left=events_df, right=master_df.ffill(), left_index=True,
+        return pd.merge_asof(left=events_df, right=master_df, left_index=True,
                              right_index=True, direction='nearest', tolerance=pd.Timedelta(seconds=0.5).total_seconds())
 
     def _write_log_events(self, log_file, merged_df):
-        """Writes the formatted log events to the file using itertuples for efficiency."""
         log_file.write(f"# Chronological Debug Log for {os.path.basename(self.file_name)}\n")
         log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
         for row in merged_df.itertuples(name="LogEvent"):
             log_file.write(f"## Time: `{row.Index:.4f}s`\n")
 
-            # Format the main event line (e.g., "S1 (Paired)")
-            peak_type, details = _parse_reason_string(getattr(row, 'reason', ''))
-            if row.type == 'Peak':
-                log_file.write(f"**{peak_type}**\n")
-                if details:
-                    # Format nested details for better readability
-                    formatted_details = details.replace(' | ', '\n- ').replace('\n- - ', '\n\t- ')
-                    log_file.write(f"- {formatted_details}\n")
-            else:  # Trough
+            if row.type == 'Trough':
                 log_file.write("**Trough Detected**\n")
+            else:
+                raw_reason = getattr(row, 'reason', '')
+                if not raw_reason or raw_reason == 'Unknown':
+                    log_file.write("**Unclassified Peak**\n")
+                else:
+                    parts = raw_reason.split('§')
+                    final_peak_type, details_list = parts[0], parts[1:]
+                    log_file.write(f"**{final_peak_type}.**\n")
 
-            # Create a dictionary of available signal metrics for this event
+                    i = 0
+                    while i < len(details_list):
+                        tag = details_list[i]
+                        value = details_list[i + 1] if (i + 1) < len(details_list) else ""
+                        formatted_details = ""
+
+                        # MODIFICATION: Call the new standalone functions
+                        if "PAIRING" in tag:
+                            formatted_details = "\n".join(format_pairing_details_list(value))
+                        elif "LONE_S1_REJECT_REASON" in tag:
+                            formatted_details = "\n".join(format_lone_s1_details_list(value))
+                        elif "LONE_S1_VALIDATE_REASON" in tag:
+                            formatted_details = f"- Lone S1 decision:\n    - Validated: {value}"
+                        elif "ORIGINAL_REASON" in tag:
+                            formatted_details = f"- Original Classification:\n    - `{value}`"
+
+                        if formatted_details:
+                            log_file.write(f"{formatted_details}\n")
+
+                        i += 2  # Move past the tag and its value
+
+            # Write all available metrics for every event type
             metrics = {
                 "Raw Amp": getattr(row, 'amp', None),
                 "Noise Floor": getattr(row, 'noise_floor', None),
                 "Average BPM (Smoothed)": getattr(row, 'smoothed_bpm', None),
-                "Long-Term BPM (Belief)": getattr(row, 'lt_bpm', None),
-                "Norm. Deviation": getattr(row, 'deviation', None)
+                "Long-Term BPM (Belief)": getattr(row, 'lt_bpm', None)
             }
-
-            # Write all available metrics in a consistent format
             for name, value in metrics.items():
                 if pd.notna(value):
-                    if "BPM" in name:
-                        log_file.write(f"- **{name}**: `{value:.1f}`\n")
-                    elif name == "Norm. Deviation":
-                        log_file.write(f"- **{name}**: {value * 100:.1f}%\n")
-                    else:
-                        log_file.write(f"- **{name}**: `{value:.1f}`\n")
+                    log_file.write(f"- **{name}**: `{value:.1f}`\n")
+
+            log_file.write("\n\n")
 
     def _write_summary_header(self, f):
         f.write(f"# Analysis Report for: {os.path.basename(self.file_name)}\n")
@@ -1135,20 +1235,20 @@ def correct_peaks_by_rhythm(peaks: np.ndarray, audio_envelope: np.ndarray, sampl
         logging.info("Correction pass complete. No rhythmic conflicts found.")
     return np.array(corrected_peaks)
 
-def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray, debug_info: Dict, audio_envelope: np.ndarray, dynamic_noise_floor: pd.Series, params: Dict, sample_rate: int) -> Tuple[np.ndarray, Dict, int]:
+
+def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray, debug_info: Dict,
+                                  audio_envelope: np.ndarray, dynamic_noise_floor: pd.Series, params: Dict,
+                                  sample_rate: int) -> Tuple[np.ndarray, Dict, int]:
     """
     Identifies and attempts to fix rhythmic discontinuities by re-evaluating misclassified peaks.
-    Includes a margin at the start and end to prevent corrections there.
     """
     log_level = params.get("correction_log_level", "INFO").upper()
+
     def log_debug(msg):
         if log_level == "DEBUG":
             logging.info(f"[Correction DEBUG] {msg}")
 
-    # Define a margin of beats to leave untouched at the start and end of the recording.
     margin = 3
-
-    # If the recording is too short to have a "middle" section, skip the correction pass.
     if len(s1_peaks) < margin * 2:
         log_debug(f"Skipping correction pass: Not enough S1 peaks ({len(s1_peaks)}) to apply a margin of {margin}.")
         return s1_peaks, debug_info, 0
@@ -1156,7 +1256,8 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
     rr_intervals_sec = np.diff(s1_peaks) / sample_rate
     q1, q3 = np.percentile(rr_intervals_sec, [25, 75])
     iqr = q3 - q1
-    stable_rr_intervals = rr_intervals_sec[(rr_intervals_sec > (q1 - 1.5 * iqr)) & (rr_intervals_sec < (q3 + 1.5 * iqr))]
+    stable_rr_intervals = rr_intervals_sec[
+        (rr_intervals_sec > (q1 - 1.5 * iqr)) & (rr_intervals_sec < (q3 + 1.5 * iqr))]
 
     if len(stable_rr_intervals) < 1:
         log_debug("Not enough stable R-R intervals to determine median. Skipping correction.")
@@ -1166,111 +1267,80 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
     short_conflict_threshold_sec = median_rr_sec * params["rr_correction_threshold_pct"]
     long_conflict_threshold_sec = median_rr_sec * params.get("rr_correction_long_interval_pct", 1.7)
 
-    log_debug(f"Median R-R: {median_rr_sec:.3f}s. Short Threshold: < {short_conflict_threshold_sec:.3f}s. Long Threshold: > {long_conflict_threshold_sec:.3f}s.")
+    log_debug(
+        f"Median R-R: {median_rr_sec:.3f}s. Short Threshold: < {short_conflict_threshold_sec:.3f}s. Long Threshold: > {long_conflict_threshold_sec:.3f}s.")
 
     corrected_debug_info = debug_info.copy()
     peaks_to_add = set()
-    peaks_to_remove = set()
     corrections_made = 0
 
     # --- Pass 1: Look for LONG intervals (missed beats) ---
     log_debug(f"Checking for long intervals between beat {margin} and beat {len(s1_peaks) - margin}...")
     for i in range(margin, len(s1_peaks) - 1 - margin):
-        s1_start_idx = s1_peaks[i]
-        s1_end_idx = s1_peaks[i+1]
-        interval_sec = (s1_end_idx - s1_start_idx) / sample_rate
-
-        if interval_sec > long_conflict_threshold_sec:
-            log_debug(f"Found LONG interval of {interval_sec:.3f}s between beats at {s1_start_idx/sample_rate:.2f}s and {s1_end_idx/sample_rate:.2f}s. Investigating gap...")
-
-            gap_candidates = [p for p in all_raw_peaks if s1_start_idx < p < s1_end_idx and "Noise" in debug_info.get(p, "")]
-            log_debug(f"Found {len(gap_candidates)} potential candidates in the gap.")
-
-            for j, candidate_s1 in enumerate(gap_candidates):
-                if candidate_s1 in peaks_to_add or candidate_s1 in peaks_to_remove:
-                    continue
-                log_debug(f"  - Evaluating candidate S1 at {candidate_s1/sample_rate:.2f}s")
+        s1_start_idx, s1_end_idx = s1_peaks[i], s1_peaks[i + 1]
+        if (s1_end_idx - s1_start_idx) / sample_rate > long_conflict_threshold_sec:
+            log_debug(f"Found LONG interval at {s1_start_idx / sample_rate:.2f}s. Investigating gap...")
+            gap_candidates = [p for p in all_raw_peaks if
+                              s1_start_idx < p < s1_end_idx and "Noise" in debug_info.get(p, "")]
+            for candidate_s1 in gap_candidates:
+                if candidate_s1 in peaks_to_add: continue
                 current_raw_idx = np.searchsorted(all_raw_peaks, candidate_s1)
-                if current_raw_idx + 1 >= len(all_raw_peaks):
-                    log_debug(f"    - SKIPPING: This is the last raw peak in the recording; no S2 can follow.")
-                    continue
+                if current_raw_idx + 1 >= len(all_raw_peaks): continue
                 candidate_s2 = all_raw_peaks[current_raw_idx + 1]
-                if candidate_s2 > s1_end_idx:
-                    reason = f"REJECTED: Its potential S2 at {candidate_s2/sample_rate:.2f}s is outside the current gap (which ends at {s1_end_idx/sample_rate:.2f}s)."
-                    log_debug(f"    - {reason}")
-                    corrected_debug_info[candidate_s1] += f" | Correction Pass: {reason}"
-                    continue
-                if "Noise" not in debug_info.get(candidate_s2, ""):
-                    s2_original_label = debug_info.get(candidate_s2, "Unknown")
-                    reason = f"REJECTED: Its potential S2 at {candidate_s2/sample_rate:.2f}s was not labeled 'Noise' (it was '{s2_original_label}')."
-                    log_debug(f"    - {reason}")
-                    corrected_debug_info[candidate_s1] += f" | Correction Pass: {reason}"
-                    continue
-                log_debug(f"    - Found potential S2 partner at {candidate_s2/sample_rate:.2f}s. Checking safety waivers...")
-                s1_amp = audio_envelope[candidate_s1]
-                s2_amp = audio_envelope[candidate_s2]
-                noise_at_s1 = dynamic_noise_floor.iloc[candidate_s1]
+                if candidate_s2 >= s1_end_idx or "Noise" not in debug_info.get(candidate_s2, ""): continue
+
                 s1_strength = _get_peak_strength(candidate_s1, audio_envelope, dynamic_noise_floor)
-                is_strong_s1 = s1_strength > (params["penalty_waiver_strength_ratio"] * noise_at_s1)
-                is_ratio_plausible = (s2_amp / (s1_amp + 1e-9)) < params["penalty_waiver_max_s2_s1_ratio"]
-                strength_msg = f"Strength check: {'PASS' if is_strong_s1 else 'FAIL'}"
-                ratio_msg = f"Ratio check: {'PASS' if is_ratio_plausible else 'FAIL'}"
-                log_debug(f"      - {strength_msg}. {ratio_msg}.")
+                is_strong_s1 = s1_strength > (
+                            params["penalty_waiver_strength_ratio"] * dynamic_noise_floor.iloc[candidate_s1])
+                is_ratio_plausible = (audio_envelope[candidate_s2] / (audio_envelope[candidate_s1] + 1e-9)) < params[
+                    "penalty_waiver_max_s2_s1_ratio"]
+
                 if is_strong_s1 and is_ratio_plausible:
-                    log_debug(f"      - SUCCESS: Conditions met. Re-labeling pair.")
+                    log_debug(f"  - SUCCESS: Re-labeling S1/S2 pair at {candidate_s1 / sample_rate:.2f}s.")
                     corrections_made += 1
                     peaks_to_add.add(candidate_s1)
-                    peaks_to_remove.add(candidate_s2)
-                    base_reason_A = corrected_debug_info.get(candidate_s1, "Noise").split(". Original: [")[0]
-                    corrected_debug_info[candidate_s1] = f"S1 (Paired - Corrected from Gap). Original: [{base_reason_A}]"
-                    base_reason_B = corrected_debug_info.get(candidate_s2, "Noise").split(". Original: [")[0]
-                    corrected_debug_info[candidate_s2] = f"S2 (Paired - Corrected from Gap). Original: [{base_reason_B}]"
+                    original_reason_s1 = corrected_debug_info.get(candidate_s1, "Noise")
+                    corrected_debug_info[
+                        candidate_s1] = f"{PeakType.S1_CORRECTED_GAP.value}§ORIGINAL_REASON§{original_reason_s1}"
+                    original_reason_s2 = corrected_debug_info.get(candidate_s2, "Noise")
+                    corrected_debug_info[
+                        candidate_s2] = f"{PeakType.S2_CORRECTED_GAP.value}§ORIGINAL_REASON§{original_reason_s2}"
                     break
-                else:
-                    corrected_debug_info[candidate_s1] += f" | Correction Pass: REJECTED ({strength_msg}, {ratio_msg})"
 
     # --- Pass 2: Look for SHORT intervals (adjacent S1s) ---
     temp_s1_list = sorted(list(set(s1_peaks) | peaks_to_add))
-    if not temp_s1_list: return np.array([]), corrected_debug_info, corrections_made
+    peaks_to_remove = set()
+    log_debug("Starting SHORT interval check...")
 
-    # Initialize the final list with the first `margin` beats, which are accepted without checking.
-    final_s1_peaks = temp_s1_list[:margin]
-    log_debug(f"Auto-accepted first {margin} beats. Starting SHORT interval check...")
+    # Correctly iterate and compare adjacent beats
+    for i in range(margin, len(temp_s1_list) - 1 - margin):
+        beat_A_idx = temp_s1_list[i]
+        beat_B_idx = temp_s1_list[i + 1]
 
-    # Iterate only over the middle section, comparing each candidate to the last accepted peak.
-    for i in range(margin, len(temp_s1_list) - margin):
-        beat_A_idx = final_s1_peaks[-1]
-        beat_B_idx = temp_s1_list[i]
+        # Skip if either beat has already been marked for removal
+        if beat_A_idx in peaks_to_remove or beat_B_idx in peaks_to_remove:
+            continue
+
         interval_sec = (beat_B_idx - beat_A_idx) / sample_rate
-
         if interval_sec < short_conflict_threshold_sec:
-            log_debug(f"Found SHORT interval of {interval_sec:.3f}s between beats at {beat_A_idx/sample_rate:.2f}s and {beat_B_idx/sample_rate:.2f}s. Evaluating...")
-            s1_amp = audio_envelope[beat_A_idx]
-            s2_amp = audio_envelope[beat_B_idx]
-            noise_at_s1 = dynamic_noise_floor.iloc[beat_A_idx]
-            s1_strength = _get_peak_strength(beat_A_idx, audio_envelope, dynamic_noise_floor)
-            is_strong_s1 = s1_strength > (params["penalty_waiver_strength_ratio"] * noise_at_s1)
-            is_ratio_plausible = (s2_amp / (s1_amp + 1e-9)) < params["penalty_waiver_max_s2_s1_ratio"]
-            log_debug(f"  - Strength check: {'PASS' if is_strong_s1 else 'FAIL'}. Ratio check: {'PASS' if is_ratio_plausible else 'FAIL'}.")
+            log_debug(
+                f"Found SHORT interval of {interval_sec:.3f}s between beats at {beat_A_idx / sample_rate:.2f}s and {beat_B_idx / sample_rate:.2f}s. Resolving...")
 
-            if is_strong_s1 and is_ratio_plausible:
-                log_debug(f"  - SUCCESS: Conditions met. Re-labeling Beat B as S2.")
+            # Decide which beat to remove based on amplitude
+            amp_A = audio_envelope[beat_A_idx]
+            amp_B = audio_envelope[beat_B_idx]
+
+            if amp_B > amp_A:
+                peaks_to_remove.add(beat_A_idx)
+                log_debug(f"  - Removing weaker peak at {beat_A_idx / sample_rate:.2f}s.")
                 corrections_made += 1
-                base_reason_B = corrected_debug_info.get(beat_B_idx, "Lone S1").split(". Original: [")[0]
-                corrected_debug_info[beat_B_idx] = f"S2 (Paired - Corrected from Conflict). Original: [{base_reason_B}]"
             else:
-                if s2_amp > s1_amp:
-                    log_debug(f"  - UNRESOLVABLE: Keeping stronger peak at {beat_B_idx/sample_rate:.2f}s.")
-                    final_s1_peaks[-1] = beat_B_idx
-                else:
-                    log_debug(f"  - UNRESOLVABLE: Keeping stronger peak at {beat_A_idx/sample_rate:.2f}s.")
-                    pass
-        else:
-            final_s1_peaks.append(beat_B_idx)
+                peaks_to_remove.add(beat_B_idx)
+                log_debug(f"  - Removing weaker peak at {beat_B_idx / sample_rate:.2f}s.")
+                corrections_made += 1
 
-    # Append the last `margin` beats, which are also accepted without being checked.
-    final_s1_peaks.extend(temp_s1_list[-margin:])
-    log_debug(f"Auto-accepted last {margin} beats. Short interval check complete.")
+    # Construct the final list of S1 peaks after all corrections
+    final_s1_peaks = [p for p in temp_s1_list if p not in peaks_to_remove]
 
     return np.array(sorted(final_s1_peaks)), corrected_debug_info, corrections_made
 
