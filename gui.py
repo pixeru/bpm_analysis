@@ -185,9 +185,11 @@ class BPMApp:
     def _run_analysis_in_background(self):
         try:
             from bpm_analysis import analyze_wav_file, convert_to_wav
+            import shutil
 
-            bpm_input = self.bpm_entry.get().strip()
-            start_bpm_hint = float(bpm_input) if bpm_input else None
+            # Check for a global BPM value to override all individual settings.
+            bpm_override_input = self.bpm_entry.get().strip()
+            bpm_override_hint = float(bpm_override_input) if bpm_override_input else None
 
             output_dir = os.path.join(os.getcwd(), "processed_files")
             os.makedirs(output_dir, exist_ok=True)
@@ -202,6 +204,27 @@ class BPMApp:
                     self.log_queue.put(UIMessage(UIMessageType.STATUS,
                                                  f"({i + 1}/{total_files}) Processing: {os.path.basename(file_path)}"))
 
+                    # --- START: Per-File Settings Logic ---
+                    # The BPM hint to be used for the current file.
+                    start_bpm_hint = None
+                    if bpm_override_hint is not None:
+                        # Use the global override if the user entered a value.
+                        start_bpm_hint = bpm_override_hint
+                    else:
+                        # Otherwise, try to load settings for this specific file.
+                        base_name_for_settings, _ = os.path.splitext(os.path.basename(file_path))
+                        settings_path = os.path.join(output_dir, f"{base_name_for_settings}_Analysis_Settings.json")
+                        if os.path.exists(settings_path):
+                            try:
+                                with open(settings_path, 'r', encoding='utf-8') as f:
+                                    settings = json.load(f)
+                                if settings.get('start_bpm_hint') is not None:
+                                    start_bpm_hint = float(settings['start_bpm_hint'])
+                            except Exception:
+                                # If file is corrupt or unreadable, just proceed without the hint.
+                                pass
+                    # --- END: Per-File Settings Logic ---
+
                     base_name, ext = os.path.splitext(file_path)
                     wav_path = os.path.join(output_dir, f"{os.path.basename(base_name)}.wav")
 
@@ -211,13 +234,12 @@ class BPMApp:
                         if not convert_to_wav(file_path, wav_path):
                             raise Exception("File conversion failed.")
                     else:
-                        # The file is already a WAV, so just copy it to the working directory.
-                        import shutil
                         shutil.copy(file_path, wav_path)
 
                     self.log_queue.put(
                         UIMessage(UIMessageType.STATUS, f"({i + 1}/{total_files}) Analyzing heartbeat..."))
 
+                    # Pass the file-specific start_bpm_hint to the analysis function.
                     analyze_wav_file(wav_path, self.params, start_bpm_hint, original_file_path=file_path,
                                      output_directory=output_dir)
                     files_processed += 1
@@ -227,7 +249,6 @@ class BPMApp:
                     error_info = f"Error processing '{os.path.basename(file_path)}':\n{str(e)}"
                     self.log_queue.put(UIMessage(UIMessageType.ERROR, error_info))
                     errors.append(os.path.basename(file_path))
-                    # The loop continues to the next file automatically
 
             # --- POST-LOOP COMPLETION MESSAGE ---
             if not errors:
@@ -241,11 +262,4 @@ class BPMApp:
             # Outer try-except block for critical errors (e.g., imports)
             error_info = f"A critical error occurred during batch setup:\n{str(e)}"
             self.log_queue.put(UIMessage(UIMessageType.ERROR, error_info))
-            self.root.after(0, lambda: self.analyze_btn.config(state=tk.NORMAL))
-
-        except Exception as e:
-            # Outer try-except block for critical errors (e.g., imports)
-            error_info = f"A critical error occurred during batch setup:\n{str(e)}"
-            self.log_queue.put(UIMessage(UIMessageType.ERROR, error_info))
-
             self.root.after(0, lambda: self.analyze_btn.config(state=tk.NORMAL))
