@@ -1,0 +1,18 @@
+{
+  "name": "bpm-analysis-web",
+  "version": "1.0.0",
+  "description": "Web-based heartbeat BPM analysis tool",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "plotly.js-dist": "^2.27.0"
+  },
+  "devDependencies": {
+    "vite": "^4.5.0"
+  },
+  "type": "module"
+}
