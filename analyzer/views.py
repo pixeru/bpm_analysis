@@ -29,10 +29,80 @@ def index(request):
     """Main page with file upload form"""
     return render(request, 'analyzer/index.html')
 
+def process_sample_file(sample_file_path):
+    """Process the sample file"""
+    try:
+        # Generate unique analysis ID
+        analysis_id = str(uuid.uuid4())
+        
+        # Create analysis directory
+        analysis_dir = os.path.join(settings.MEDIA_ROOT, 'analyses', analysis_id)
+        os.makedirs(analysis_dir, exist_ok=True)
+        
+        # Copy sample file to analysis directory
+        wav_file_path = os.path.join(analysis_dir, 'analysis.wav')
+        import shutil
+        shutil.copy2(sample_file_path, wav_file_path)
+        
+        # Run BPM analysis
+        if analyze_wav_file:
+            try:
+                # Use default parameters
+                params = DEFAULT_PARAMS.copy()
+                start_bpm_hint = None
+                
+                # Run the analysis
+                analyze_wav_file(
+                    wav_file_path,
+                    params,
+                    start_bpm_hint,
+                    original_file_path=sample_file_path,
+                    output_directory=analysis_dir
+                )
+                
+                # Save analysis metadata
+                metadata = {
+                    'analysis_id': analysis_id,
+                    'original_filename': 'sample_input.wav',
+                    'file_extension': '.wav',
+                    'analysis_completed': True,
+                    'error': None
+                }
+                
+                metadata_path = os.path.join(analysis_dir, 'metadata.json')
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f)
+                
+                return JsonResponse({
+                    'success': True,
+                    'analysis_id': analysis_id,
+                    'message': 'Sample analysis completed successfully'
+                })
+                
+            except Exception as e:
+                logging.error(f"Sample BPM analysis failed: {e}")
+                return JsonResponse({'error': f'Sample analysis failed: {str(e)}'}, status=500)
+        else:
+            return JsonResponse({'error': 'BPM analysis not available'}, status=500)
+            
+    except Exception as e:
+        logging.error(f"Sample file processing error: {e}")
+        return JsonResponse({'error': f'Sample file processing failed: {str(e)}'}, status=500)
+
 @csrf_exempt
 def upload_file(request):
     """Handle file upload and BPM analysis"""
     if request.method == 'POST':
+        # Check if it's a sample file request
+        if 'sample_file' in request.POST:
+            # Use the sample file
+            sample_file_path = os.path.join(settings.BASE_DIR, 'sample_input.wav')
+            if not os.path.exists(sample_file_path):
+                return JsonResponse({'error': 'Sample file not found'}, status=400)
+            
+            # Process sample file
+            return process_sample_file(sample_file_path)
+        
         if 'audio_file' not in request.FILES:
             return JsonResponse({'error': 'No file uploaded'}, status=400)
         
@@ -179,3 +249,35 @@ def view_result(request, analysis_id):
         logging.error(f"Error viewing result: {e}")
         messages.error(request, f'Error loading results: {str(e)}')
         return redirect('analyzer:index')
+
+def download_file(request, analysis_id, filename):
+    """Download analysis file"""
+    try:
+        analysis_dir = os.path.join(settings.MEDIA_ROOT, 'analyses', str(analysis_id))
+        file_path = os.path.join(analysis_dir, filename)
+        
+        if not os.path.exists(file_path):
+            messages.error(request, 'File not found')
+            return redirect('analyzer:result', analysis_id=analysis_id)
+        
+        # Serve the file
+        with open(file_path, 'rb') as f:
+            response = HttpResponse(f.read())
+            
+        # Set content type based on file extension
+        if filename.endswith('.json'):
+            response['Content-Type'] = 'application/json'
+        elif filename.endswith('.html'):
+            response['Content-Type'] = 'text/html'
+        elif filename.endswith('.md'):
+            response['Content-Type'] = 'text/markdown'
+        else:
+            response['Content-Type'] = 'application/octet-stream'
+            
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+        
+    except Exception as e:
+        logging.error(f"Error downloading file: {e}")
+        messages.error(request, f'Error downloading file: {str(e)}')
+        return redirect('analyzer:result', analysis_id=analysis_id)
