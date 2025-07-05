@@ -6,7 +6,8 @@ DEFAULT_PARAMS = {
     # Controls the initial loading and filtering of the audio.
     # =================================================================================
     "downsample_factor": 300,     # Factor to reduce sample rate. Higher = faster processing, less detail.
-    "save_filtered_wav": True,    # If True, saves a .wav file of the filtered audio for debugging.
+    "bandpass_freqs": (20, 150),  # (low_hz, high_hz) for the bandpass filter.
+    "save_filtered_wav": False,    # If True, saves a .wav file of the filtered audio for debugging.
 
     # =================================================================================
     # 2. Signal Feature Detection
@@ -42,6 +43,9 @@ DEFAULT_PARAMS = {
 
     # --- 4.2. Amplitude-Based Confidence Model ---
     "deviation_smoothing_factor": 0.05, # Smoothing applied to the peak-to-peak amplitude deviation series.
+    "confidence_deviation_points": [0.0, 0.25, 0.40, 0.80, 1.0], # X-axis for the confidence curves (normalized deviation).
+    "confidence_curve_low_bpm": [0.9, 0.9, 0.7, 0.1, 0.1],      # Y-axis curve for LOW heart rates (rewards similar amplitude).
+    "confidence_curve_high_bpm": [0.1, 0.5, 0.75, 0.65, 0],      # Y-axis curve for HIGH heart rates (rewards S1 > S2).
 
     # --- 4.3. Physiology-Based Confidence Adjustment ---
     "stability_history_window": 20,         # Number of recent beats used to determine rhythm stability.
@@ -65,6 +69,9 @@ DEFAULT_PARAMS = {
 
     # --- 4.5. Kick-Start Mechanism to Recover from Pairing Failure ---
     "kickstart_check_threshold": 0.3,           # Only run the check if pairing_ratio is BELOW this value.
+    "kickstart_history_beats": 4,               # How many of the most recent beats to check.
+    "kickstart_min_s1_candidates": 3,           # At least this many of the recent beats must be "Lone S1s" to be considered.
+    "kickstart_min_matches": 3,                 # How many must match the "S1 -> Noise" pattern to trigger.
     "kickstart_override_ratio": 0.60,           # The temporary pairing ratio to use if kick-start is triggered.
 
     # =================================================================================
@@ -72,6 +79,8 @@ DEFAULT_PARAMS = {
     # Rules for the algorithm's long-term BPM belief and beat-to-beat timing checks.
     # =================================================================================
     # --- 5.1. Long-Term BPM Belief ---
+    "long_term_bpm_learning_rate": 0.05,    # How quickly the BPM belief adapts to new beats.
+    "max_bpm_change_per_beat": 3.0,         # "Speed limit" on how much the BPM belief can change per beat.
     "min_bpm": 40,                          # Absolute minimum BPM the algorithm will consider valid.
     "max_bpm": 240,                         # Absolute maximum BPM the algorithm will consider valid.
 
@@ -85,6 +94,10 @@ DEFAULT_PARAMS = {
     "lone_s1_confidence_threshold": 0.50, # Final combined score needed to be accepted as a Lone S1.
     "lone_s1_rhythm_weight": 0.65,         # The weight given to the rhythmic timing score (0.0 to 1.0).
     "lone_s1_amplitude_weight": 0.35,      # The weight given to the amplitude consistency score.
+    "lone_s1_rhythm_deviation_points": [0.0, 0.15, 0.30, 0.50], # X-axis: % deviation from expected RR interval.
+    "lone_s1_rhythm_confidence_curve": [1.0, 0.8, 0.4, 0.0],   # Y-axis: Confidence score for rhythmic fit.
+    "lone_s1_amplitude_ratio_points": [0.0, 0.4, 0.7, 1.0],   # X-axis: Strength ratio compared to previous S1.
+    "lone_s1_amplitude_confidence_curve": [0.0, 0.4, 0.8, 1.0], # Y-axis: Confidence score for amplitude consistency.
 
     # =================================================================================
     # 6. Post-Processing Correction Pass
@@ -95,6 +108,7 @@ DEFAULT_PARAMS = {
     "rr_correction_long_interval_pct": 1.70,  # An R-R interval longer than (Median R-R * this_value) is a "gap".
     "penalty_waiver_strength_ratio": 4.0,     # Required signal-to-noise ratio for an S1 to be used in a correction.
     "penalty_waiver_max_s2_s1_ratio": 2.5,    # Safety rail: S2/S1 amp ratio must be below this to allow a correction.
+    "correction_log_level": "DEBUG",          # Verbosity of the correction pass logs. Set to "INFO" or "DEBUG".
 
     # =================================================================================
     # 7. Output, HRV & Reporting
@@ -104,5 +118,6 @@ DEFAULT_PARAMS = {
     "hrv_window_size_beats": 40,             # Sliding window size (in beats) for HRV calculation.
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
-    "plot_downsample_factor": 1,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
+    "plot_downsample_audio_envelope": True,  # If True, downsamples audio line traces for faster plotting.
+    "plot_downsample_factor": 5,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
 }
