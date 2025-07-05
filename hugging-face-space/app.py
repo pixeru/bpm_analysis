@@ -13,7 +13,7 @@ ANALYSIS_PARAMS = DEFAULT_PARAMS.copy()
 
 def run_analysis(audio_file, start_bpm_hint):
     if audio_file is None:
-        return "Please upload an audio file first.", None, None, None, None, None
+        return "Please upload an audio file first.", None, None, None, None, None, None
 
     try:
         # The Gradio File component gives us an object with a .name attribute
@@ -46,7 +46,7 @@ def run_analysis(audio_file, start_bpm_hint):
 
         # Check if output files exist
         if not os.path.exists(plot_path) or not os.path.exists(summary_path):
-             return "Analysis ran, but output files were not generated.", None, None, None, None, None
+             return "Analysis ran, but output files were not generated.", None, None, None, None, None, None
 
         # Read the content of the files
         summary_content = ""
@@ -68,12 +68,24 @@ def run_analysis(audio_file, start_bpm_hint):
         # Create status message
         status_html = "<p style='font-size: 1.2em; color: green;'>✅ Analysis Complete!</p>"
 
-        return status_html, downloadable_files, plotly_fig, summary_content, debug_log_content
+        return status_html, downloadable_files, plotly_fig, summary_content, debug_log_content, plot_path
 
     except Exception as e:
         # Return the error message to the status box
         error_html = f"<p style='color: red;'>An error occurred: {str(e)}</p>"
-        return error_html, None, None, None, None, None
+        return error_html, None, None, None, None, None, None
+
+def open_plot_in_new_tab(html_file_path):
+    """Opens the HTML plot file in a new browser tab."""
+    if html_file_path and os.path.exists(html_file_path):
+        import webbrowser
+        # Convert to absolute path and use file:// protocol
+        abs_path = os.path.abspath(html_file_path)
+        file_url = f"file:///{abs_path.replace(os.sep, '/')}"
+        webbrowser.open(file_url)
+        return f"Opened plot in new tab: {os.path.basename(html_file_path)}"
+    else:
+        return "No plot file available to open."
 
 # --- Create the Gradio Interface ---
 with gr.Blocks() as demo:
@@ -93,7 +105,12 @@ with gr.Blocks() as demo:
 
     # Results section with collapsible accordions
     with gr.Accordion("📊 Interactive BPM Analysis Plot", open=True):
-        plot_output = gr.Plot(label="BPM Analysis Plot")
+        with gr.Row():
+            plot_output = gr.Plot(label="BPM Analysis Plot", scale=3)
+            open_in_new_tab_btn = gr.Button("🔗 Open in New Tab", scale=1, variant="secondary")
+    
+    # Hidden component to store the HTML file path for the button
+    html_file_path = gr.State()
     
     with gr.Accordion("📋 Analysis Summary", open=True):
         summary_output = gr.Markdown(label="Summary")
@@ -104,7 +121,13 @@ with gr.Blocks() as demo:
     submit_btn.click(
         fn=run_analysis,
         inputs=[audio_input, bpm_hint],
-        outputs=[status_output, download_output, plot_output, summary_output, debug_output]
+        outputs=[status_output, download_output, plot_output, summary_output, debug_output, html_file_path]
+    )
+    
+    open_in_new_tab_btn.click(
+        fn=open_plot_in_new_tab,
+        inputs=[html_file_path],
+        outputs=[status_output]
     )
 
 demo.launch()
