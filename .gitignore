@@ -1,0 +1,24 @@
+# Virtual environments
+venv
+
+# Outputs
+outputs
+
+__pycache__
+
+
+# Ignore Audio Files 🎵
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aiff
+
+# Ignore Video Files 🎥
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.wmv
