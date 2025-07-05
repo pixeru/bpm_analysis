@@ -452,7 +452,22 @@ class Plotter:
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {'scrollZoom': True, 'toImageButtonOptions': {'filename': plot_title, 'format': 'png', 'scale': 2}}
-        self.fig.write_html(output_html_path, config=plot_config)
+        # Use CDN method for small, fast-loading plots
+        try:
+            self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs='cdn', 
+                               include_mathjax=False)
+            logging.info(f"Plot saved with CDN method (small file size)")
+        except Exception as e:
+            logging.warning(f"CDN method failed: {e}, trying fallback")
+            # Fallback: use directory method (also small)
+            try:
+                self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs='directory')
+                logging.info(f"Plot saved with directory method")
+            except Exception as e2:
+                logging.error(f"All plot generation methods failed: {e2}")
+                # Ultimate fallback: create a basic HTML message
+                with open(output_html_path, 'w', encoding='utf-8') as f:
+                    f.write(f'<div><h3>Plot generation failed</h3><p>Error: {str(e2)}</p><p>Please check the downloadable files.</p></div>')
         logging.info(f"Interactive plot saved to {output_html_path}")
 
         # --- Output CSV for BPM plot ---
