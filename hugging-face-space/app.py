@@ -58,25 +58,27 @@ def run_analysis(audio_file, start_bpm_hint):
             file_size = os.path.getsize(plot_path)
             print(f"Plot file size: {file_size / (1024*1024):.2f}MB")  # Debug output
             
-            if file_size > 5 * 1024 * 1024:  # If file is larger than 5MB
-                plot_html = f'<p style="color: orange;">⚠️ Plot file is too large ({file_size // (1024*1024)}MB) to display inline. Please download the plot file to view it locally.</p>'
-                print(f"Plot file too large: {file_size // (1024*1024)}MB")
-            else:
-                try:
-                    with open(plot_path, 'r', encoding='utf-8') as f:
-                        plot_html = f.read()
-                    print(f"Successfully read HTML file, length: {len(plot_html)} chars")
-                    # Check if it's a valid HTML structure
-                    if '<html' in plot_html.lower() and '</html>' in plot_html.lower():
-                        print("HTML file appears to be valid")
-                    else:
-                        print("HTML file may be incomplete or invalid")
-                        # If it's not complete HTML, wrap it in a div
-                        if not plot_html.strip().startswith('<div'):
-                            plot_html = f'<div>{plot_html}</div>'
-                except Exception as e:
-                    plot_html = f'<p style="color: red;">Error reading plot file: {str(e)}</p>'
-                    print(f"Error reading plot file: {e}")
+            try:
+                with open(plot_path, 'r', encoding='utf-8') as f:
+                    plot_html = f.read()
+                print(f"Successfully read HTML file, length: {len(plot_html)} chars")
+                
+                # Add a warning for very large files but still display them
+                if file_size > 10 * 1024 * 1024:  # If file is larger than 10MB, show warning
+                    warning_msg = f'<div style="background: #fff3cd; border: 1px solid #ffecb5; padding: 10px; margin: 10px 0; border-radius: 5px;"><p style="color: #856404; margin: 0;">⚠️ Large plot file ({file_size / (1024*1024):.1f}MB) - may take a moment to load and could affect browser performance.</p></div>'
+                    plot_html = warning_msg + plot_html
+                
+                # Check if it's a valid HTML structure
+                if '<html' in plot_html.lower() and '</html>' in plot_html.lower():
+                    print("HTML file appears to be valid")
+                else:
+                    print("HTML file may be incomplete or invalid")
+                    # If it's not complete HTML, wrap it in a div
+                    if not plot_html.strip().startswith('<div'):
+                        plot_html = f'<div>{plot_html}</div>'
+            except Exception as e:
+                plot_html = f'<p style="color: red;">Error reading plot file: {str(e)}</p>'
+                print(f"Error reading plot file: {e}")
         else:
             plot_html = '<p style="color: red;">Plot file not found.</p>'
             print(f"Plot file not found at: {plot_path}")
