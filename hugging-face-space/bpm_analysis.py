@@ -452,17 +452,17 @@ class Plotter:
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {'scrollZoom': True, 'toImageButtonOptions': {'filename': plot_title, 'format': 'png', 'scale': 2}}
-        # Use CDN method for small, fast-loading plots
+        # Use inline method for reliable display in all environments
         try:
-            self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs='cdn', 
+            self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs='inline', 
                                include_mathjax=False)
-            logging.info(f"Plot saved with CDN method (small file size)")
+            logging.info(f"Plot saved with inline method (self-contained)")
         except Exception as e:
-            logging.warning(f"CDN method failed: {e}, trying fallback")
-            # Fallback: use directory method (also small)
+            logging.warning(f"Inline method failed: {e}, trying fallback")
+            # Fallback: use True (same as inline but different parameter)
             try:
-                self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs='directory')
-                logging.info(f"Plot saved with directory method")
+                self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs=True)
+                logging.info(f"Plot saved with include_plotlyjs=True method")
             except Exception as e2:
                 logging.error(f"All plot generation methods failed: {e2}")
                 # Ultimate fallback: create a basic HTML message
