@@ -105,4 +105,5 @@ DEFAULT_PARAMS = {
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
     "plot_downsample_factor": 10,            # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
+    "plot_enable_fullscreen": True,          # If True, enables fullscreen button in the plot toolbar.
 }

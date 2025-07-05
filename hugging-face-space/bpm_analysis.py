@@ -451,7 +451,19 @@ class Plotter:
         base_name = os.path.basename(os.path.splitext(self.file_name)[0])
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
-        plot_config = {'scrollZoom': True, 'toImageButtonOptions': {'filename': plot_title, 'format': 'png', 'scale': 2}}
+        
+        # Configure plot with optional fullscreen capability
+        plot_config = {
+            'scrollZoom': True, 
+            'toImageButtonOptions': {'filename': plot_title, 'format': 'png', 'scale': 2}
+        }
+        
+        # Add fullscreen button if enabled in configuration
+        if self.params.get("plot_enable_fullscreen", True):
+            plot_config['displayModeBar'] = True
+            plot_config['modeBarButtonsToAdd'] = ['toggleFullScreen']
+            plot_config['displaylogo'] = False  # Hide plotly logo for cleaner fullscreen experience
+        
         # Use CDN method for small, fast-loading plots
         try:
             self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs='cdn', 
