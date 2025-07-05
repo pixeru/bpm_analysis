@@ -3,7 +3,7 @@ venv
 
 # Outputs
 outputs
-
+processed_files
 __pycache__
 
 
