@@ -457,18 +457,21 @@ class Plotter:
             self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs='inline', 
                                include_mathjax=False)
             logging.info(f"Plot saved with inline method (self-contained)")
+            return self.fig
         except Exception as e:
             logging.warning(f"Inline method failed: {e}, trying fallback")
             # Fallback: use True (same as inline but different parameter)
             try:
                 self.fig.write_html(output_html_path, config=plot_config, include_plotlyjs=True)
                 logging.info(f"Plot saved with include_plotlyjs=True method")
+                return self.fig
             except Exception as e2:
                 logging.error(f"All plot generation methods failed: {e2}")
                 # Ultimate fallback: create a basic HTML message
                 with open(output_html_path, 'w', encoding='utf-8') as f:
                     f.write(f'<div><h3>Plot generation failed</h3><p>Error: {str(e2)}</p><p>Please check the downloadable files.</p></div>')
-        logging.info(f"Interactive plot saved to {output_html_path}")
+                logging.info(f"Interactive plot saved to {output_html_path}")
+                return self.fig
 
         # --- Output CSV for BPM plot ---
         smoothed_bpm = final_metrics.get('smoothed_bpm')
@@ -1769,7 +1772,7 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     final_metrics = _calculate_final_metrics(final_peaks, sample_rate, params)
 
     plotter = Plotter(original_file_path, params, sample_rate, output_directory)
-    plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
+    plotly_fig = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
 
     reporter = ReportGenerator(original_file_path, output_directory)
     reporter.save_analysis_summary(final_metrics)
@@ -1778,3 +1781,5 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
+    
+    return plotly_fig

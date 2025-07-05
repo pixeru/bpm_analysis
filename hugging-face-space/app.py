@@ -13,7 +13,7 @@ ANALYSIS_PARAMS = DEFAULT_PARAMS.copy()
 
 def run_analysis(audio_file, start_bpm_hint):
     if audio_file is None:
-        return "Please upload an audio file first.", None, None, None, None
+        return "Please upload an audio file first.", None, None, None, None, None
 
     try:
         # The Gradio File component gives us an object with a .name attribute
@@ -36,7 +36,7 @@ def run_analysis(audio_file, start_bpm_hint):
             shutil.copy(original_file_path, wav_path)
 
         # Run the main analysis function
-        analyze_wav_file(
+        plotly_fig = analyze_wav_file(
             wav_file_path=wav_path,
             params=ANALYSIS_PARAMS,
             start_bpm_hint=start_bpm_hint if start_bpm_hint > 0 else None,
@@ -46,42 +46,11 @@ def run_analysis(audio_file, start_bpm_hint):
 
         # Check if output files exist
         if not os.path.exists(plot_path) or not os.path.exists(summary_path):
-             return "Analysis ran, but output files were not generated.", None, None, None, None
+             return "Analysis ran, but output files were not generated.", None, None, None, None, None
 
         # Read the content of the files
-        plot_html = ""
         summary_content = ""
         debug_log_content = ""
-        
-        # Read the HTML plot file
-        if os.path.exists(plot_path):
-            file_size = os.path.getsize(plot_path)
-            print(f"Plot file size: {file_size / (1024*1024):.2f}MB")  # Debug output
-            
-            try:
-                with open(plot_path, 'r', encoding='utf-8') as f:
-                    plot_html = f.read()
-                print(f"Successfully read HTML file, length: {len(plot_html)} chars")
-                
-                # Add a warning for very large files but still display them
-                if file_size > 10 * 1024 * 1024:  # If file is larger than 10MB, show warning
-                    warning_msg = f'<div style="background: #fff3cd; border: 1px solid #ffecb5; padding: 10px; margin: 10px 0; border-radius: 5px;"><p style="color: #856404; margin: 0;">⚠️ Large plot file ({file_size / (1024*1024):.1f}MB) - may take a moment to load and could affect browser performance.</p></div>'
-                    plot_html = warning_msg + plot_html
-                
-                # Check if it's a valid HTML structure
-                if '<html' in plot_html.lower() and '</html>' in plot_html.lower():
-                    print("HTML file appears to be valid")
-                else:
-                    print("HTML file may be incomplete or invalid")
-                    # If it's not complete HTML, wrap it in a div
-                    if not plot_html.strip().startswith('<div'):
-                        plot_html = f'<div>{plot_html}</div>'
-            except Exception as e:
-                plot_html = f'<p style="color: red;">Error reading plot file: {str(e)}</p>'
-                print(f"Error reading plot file: {e}")
-        else:
-            plot_html = '<p style="color: red;">Plot file not found.</p>'
-            print(f"Plot file not found at: {plot_path}")
         
         # Read the summary markdown file
         if os.path.exists(summary_path):
@@ -99,12 +68,12 @@ def run_analysis(audio_file, start_bpm_hint):
         # Create status message
         status_html = "<p style='font-size: 1.2em; color: green;'>✅ Analysis Complete!</p>"
 
-        return status_html, downloadable_files, plot_html, summary_content, debug_log_content
+        return status_html, downloadable_files, plotly_fig, summary_content, debug_log_content
 
     except Exception as e:
         # Return the error message to the status box
         error_html = f"<p style='color: red;'>An error occurred: {str(e)}</p>"
-        return error_html, None, None, None, None
+        return error_html, None, None, None, None, None
 
 # --- Create the Gradio Interface ---
 with gr.Blocks() as demo:
@@ -124,7 +93,7 @@ with gr.Blocks() as demo:
 
     # Results section with collapsible accordions
     with gr.Accordion("📊 Interactive BPM Analysis Plot", open=True):
-        plot_output = gr.HTML(label="BPM Analysis Plot")
+        plot_output = gr.Plot(label="BPM Analysis Plot")
     
     with gr.Accordion("📋 Analysis Summary", open=True):
         summary_output = gr.Markdown(label="Summary")
