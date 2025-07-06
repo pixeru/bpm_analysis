@@ -6,7 +6,6 @@ outputs
 processed_files
 __pycache__
 
-
 # Ignore Audio Files 🎵
 *.wav
 *.mp3

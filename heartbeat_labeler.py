@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 from dash import Dash, dcc, html, Input, Output, State, ctx, dash_table
+from dash.dependencies import ClientsideFunction
 from scipy.io import wavfile
 import glob
 import dash
@@ -316,6 +317,11 @@ available_files = get_processed_files()
 _data_cache = {}
 
 app.layout = html.Div([
+    # Components to initialize and store keyboard shortcut data
+    dcc.Location(id='url', refresh=False),
+    dcc.Store(id='keyboard-store'),
+    dcc.Interval(id='keyboard-interval', interval=100, n_intervals=0),  # Poll every 100ms
+
     html.H2("Heartbeat Peak Labeler"),
     
     # File selector
@@ -350,13 +356,13 @@ app.layout = html.Div([
             value="S1",
             style={"width": "100px", "display": "inline-block", "marginRight": "10px"}
         ),
-        # Hidden input for keyboard shortcuts
-        dcc.Input(id="shortcut-input", value="", style={"display": "none"}),
         html.Button("Save Labels", id="save-btn", n_clicks=0),
         html.Button("Clear Labels", id="clear-btn", n_clicks=0, style={"marginLeft": "10px"}),
         html.Div([
             html.P("Select S1 or S2 above, then click on the plot to add peaks.", 
-                   style={"fontSize": "12px", "color": "gray", "marginTop": "5px"})
+                   style={"fontSize": "12px", "color": "gray", "marginTop": "5px"}),
+            html.P("Keyboard shortcuts: Press 'Z' for S1, 'X' for S2", 
+                   style={"fontSize": "12px", "color": "blue", "marginTop": "2px"})
         ]),
     ], style={"margin": "10px 0"}),
     
@@ -407,6 +413,38 @@ app.layout = html.Div([
     html.H4("Automatic Group Analysis"),
     html.Div(id="group-analysis-output"),
 ])
+
+# ---- NEW KEYBOARD SHORTCUT CALLBACKS ----
+
+# Combined clientside callback that handles both setup and periodic checking
+app.clientside_callback(
+    ClientsideFunction(
+        namespace='keyboard',      # From assets/keyboard_shortcuts.js
+        function_name='handle_keyboard_combined' # Combined function
+    ),
+    Output('keyboard-store', 'data'),
+    Input('url', 'pathname'),         # Trigger this callback when the page loads
+    Input('keyboard-interval', 'n_intervals')  # And periodically
+)
+
+# This server-side callback listens for data changes in the keyboard-store
+@app.callback(
+    Output("peak-type", "value"),
+    Input("keyboard-store", "data"),
+    prevent_initial_call=True
+)
+def handle_keyboard_input(keyboard_data):
+    """Handle keyboard input for Z and X keys."""
+    if keyboard_data and keyboard_data.get('last_key'):
+        key = keyboard_data['last_key'].lower()
+        if key == 'z':
+            return "S1"
+        elif key == 'x':
+            return "S2"
+    return dash.no_update
+
+# ---- END NEW KEYBOARD SHORTCUT CALLBACKS ----
+
 
 @app.callback(
     Output("envelope-plot", "figure"),
@@ -640,8 +678,6 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
     }
     
     # Use uirevision to preserve zoom/pan state
-    # When uirevision is the same, Plotly preserves the user's view state
-    # When it changes, Plotly resets to default view
     if triggered == "file-selector":
         # Reset view when changing files
         layout_config["uirevision"] = selected_file
@@ -664,16 +700,6 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
         )
     
     return fig, df.to_dict("records"), html.Ul([html.Li(i) for i in intervals])
-
-@app.callback(
-    Output("peak-type", "value"),
-    Input("shortcut-input", "value"),
-    prevent_initial_call=True
-)
-def shortcut_change(val):
-    if val in ["S1", "S2"]:
-        return val
-    raise dash.exceptions.PreventUpdate
 
 @app.callback(
     Output("avg-delta-t-output", "children"),
