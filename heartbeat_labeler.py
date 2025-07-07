@@ -241,10 +241,10 @@ def calculate_avg_delta_t_in_range(df, start_time, end_time):
     
     return avg_delta_t, avg_bpm, pairs_in_range
 
-def detect_labeling_groups(df, gap_threshold=5.0):
-    """Detect groups of labelings based on time gaps between S1 peaks"""
+def detect_labeling_groups(df, gap_threshold=1):
+    """Detect groups of labelings based on time gap (seconds) between S1 peaks"""
     if df.empty:
-        return []
+        return [] 
     
     # Get all S1 peaks sorted by time
     s1_data = df[df["Peak Type"] == "S1"].sort_values("Time (s)")
@@ -322,6 +322,12 @@ app.layout = html.Div([
     dcc.Store(id='keyboard-store'),
     dcc.Interval(id='keyboard-interval', interval=100, n_intervals=0),  # Poll every 100ms
 
+    # ADD A HIDDEN BUTTON TO TRIGGER UNDO
+    html.Button(id='undo-trigger', n_clicks=0, style={'display': 'none'}),
+    
+    # ADD A HIDDEN STORE TO TRACK UNDO HISTORY
+    dcc.Store(id='undo-history', data=[]),
+
     html.H2("Heartbeat Peak Labeler"),
     
     # File selector
@@ -361,8 +367,8 @@ app.layout = html.Div([
         html.Div([
             html.P("Select S1 or S2 above, then click on the plot to add peaks.", 
                    style={"fontSize": "12px", "color": "gray", "marginTop": "5px"}),
-            html.P("Keyboard shortcuts: Press 'Z' for S1, 'X' for S2", 
-                   style={"fontSize": "12px", "color": "blue", "marginTop": "2px"})
+            html.P("Keyboard shortcuts: Press 'Z' for S1, 'X' for S2. Press Ctrl+Z to undo (supports multiple undos).", 
+                   style={"fontSize": "12px", "color": "grey", "marginTop": "2px"})
         ]),
     ], style={"margin": "10px 0"}),
     
@@ -414,20 +420,20 @@ app.layout = html.Div([
     html.Div(id="group-analysis-output"),
 ])
 
-# ---- NEW KEYBOARD SHORTCUT CALLBACKS ----
+# ---- KEYBOARD SHORTCUT CALLBACKS ----
 
-# Combined clientside callback that handles both setup and periodic checking
+# This clientside callback sets up the main keyboard listener
 app.clientside_callback(
     ClientsideFunction(
-        namespace='keyboard',      # From assets/keyboard_shortcuts.js
-        function_name='handle_keyboard_combined' # Combined function
+        namespace='keyboard',
+        function_name='handle_keyboard_combined'
     ),
     Output('keyboard-store', 'data'),
-    Input('url', 'pathname'),         # Trigger this callback when the page loads
-    Input('keyboard-interval', 'n_intervals')  # And periodically
+    Input('url', 'pathname'),
+    Input('keyboard-interval', 'n_intervals')
 )
 
-# This server-side callback listens for data changes in the keyboard-store
+# This callback updates the S1/S2 dropdown when Z or X is pressed
 @app.callback(
     Output("peak-type", "value"),
     Input("keyboard-store", "data"),
@@ -443,33 +449,51 @@ def handle_keyboard_input(keyboard_data):
             return "S2"
     return dash.no_update
 
-# ---- END NEW KEYBOARD SHORTCUT CALLBACKS ----
+# This callback "clicks" the hidden undo button when Ctrl+Z is pressed
+@app.callback(
+    Output('undo-trigger', 'n_clicks'),
+    Input('keyboard-store', 'data'),
+    State('undo-trigger', 'n_clicks'),
+    prevent_initial_call=True
+)
+def trigger_undo_from_keyboard(keyboard_data, n_clicks):
+    if keyboard_data and keyboard_data.get('last_key') == 'ctrl+z':
+        return (n_clicks or 0) + 1
+    return dash.no_update
 
+
+# ---- MAIN CALLBACK ----
 
 @app.callback(
     Output("envelope-plot", "figure"),
     Output("labels-table", "data"),
     Output("s1s2-intervals", "children"),
+    Output("undo-history", "data"),
     Input("file-selector", "value"),
     Input("envelope-plot", "clickData"),
     Input("save-btn", "n_clicks"),
     Input("clear-btn", "n_clicks"),
     Input("labels-table", "data_timestamp"),
+    Input('undo-trigger', 'n_clicks'),
     State("labels-table", "data"),
-    State("peak-type", "value")
+    State("peak-type", "value"),
+    State("undo-history", "data")
 )
-def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, data_timestamp, table_data, peak_type):
+def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, data_timestamp, undo_clicks, table_data, peak_type, undo_history):
     triggered = ctx.triggered_id
     
     if not selected_file:
         return go.Figure(), [], []
     
+    # Initialize undo history if None
+    if undo_history is None:
+        undo_history = []
+    
     # Handle initial load or file selection
     if triggered is None or triggered == "file-selector":
-        # Load existing labels for new file
         df = load_labels(selected_file)
+        undo_history = []  # Clear undo history when loading a new file
     else:
-        # Use table data from the table component
         df = pd.DataFrame(table_data) if table_data else pd.DataFrame(columns=["Time (s)", "Average BPM", "Peak Type"])
     
     # Load data for selected file (use cache to avoid reloading)
@@ -480,7 +504,6 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
             print(f"Failed to load data for {selected_file}")
             return go.Figure(), [], []
         
-        # Cache the data
         _data_cache[selected_file] = (time_axis, envelope, bpm_data)
         
         print(f"Successfully loaded data:")
@@ -493,7 +516,6 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
             print(f"  - No BPM data available")
             bpm_times, bpm_values = [], []
     else:
-        # Use cached data for other triggers
         if selected_file in _data_cache:
             time_axis, envelope, bpm_data = _data_cache[selected_file]
             if bpm_data:
@@ -504,28 +526,15 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
             print(f"Error: No cached data for {selected_file}")
             return go.Figure(), [], []
     
-    # Handle labels
+    # Handle label modifications
     if triggered == "envelope-plot" and clickData:
-        # Add new label - just get the x coordinate directly
         x = clickData["points"][0]["x"]
-        print(f"Click data x value: {x}, type: {type(x)}")
-        
-        # Convert to float if needed
         x = float(x)
-        print(f"Converted x to seconds: {x}")
         
-        # Ensure the time is within the valid range
-        if x < 0:
-            print(f"Warning: Click time {x} is negative, clamping to 0")
-            x = 0
-        elif x > time_axis[-1]:
-            print(f"Warning: Click time {x} is beyond data range, clamping to {time_axis[-1]}")
-            x = time_axis[-1]
+        if x < 0: x = 0
+        elif x > time_axis[-1]: x = time_axis[-1]
         
         idx = find_nearest_idx(time_axis, float(x))
-        print(f"Found nearest index: {idx}, time at index: {time_axis[idx]}")
-        
-        # Find BPM at this time
         bpm_idx = find_nearest_idx(bpm_times, float(x))
         bpm_at_time = bpm_values[bpm_idx] if bpm_idx < len(bpm_values) else 0
         
@@ -535,8 +544,18 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
             "Peak Type": peak_type
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        # Sort by time to maintain chronological order
         df = df.sort_values("Time (s)").reset_index(drop=True)
+        
+        # Add the newly added label to undo history
+        undo_history.append({
+            "Time (s)": new_row["Time (s)"],
+            "Average BPM": new_row["Average BPM"],
+            "Peak Type": new_row["Peak Type"]
+        })
+        
+        # Limit undo history to last 20 actions to prevent memory issues
+        if len(undo_history) > 20:
+            undo_history = undo_history[-20:]
         
     elif triggered == "save-btn":
         save_labels(df, selected_file)
@@ -544,29 +563,32 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
     elif triggered == "clear-btn":
         df = pd.DataFrame(columns=["Time (s)", "Average BPM", "Peak Type"])
         save_labels(df, selected_file)
+        undo_history = []  # Clear undo history when clearing all labels
+
+    # UPDATE UNDO LOGIC TO REMOVE LAST ADDED LABEL FROM HISTORY
+    elif triggered == 'undo-trigger':
+        if not df.empty and undo_history:
+            # Get the last added label from history
+            last_added_label = undo_history.pop()
+            
+            # Remove the label with the specific timestamp and type
+            df = df[
+                ~((df["Time (s)"] == last_added_label["Time (s)"]) & 
+                  (df["Average BPM"] == last_added_label["Average BPM"]) & 
+                  (df["Peak Type"] == last_added_label["Peak Type"]))
+            ].reset_index(drop=True)
     
     # Calculate S1-S2 intervals
     pairs = calculate_s1_s2_diffs(df)
     intervals = [f"S1 at {s1:.2f}s (BPM: {bpm:.1f}), S2 at {s2:.2f}s, S1-S2 Interval = {dt:.3f}s" for s1, s2, dt, bpm in pairs]
     
-    # Create plot similar to _bpm_plot.html
+    # Create plot
     fig = go.Figure()
-    
-    # Add envelope trace
     envelope_array = np.array(envelope)
-    print(f"Adding envelope trace: {len(time_axis)} time points, {len(envelope_array)} envelope points")
-    print(f"Envelope range: {float(np.amin(envelope_array)):.3f} to {float(np.amax(envelope_array)):.3f}")
     
-    # Check for any NaN or infinite values
     if np.any(np.isnan(envelope_array)) or np.any(np.isinf(envelope_array)):
-        print("WARNING: Envelope contains NaN or infinite values!")
         envelope_array = np.nan_to_num(envelope_array, nan=0.0, posinf=0.0, neginf=0.0)
     
-    # Check if envelope has any variation
-    if np.amax(envelope_array) - np.amin(envelope_array) < 1e-6:
-        print("WARNING: Envelope has no variation - might be flat!")
-    
-    # Use raw time values for x-axis
     fig.add_trace(go.Scatter(
         x=time_axis,
         y=envelope_array,
@@ -574,7 +596,6 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
         line=dict(color="#47a5c4")
     ))
     
-    # Add BPM trace on secondary y-axis
     if len(bpm_times) > 0:
         fig.add_trace(go.Scatter(
             x=bpm_times,
@@ -589,11 +610,8 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
         for label in ["S1", "S2"]:
             pts = df[df["Peak Type"] == label]
             if not pts.empty:
-                # Interpolate envelope values at label times
                 label_times_array = pts["Time (s)"].to_numpy()
-                time_axis_array = np.array(time_axis)
-                envelope_array = np.array(envelope)
-                label_envelope_values = np.interp(label_times_array, time_axis_array, envelope_array)
+                label_envelope_values = np.interp(label_times_array, np.array(time_axis), envelope_array)
                 
                 fig.add_trace(go.Scatter(
                     x=pts["Time (s)"],
@@ -614,25 +632,31 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
     group_stats = calculate_group_statistics(df, groups)
     
     if group_stats:
-        # Get envelope values at group centers for positioning
         group_centers = []
         group_hover_texts = []
         
         for stat in group_stats:
             center_time = (stat['start_time'] + stat['end_time']) / 2
-            # Interpolate envelope value at center time
             center_envelope = np.interp(center_time, time_axis, envelope_array)
             group_centers.append((center_time, center_envelope))
             
-            # Create hover text
             hover_text = f"Group {stat['group_id']}<br>"
             hover_text += f"S1-S2 Interval: {stat['avg_delta_t']:.3f}s<br>"
             hover_text += f"BPM: {stat['avg_bpm']:.1f}<br>"
             hover_text += f"Range: {stat['start_time']:.1f}s - {stat['end_time']:.1f}s<br>"
             hover_text += f"S1 peaks: {stat['s1_count']}, Pairs: {stat['pairs_count']}"
             group_hover_texts.append(hover_text)
+
+            fig.add_annotation(
+                x=center_time,
+                y=center_envelope,
+                text=f"{stat['avg_delta_t']:.3f}",
+                showarrow=False,
+                yshift=35, # Shift text above the center point
+                font=dict(color="cyan", size=10),
+                borderpad=4
+            )
         
-        # Add invisible trace for group centers
         if group_centers:
             center_times, center_envelopes = zip(*group_centers)
             fig.add_trace(go.Scatter(
@@ -640,66 +664,35 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
                 y=center_envelopes,
                 mode="markers",
                 name="Group Centers",
-                marker=dict(
-                    size=10,  # Very small, nearly invisible
-                    color="rgba(0,0,0,0.1)"  # Nearly transparent
-                ),
+                marker=dict(size=10, color="rgba(0,0,0,0.1)"),
                 customdata=group_hover_texts,
                 hovertemplate="%{customdata}<extra></extra>",
                 showlegend=False
             ))
     
-    # Configure layout similar to _bpm_plot.html
     robust_upper_limit = np.quantile(envelope_array, 0.95) if len(envelope_array) > 0 else 1
-    amplitude_scale = 400.0  # Default amplitude scale factor
-    
-    # Prepare layout configuration
     layout_config = {
         "template": "plotly_dark",
         "title_text": f"Heartbeat Analysis - {selected_file}",
-        "dragmode": 'pan',  # Default to pan mode
+        "dragmode": 'pan',
         "legend": dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         "margin": dict(t=140, b=100),
         "hovermode": 'x unified',
-        # Configure primary y-axis for signal amplitude
-        "yaxis": dict(
-            title="Signal Amplitude",
-            range=[0, robust_upper_limit * amplitude_scale]
-        ),
-        # Configure secondary y-axis for BPM
-        "yaxis2": dict(
-            title="BPM",
-            overlaying="y",
-            side="right",
-            range=[50, 200],
-            titlefont=dict(color="#4a4a4a"),
-            tickfont=dict(color="#4a4a4a")
-        )
+        "yaxis": dict(title="Signal Amplitude", range=[0, robust_upper_limit * 400.0]),
+        "yaxis2": dict(title="BPM", overlaying="y", side="right", range=[50, 200], titlefont=dict(color="#4a4a4a"), tickfont=dict(color="#4a4a4a"))
     }
     
-    # Use uirevision to preserve zoom/pan state
-    if triggered == "file-selector":
-        # Reset view when changing files
-        layout_config["uirevision"] = selected_file
-    else:
-        # Preserve view for all other actions (adding/deleting labels)
-        layout_config["uirevision"] = selected_file
+    layout_config["uirevision"] = selected_file
     
     fig.update_layout(**layout_config)
     
-    # Configure x-axis with time format
     if len(time_axis) > 0:
         tick_positions_sec = np.linspace(0, time_axis[-1], num=10)
         ticktext = [f"{int(s // 60):02d}:{int(s % 60):02d}" for s in tick_positions_sec]
         
-        fig.update_xaxes(
-            title_text="Time (seconds)",
-            tickvals=tick_positions_sec,
-            ticktext=ticktext,
-            hoverformat='.2f'
-        )
+        fig.update_xaxes(title_text="Time (seconds)", tickvals=tick_positions_sec, ticktext=ticktext, hoverformat='.2f')
     
-    return fig, df.to_dict("records"), html.Ul([html.Li(i) for i in intervals])
+    return fig, df.to_dict("records"), html.Ul([html.Li(i) for i in intervals]), undo_history
 
 @app.callback(
     Output("avg-delta-t-output", "children"),
@@ -713,23 +706,16 @@ def calculate_average_delta_t(n_clicks, start_time, end_time, table_data):
     if n_clicks is None or start_time is None or end_time is None:
         return ""
     
-    # Create DataFrame from table data
     df = pd.DataFrame(table_data) if table_data else pd.DataFrame(columns=["Time (s)", "Average BPM", "Peak Type"])
     
     if df.empty:
         return html.P("No data available for calculation.", style={"color": "red"})
     
-    # Calculate average Δt
-    result = calculate_avg_delta_t_in_range(df, start_time, end_time)
-    if result[0] is None:
+    avg_delta_t, avg_bpm, pairs_in_range = calculate_avg_delta_t_in_range(df, start_time, end_time)
+    if avg_delta_t is None:
         return html.P(f"No S1-S2 pairs found in time range {start_time:.3f}s to {end_time:.3f}s", style={"color": "orange"})
     
-    avg_delta_t, avg_bpm, pairs_in_range = result
-    
-    # Create detailed output
-    pairs_text = []
-    for s1_time, s2_time, delta_t, s1_bpm in pairs_in_range:
-        pairs_text.append(f"• S1 at {s1_time:.3f}s (BPM: {s1_bpm:.1f}) → S2 at {s2_time:.3f}s, S1-S2 Interval = {delta_t:.3f}s")
+    pairs_text = [f"• S1 at {s1_time:.3f}s (BPM: {s1_bpm:.1f}) → S2 at {s2_time:.3f}s, S1-S2 Interval = {delta_t:.3f}s" for s1_time, s2_time, delta_t, s1_bpm in pairs_in_range]
     
     return html.Div([
         html.H2(f"Average S1-S2 Interval: {avg_delta_t:.3f}s, Average BPM: {avg_bpm:.1f}", style={"fontSize": "32px", "fontWeight": "bold", "color": "#42bcf5"}),
@@ -744,29 +730,24 @@ def calculate_average_delta_t(n_clicks, start_time, end_time, table_data):
     prevent_initial_call=True
 )
 def update_group_analysis(table_data):
-    """Automatically detect groups and calculate statistics"""
     if not table_data:
         return html.P("No data available for group analysis.", style={"color": "gray"})
     
-    # Create DataFrame from table data
     df = pd.DataFrame(table_data)
     
     if df.empty:
         return html.P("No data available for group analysis.", style={"color": "gray"})
     
-    # Detect groups
     groups = detect_labeling_groups(df, gap_threshold=5.0)
     
     if not groups:
         return html.P("No groups detected (need at least 2 S1 peaks with <5s gaps).", style={"color": "orange"})
     
-    # Calculate statistics for each group
     group_stats = calculate_group_statistics(df, groups)
     
     if not group_stats:
         return html.P("No valid groups found for analysis.", style={"color": "orange"})
     
-    # Create output for each group
     group_outputs = []
     for stat in group_stats:
         group_outputs.append(html.Div([

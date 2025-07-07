@@ -30,6 +30,16 @@ window.dash_clientside.keyboard = {
                 const event = new CustomEvent('keyboardDataChanged');
                 document.dispatchEvent(event);
             }
+            
+            // Check for Ctrl+Z (undo)
+            if (key === 'z' && e.ctrlKey) {
+                e.preventDefault(); // Prevent default browser undo
+                window.lastKeyPressed = { last_key: 'ctrl+z', timestamp: Date.now() };
+                
+                // Trigger a custom event to notify that data has changed
+                const event = new CustomEvent('keyboardDataChanged');
+                document.dispatchEvent(event);
+            }
         };
 
         document.addEventListener('keydown', handler);
@@ -66,7 +76,16 @@ window.dash_clientside.keyboard = {
 
                 // Check for 'z' or 'x' and store the data
                 if (key === 'z' || key === 'x') {
-                    window.lastKeyPressed = { last_key: key, timestamp: Date.now() };
+                    // Only handle single key presses (not Ctrl+Z)
+                    if (!e.ctrlKey) {
+                        window.lastKeyPressed = { last_key: key, timestamp: Date.now() };
+                    }
+                }
+                
+                // Check for Ctrl+Z (undo)
+                if (key === 'z' && e.ctrlKey) {
+                    e.preventDefault(); // Prevent default browser undo
+                    window.lastKeyPressed = { last_key: 'ctrl+z', timestamp: Date.now() };
                 }
             };
 

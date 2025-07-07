@@ -5,6 +5,9 @@ venv
 outputs
 processed_files
 __pycache__
+.vscode
+inputs
+
 
 # Ignore Audio Files 🎵
 *.wav
