@@ -471,6 +471,9 @@ class Plotter:
                 logging.info(f"BPM plot data saved to {csv_path}")
             except Exception as e:
                 logging.error(f"Failed to write BPM plot CSV: {e}")
+        
+        # Return the figure object for Gradio display
+        return self.fig
 
     def _configure_layout(self):
         """Sets up the plot layout, titles, and axes with custom x-axis tick labels."""
@@ -1748,13 +1751,13 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     # STAGE 6: Final Reporting
     if len(final_peaks) < 2:
         logging.warning("Not enough S1 peaks detected to generate full report.")
-        return
+        return None
 
     logging.info("--- STAGE 6: Calculating Metrics and Generating Outputs ---")
     final_metrics = _calculate_final_metrics(final_peaks, sample_rate, params)
 
     plotter = Plotter(original_file_path, params, sample_rate, output_directory)
-    plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
+    plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
 
     reporter = ReportGenerator(original_file_path, output_directory)
     reporter.save_analysis_summary(final_metrics)
@@ -1763,3 +1766,5 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
+    
+    return plotly_figure
