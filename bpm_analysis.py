@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy.io import wavfile
-from scipy.signal import butter, filtfilt, find_peaks
+from scipy.signal import butter, filtfilt, find_peaks, hilbert
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
@@ -430,8 +430,15 @@ class Plotter:
         self.file_name = file_name
         self.params = params
         self.sample_rate = sample_rate
-        self.output_directory = output_directory # Add this line
-        self.fig = make_subplots(specs=[[{"secondary_y": True}]])
+        self.output_directory = output_directory
+        # Updated to 2 rows to include the Morphology Comparison
+        self.fig = make_subplots(
+            rows=2, cols=1, 
+            specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
+            row_heights=[0.75, 0.25],
+            vertical_spacing=0.1,
+            subplot_titles=("Heartbeat Analysis", "Peak Morphology Comparison (Average Mountain Shape)")
+        )
 
     def plot_and_save(self, audio_envelope: np.ndarray, all_raw_peaks: np.ndarray, analysis_data: Dict,
                       final_metrics: Dict):
@@ -439,12 +446,16 @@ class Plotter:
         self.time_axis_sec = np.arange(len(audio_envelope)) / self.sample_rate
         time_axis_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in self.time_axis_sec])
 
+        # --- Main Plot (Row 1) ---
         self._add_line_traces(time_axis_dt, audio_envelope, analysis_data)
         self._add_trough_markers(audio_envelope, analysis_data)
         self._add_peak_traces(all_raw_peaks, analysis_data.get('beat_debug_info', {}), audio_envelope)
         self._add_bpm_hrv_traces(final_metrics.get('smoothed_bpm'), analysis_data, final_metrics.get('windowed_hrv_df'))
         self._add_slope_traces(final_metrics.get('major_inclines'), final_metrics.get('major_declines'), final_metrics.get('peak_recovery_stats'), final_metrics.get('peak_exertion_stats'))
         self._add_annotations_and_summary(final_metrics.get('smoothed_bpm'), final_metrics.get('hrv_summary'), final_metrics.get('hrr_stats'), final_metrics.get('peak_recovery_stats'))
+
+        # --- Morphology Plot (Row 2) ---
+        self._add_morphology_comparison(audio_envelope, analysis_data.get('beat_debug_info', {}))
 
         self._configure_layout()
 
@@ -459,7 +470,6 @@ class Plotter:
         smoothed_bpm = final_metrics.get('smoothed_bpm')
         bpm_times = final_metrics.get('bpm_times')
         if smoothed_bpm is not None and not smoothed_bpm.empty and bpm_times is not None:
-            # Use the raw numpy array of times for the table and match it with the smoothed BPM values
             csv_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.csv")
             try:
                 with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
@@ -472,24 +482,23 @@ class Plotter:
             except Exception as e:
                 logging.error(f"Failed to write BPM plot CSV: {e}")
         
-        # Return the figure object for Gradio display
         return self.fig
 
     def _configure_layout(self):
-        """Sets up the plot layout, titles, and axes with custom x-axis tick labels."""
+        """Sets up the plot layout, titles, and axes."""
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
 
         self.fig.update_layout(
             template="plotly_dark", title_text=plot_title, dragmode='pan',
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             margin=dict(t=140, b=100),
-            hovermode='x unified'
+            hovermode='x unified',
+            height=900  # Increased height for subplots
         )
 
-        # X-Axis
+        # X-Axis (Row 1)
         tick_positions_sec = np.linspace(0, self.time_axis_sec[-1], num=10)
         epoch = datetime.datetime.fromtimestamp(0)
-        
         tickvals = [epoch + datetime.timedelta(seconds=s) for s in tick_positions_sec]
         ticktext = [f"{int(s // 60):02d}:{int(s % 60):02d} ({s:.2f})" for s in tick_positions_sec]
 
@@ -497,58 +506,56 @@ class Plotter:
             title_text="Time",
             tickvals=tickvals,
             ticktext=ticktext,
-            hoverformat='%M:%S.%L' # Adds millisecond precision to the hover label
+            hoverformat='%M:%S.%L',
+            row=1, col=1
         )
         
-        # Y-axis
+        # Y-axis (Row 1)
         robust_upper_limit = np.quantile(self.fig.data[0].y, 0.95) if self.fig.data else 1
         amplitude_scale = self.params.get("plot_amplitude_scale_factor", 60.0)
-        self.fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, robust_upper_limit * amplitude_scale])
-        self.fig.update_yaxes(title_text="BPM / HRV", secondary_y=True, range=[50, 200])
-
+        self.fig.update_yaxes(title_text="Signal Amplitude", secondary_y=False, range=[0, robust_upper_limit * amplitude_scale], row=1, col=1)
+        self.fig.update_yaxes(title_text="BPM / HRV", secondary_y=True, range=[50, 200], row=1, col=1)
+        
+        # Axes (Row 2 - Morphology)
+        self.fig.update_xaxes(title_text="Time Offset (ms)", row=2, col=1)
+        self.fig.update_yaxes(title_text="Avg Amplitude", row=2, col=1)
 
     def _add_line_traces(self, time_axis_dt: pd.Series, audio_envelope: np.ndarray, analysis_data: Dict):
-        """Adds downsampled audio envelope and noise floor traces for performance."""
-        # --- Prepare data for plotting, with optional downsampling for performance ---
+        """Adds downsampled audio envelope and noise floor traces."""
         plot_time_axis_dt = time_axis_dt
         plot_envelope = audio_envelope
         plot_noise_floor = analysis_data.get('dynamic_noise_floor_series')
 
-        # Always downsample for performance (hardcoded behavior)
         factor = self.params.get("plot_downsample_factor", 5)
         if factor > 1 and len(audio_envelope) >= factor:
-            logging.info(f"Downsampling line traces by a factor of {factor} for plotting.")
             plot_time_axis_dt = time_axis_dt[::factor]
             plot_envelope = audio_envelope[::factor]
             if plot_noise_floor is not None and not plot_noise_floor.empty:
                 plot_noise_floor = plot_noise_floor.iloc[::factor]
 
-        # --- Add the potentially downsampled line traces ---
         self.fig.add_trace(go.Scatter(
             x=plot_time_axis_dt,
             y=plot_envelope,
             name="Audio Envelope",
             line=dict(color="#47a5c4")),
-            secondary_y=False)
-        if plot_noise_floor is not None and not plot_noise_floor.empty and len(plot_noise_floor) >= len(plot_time_axis_dt):
+            secondary_y=False, row=1, col=1)
+        if plot_noise_floor is not None and not plot_noise_floor.empty:
             self.fig.add_trace(go.Scatter(
                 x=plot_time_axis_dt,
                 y=plot_noise_floor.values,
                 name="Dynamic Noise Floor",
                 line=dict(color="green", dash="dot", width=1.5),
                 hovertemplate="Noise Floor: %{y:.2f}<extra></extra>"),
-                secondary_y=False)
+                secondary_y=False, row=1, col=1)
 
     def _add_trough_markers(self, audio_envelope: np.ndarray, analysis_data: Dict):
-        """Adds trough markers to the plot using original full-resolution data for accuracy."""
+        """Adds trough markers."""
         trough_indices = analysis_data.get('trough_indices')
         if trough_indices is not None and trough_indices.size > 0:
-            # Create datetime objects for the trough markers
             trough_times_dt = pd.to_datetime([
                 datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t)
                 for t in (trough_indices / self.sample_rate)
             ])
-
             self.fig.add_trace(go.Scatter(
                 x=trough_times_dt,
                 y=audio_envelope[trough_indices],
@@ -556,68 +563,46 @@ class Plotter:
                 name='Troughs',
                 marker=dict(color='green', symbol='circle-open', size=6),
                 visible='legendonly'),
-                secondary_y=False)
+                secondary_y=False, row=1, col=1)
 
     def _add_peak_traces(self, all_raw_peaks, debug_info, audio_envelope):
-        """Adds S1, S2, and Noise peak markers to the plot with detailed hover info."""
+        """Adds S1, S2, and Noise peak markers."""
         s1_peaks = {'indices': [], 'customdata': []}
         s2_peaks = {'indices': [], 'customdata': []}
         noise_peaks = {'indices': [], 'customdata': []}
-
         classified_indices = set()
 
-        # --- Generate detailed hover text for each classified peak ---
         for peak_idx, reason_str in debug_info.items():
             hover_text_parts = []
             parts = reason_str.split('§')
             final_peak_type, details_list = parts[0], parts[1:]
-
-            # Add basic peak info
+            
             hover_text_parts.append(f"<b>Type:</b> {final_peak_type}")
             hover_text_parts.append(f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s")
             hover_text_parts.append(f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}")
-            hover_text_parts.append("---")  # Visual separator
+            hover_text_parts.append("---")
 
-            # Add detailed, formatted reasons from the debug string
             i = 0
             while i < len(details_list):
                 tag = details_list[i]
                 value = details_list[i + 1] if (i + 1) < len(details_list) else ""
                 formatted_lines = []
-
-                if "PAIRING" in tag:
-                    formatted_lines = self.format_pairing_details_list(value)
-                elif "LONE_S1_REJECT_REASON" in tag:
-                    formatted_lines = self.format_lone_s1_details_list(value)
-                elif "LONE_S1_VALIDATE_REASON" in tag:
-                    formatted_lines = self.format_lone_s1_details_list(value)
-                elif "ORIGINAL_REASON" in tag:
-                    formatted_lines = ["- Original Classification:",
-                                       f"&nbsp;&nbsp;&nbsp;&nbsp;- {value.replace('`', '')}"]
-
+                if "PAIRING" in tag: formatted_lines = self.format_pairing_details_list(value)
+                elif "LONE_S1_REJECT_REASON" in tag: formatted_lines = self.format_lone_s1_details_list(value)
+                elif "LONE_S1_VALIDATE_REASON" in tag: formatted_lines = self.format_lone_s1_details_list(value)
+                elif "ORIGINAL_REASON" in tag: formatted_lines = ["- Original Classification:", f"&nbsp;&nbsp;&nbsp;&nbsp;- {value.replace('`', '')}"]
+                
                 if formatted_lines:
-                    # Convert the list of strings to a single HTML block
                     sub_text = "<br>".join(l.replace('\t', '&nbsp;&nbsp;&nbsp;&nbsp;') for l in formatted_lines)
                     hover_text_parts.append(sub_text)
                 i += 2
 
-            # Join all parts into a single HTML string for the tooltip
             full_hover_text = "<br>".join(hover_text_parts)
             classified_indices.add(peak_idx)
-            # Parse reason string to extract peak type
-            if not reason_str:
-                peak_type = "Unknown Peak"
-            else:
-                separators = ['. Pairing Justification: ', '. Rejection: ', '. Original: ', '. ']
-                for sep in separators:
-                    if sep in reason_str:
-                        parts = reason_str.split(sep, 1)
-                        peak_type = parts[0].strip()
-                        break
-                else:
-                    peak_type = reason_str.strip()
+            
+            # Simple parse logic for peak type
+            peak_type = reason_str.split('§')[0].strip() if reason_str else "Unknown"
 
-            # Assign the peak to the correct category for plotting
             if PeakType.is_s1(peak_type):
                 s1_peaks['indices'].append(peak_idx)
                 s1_peaks['customdata'].append(full_hover_text)
@@ -628,156 +613,114 @@ class Plotter:
                 noise_peaks['indices'].append(peak_idx)
                 noise_peaks['customdata'].append(full_hover_text)
 
-        # --- Handle any raw peaks that were never classified ---
+        # Handle unclassified
         for peak_idx in all_raw_peaks:
             if peak_idx not in classified_indices:
-                hover_text = (f"<b>Type:</b> Unclassified<br>"
-                              f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s<br>"
-                              f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}<br>"
-                              "<b>Details:</b> Peak was not evaluated by the classifier.")
+                hover_text = (f"<b>Type:</b> Unclassified<br><b>Time:</b> {peak_idx / self.sample_rate:.2f}s<br><b>Amp:</b> {audio_envelope[peak_idx]:.0f}")
                 noise_peaks['indices'].append(peak_idx)
                 noise_peaks['customdata'].append(hover_text)
 
-        # A simplified hovertemplate that displays the pre-formatted custom data
         hovertemplate = "%{customdata}<extra></extra>"
 
-        # --- Add traces to the plot ---
         if s1_peaks['indices']:
-            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
-                                       (np.array(s1_peaks['indices']) / self.sample_rate)])
-            self.fig.add_trace(
-                go.Scatter(x=times_dt, y=audio_envelope[s1_peaks['indices']], mode='markers', name='S1 Beats',
-                           marker=dict(color='#e36f6f', size=8, symbol='diamond'),
-                           customdata=s1_peaks['customdata'],
-                           hovertemplate=hovertemplate), secondary_y=False)
-
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (np.array(s1_peaks['indices']) / self.sample_rate)])
+            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[s1_peaks['indices']], mode='markers', name='S1 Beats', marker=dict(color='#e36f6f', size=8, symbol='diamond'), customdata=s1_peaks['customdata'], hovertemplate=hovertemplate), secondary_y=False, row=1, col=1)
         if s2_peaks['indices']:
-            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
-                                       (np.array(s2_peaks['indices']) / self.sample_rate)])
-            self.fig.add_trace(
-                go.Scatter(x=times_dt, y=audio_envelope[s2_peaks['indices']], mode='markers', name='S2 Beats',
-                           marker=dict(color='orange', symbol='circle', size=6),
-                           customdata=s2_peaks['customdata'],
-                           hovertemplate=hovertemplate), secondary_y=False)
-
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (np.array(s2_peaks['indices']) / self.sample_rate)])
+            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[s2_peaks['indices']], mode='markers', name='S2 Beats', marker=dict(color='orange', symbol='circle', size=6), customdata=s2_peaks['customdata'], hovertemplate=hovertemplate), secondary_y=False, row=1, col=1)
         if noise_peaks['indices']:
-            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
-                                       (np.array(noise_peaks['indices']) / self.sample_rate)])
-            self.fig.add_trace(
-                go.Scatter(x=times_dt, y=audio_envelope[noise_peaks['indices']], mode='markers', name='Noise/Rejected',
-                           marker=dict(color='grey', symbol='x', size=6),
-                           customdata=noise_peaks['customdata'],
-                           hovertemplate=hovertemplate), secondary_y=False)
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (np.array(noise_peaks['indices']) / self.sample_rate)])
+            self.fig.add_trace(go.Scatter(x=times_dt, y=audio_envelope[noise_peaks['indices']], mode='markers', name='Noise/Rejected', marker=dict(color='grey', symbol='x', size=6), customdata=noise_peaks['customdata'], hovertemplate=hovertemplate), secondary_y=False, row=1, col=1)
 
     def _add_bpm_hrv_traces(self, smoothed_bpm, analysis_data, windowed_hrv_df):
-        """Adds BPM, BPM trend, and HRV traces."""
         if smoothed_bpm is not None and not smoothed_bpm.empty:
-            self.fig.add_trace(go.Scatter(x=smoothed_bpm.index, y=smoothed_bpm.values, name="Average BPM", line=dict(color="#4a4a4a", width=3)), secondary_y=True)
-
-        if "long_term_bpm_series" in analysis_data and not analysis_data["long_term_bpm_series"].empty:
+            self.fig.add_trace(go.Scatter(x=smoothed_bpm.index, y=smoothed_bpm.values, name="Average BPM", line=dict(color="#4a4a4a", width=3)), secondary_y=True, row=1, col=1)
+        if "long_term_bpm_series" in analysis_data:
             lt_series = analysis_data["long_term_bpm_series"]
-            # Create datetime index for plotting
-            start_datetime = datetime.datetime.fromtimestamp(0)
-            lt_times_dt = pd.to_datetime([start_datetime + datetime.timedelta(seconds=t) for t in lt_series.index])
-            self.fig.add_trace(go.Scatter(
-                x=lt_times_dt,
-                y=lt_series.values,
-                name="BPM Trend (Belief)",
-                line=dict(color='orange', width=2, dash='dot'),
-                visible='legendonly'),
-                secondary_y=True)
-        if windowed_hrv_df is not None and not windowed_hrv_df.empty and 'time' in windowed_hrv_df and 'rmssdc' in windowed_hrv_df and 'sdnn' in windowed_hrv_df:
-            hrv_times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in windowed_hrv_df['time']])
-            self.fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['rmssdc'], name="RMSSDc", line=dict(color='cyan', width=2), visible='legendonly'), secondary_y=True)
-            self.fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['sdnn'], name="SDNN", line=dict(color='magenta', width=2), visible='legendonly'), secondary_y=True)
-
+            if not lt_series.empty:
+                start_datetime = datetime.datetime.fromtimestamp(0)
+                lt_times_dt = pd.to_datetime([start_datetime + datetime.timedelta(seconds=t) for t in lt_series.index])
+                self.fig.add_trace(go.Scatter(x=lt_times_dt, y=lt_series.values, name="BPM Trend (Belief)", line=dict(color='orange', width=2, dash='dot'), visible='legendonly'), secondary_y=True, row=1, col=1)
 
     def _add_annotations_and_summary(self, smoothed_bpm, hrv_summary, hrr_stats, peak_recovery_stats):
-        """Adds min/max BPM annotations and the main summary box."""
         if smoothed_bpm is not None and not smoothed_bpm.empty:
             max_bpm_val = smoothed_bpm.max()
             min_bpm_val = smoothed_bpm.min()
             max_bpm_time = smoothed_bpm.idxmax()
             min_bpm_time = smoothed_bpm.idxmin()
-
-            # Add annotation for the maximum BPM
-            self.fig.add_annotation(x=max_bpm_time, y=max_bpm_val,
-                                    text=f"Max: {max_bpm_val:.1f} BPM",
-                                    showarrow=True, arrowhead=1, ax=20, ay=-40,
-                                    font=dict(color="#e36f6f"), yref="y2")
-
-            # Add annotation for the minimum BPM
-            self.fig.add_annotation(x=min_bpm_time, y=min_bpm_val,
-                                    text=f"Min: {min_bpm_val:.1f} BPM",
-                                    showarrow=True, arrowhead=1, ax=20, ay=40,
-                                    font=dict(color="#a3d194"), yref="y2")
-
-        if hrv_summary:
-            annotation_text = "<b>Analysis Summary</b><br>"
-            if hrv_summary.get('avg_bpm') is not None:
-                annotation_text += f"Avg/Min/Max BPM: {hrv_summary['avg_bpm']:.1f} / {hrv_summary['min_bpm']:.1f} / {hrv_summary['max_bpm']:.1f}<br>"
-            if hrr_stats and hrr_stats.get('hrr_value_bpm') is not None:
-                annotation_text += f"<b>1-Min HRR: {hrr_stats['hrr_value_bpm']:.1f} BPM Drop</b><br>"
-            if peak_recovery_stats and peak_recovery_stats.get('slope_bpm_per_sec') is not None:
-                annotation_text += f"<b>Peak Recovery Rate: {peak_recovery_stats['slope_bpm_per_sec']:.2f} BPM/sec</b><br>"
-            if hrv_summary.get('avg_rmssdc') is not None:
-                annotation_text += f"Avg. Corrected RMSSD: {hrv_summary['avg_rmssdc']:.2f}<br>"
-            if hrv_summary.get('avg_sdnn') is not None:
-                annotation_text += f"Avg. Windowed SDNN: {hrv_summary['avg_sdnn']:.2f} ms"
-
-            self.fig.add_annotation(text=annotation_text, align='left', showarrow=False,
-                                    xref='paper', yref='paper', x=0.02, y=0.98,
-                                    bordercolor='black', borderwidth=1,
-                                    bgcolor='rgba(255, 253, 231, 0.4)')
+            self.fig.add_annotation(x=max_bpm_time, y=max_bpm_val, text=f"Max: {max_bpm_val:.1f} BPM", showarrow=True, arrowhead=1, ax=20, ay=-40, font=dict(color="#e36f6f"), yref="y2", row=1, col=1)
+            self.fig.add_annotation(x=min_bpm_time, y=min_bpm_val, text=f"Min: {min_bpm_val:.1f} BPM", showarrow=True, arrowhead=1, ax=20, ay=40, font=dict(color="#a3d194"), yref="y2", row=1, col=1)
 
     def _add_slope_traces(self, major_inclines, major_declines, peak_recovery_stats, peak_exertion_stats):
-        """Adds traces for major exertion and recovery periods."""
         if major_inclines:
             for i, incline in enumerate(major_inclines):
                 c_data = [incline['duration_sec'], incline['bpm_increase'], incline['slope_bpm_per_sec']]
-                self.fig.add_trace(go.Scatter(
-                    x=[incline['start_time'], incline['end_time']],
-                    y=[incline['start_bpm'], incline['end_bpm']],
-                    mode='lines', line=dict(color="purple", width=4, dash="dash"),
-                    name='Exertion', legendgroup='Exertion',
-                    showlegend=(i == 0), visible='legendonly', yaxis='y2',
-                    hovertemplate="<b>Exertion Period</b><br>Duration: %{customdata[0]:.1f}s<br>BPM Increase: %{customdata[1]:.1f}<br>Slope: %{customdata[2]:.2f} BPM/sec<extra></extra>",
-                    customdata=np.array([c_data, c_data])))
-
+                self.fig.add_trace(go.Scatter(x=[incline['start_time'], incline['end_time']], y=[incline['start_bpm'], incline['end_bpm']], mode='lines', line=dict(color="purple", width=4, dash="dash"), name='Exertion', legendgroup='Exertion', showlegend=(i == 0), visible='legendonly', customdata=np.array([c_data, c_data])), secondary_y=True, row=1, col=1)
         if major_declines:
             for i, decline in enumerate(major_declines):
                 c_data = [decline['duration_sec'], decline['bpm_decrease'], decline['slope_bpm_per_sec']]
-                self.fig.add_trace(go.Scatter(
-                    x=[decline['start_time'], decline['end_time']],
-                    y=[decline['start_bpm'], decline['end_bpm']],
-                    mode='lines', line=dict(color="#2ca02c", width=4, dash="dash"),
-                    name='Recovery', legendgroup='Recovery',
-                    showlegend=(i == 0), visible='legendonly', yaxis='y2',
-                    hovertemplate="<b>Recovery Period</b><br>Duration: %{customdata[0]:.1f}s<br>BPM Decrease: %{customdata[1]:.1f}<br>Slope: %{customdata[2]:.2f} BPM/sec<extra></extra>",
-                    customdata=np.array([c_data, c_data])))
+                self.fig.add_trace(go.Scatter(x=[decline['start_time'], decline['end_time']], y=[decline['start_bpm'], decline['end_bpm']], mode='lines', line=dict(color="#2ca02c", width=4, dash="dash"), name='Recovery', legendgroup='Recovery', showlegend=(i == 0), visible='legendonly', customdata=np.array([c_data, c_data])), secondary_y=True, row=1, col=1)
+        
+    def _add_morphology_comparison(self, audio_envelope: np.ndarray, debug_info: Dict):
+        """Calculates and plots the average 'Mountain Shape' for S1 and S2 peaks."""
+        s1_indices = []
+        s2_indices = []
+        
+        # Extract indices based on classification
+        for peak_idx, reason_str in debug_info.items():
+            peak_type = reason_str.split('§')[0].strip()
+            if PeakType.is_s1(peak_type):
+                s1_indices.append(peak_idx)
+            elif PeakType.is_s2(peak_type):
+                s2_indices.append(peak_idx)
 
+        if not s1_indices or not s2_indices:
+            logging.warning("Not enough S1/S2 peaks to plot morphology.")
+            return
 
-        if peak_recovery_stats:
-            stats = peak_recovery_stats
-            self.fig.add_trace(go.Scatter(
-                x=[stats['start_time'], stats['end_time']],
-                y=[stats['start_bpm'], stats['end_bpm']],
-                mode='lines', line=dict(color="#ff69b4", width=5, dash="solid"),
-                name='Peak Recovery Slope', legendgroup='Steepest Slopes',
-                visible='legendonly', yaxis='y2',
-                hovertemplate="<b>Peak Recovery Slope</b><br>Slope: %{customdata[0]:.2f} BPM/sec<br>Duration: %{customdata[1]:.1f}s<extra></extra>",
-                customdata=np.array([[stats['slope_bpm_per_sec'], stats['duration_sec']]]*2)))
+        # Define window size (e.g., +/- 100ms)
+        window_sec = 0.15 
+        half_window = int(window_sec * self.sample_rate)
+        
+        # Accumulate waveforms
+        s1_waveforms = []
+        s2_waveforms = []
+        
+        for idx in s1_indices:
+            start, end = idx - half_window, idx + half_window
+            if start >= 0 and end < len(audio_envelope):
+                s1_waveforms.append(audio_envelope[start:end])
+                
+        for idx in s2_indices:
+            start, end = idx - half_window, idx + half_window
+            if start >= 0 and end < len(audio_envelope):
+                s2_waveforms.append(audio_envelope[start:end])
 
-        if peak_exertion_stats:
-            stats = peak_exertion_stats
-            self.fig.add_trace(go.Scatter(
-                x=[stats['start_time'], stats['end_time']],
-                y=[stats['start_bpm'], stats['end_bpm']],
-                mode='lines', line=dict(color="#9d32a8", width=5, dash="solid"),
-                name='Peak Exertion Slope', legendgroup='Steepest Slopes',
-                visible='legendonly', yaxis='y2',
-                hovertemplate="<b>Peak Exertion Slope</b><br>Slope: +%{customdata[0]:.2f} BPM/sec<br>Duration: %{customdata[1]:.1f}s<extra></extra>",
-                customdata=np.array([[stats['slope_bpm_per_sec'], stats['duration_sec']]]*2)))
+        if not s1_waveforms or not s2_waveforms: return
+
+        # Compute averages
+        avg_s1 = np.mean(s1_waveforms, axis=0)
+        avg_s2 = np.mean(s2_waveforms, axis=0)
+        
+        # Create X-axis in milliseconds, centered at 0
+        time_ms = np.linspace(-window_sec*1000, window_sec*1000, len(avg_s1))
+        
+        # Plot S1 Average
+        self.fig.add_trace(go.Scatter(
+            x=time_ms, y=avg_s1,
+            mode='lines', name='Avg S1 (Lub)',
+            line=dict(color='#e36f6f', width=3),
+            fill='tozeroy', fillcolor='rgba(227, 111, 111, 0.2)'
+        ), row=2, col=1)
+
+        # Plot S2 Average
+        self.fig.add_trace(go.Scatter(
+            x=time_ms, y=avg_s2,
+            mode='lines', name='Avg S2 (Dub)',
+            line=dict(color='orange', width=3),
+            fill='tozeroy', fillcolor='rgba(255, 165, 0, 0.2)'
+        ), row=2, col=1)
+
 
 class ReportGenerator:
     """Handles the creation of text-based analysis reports."""
@@ -1004,8 +947,56 @@ def convert_to_wav(file_path: str, target_path: str) -> bool:
         logging.error(f"Could not convert file {file_path}. Error: {e}")
         return False
 
+# --- Enhanced Envelope Functions ---
+def compute_shannon_energy_envelope(audio: np.ndarray) -> np.ndarray:
+    """E = -x^2 * log(x^2). Highlights medium-intensity events."""
+    x2 = audio ** 2
+    # Avoid log(0) by using a small epsilon mask
+    mask = x2 > 1e-10
+    envelope = np.zeros_like(x2)
+    envelope[mask] = -x2[mask] * np.log(x2[mask])
+    
+    # Normalize
+    max_val = np.max(envelope)
+    if max_val > 0:
+        envelope /= max_val
+    return envelope
+
+def compute_hilbert_envelope(audio: np.ndarray) -> np.ndarray:
+    """Analytical signal magnitude using Hilbert transform. Connects peaks."""
+    analytic_signal = hilbert(audio)
+    envelope = np.abs(analytic_signal)
+    
+    # Normalize
+    max_val = np.max(envelope)
+    if max_val > 0:
+        envelope /= max_val
+    return envelope
+
+def compute_homomorphic_envelope(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Log -> Lowpass -> Exp. Smooths texture."""
+    # 1. Log of absolute value
+    abs_audio = np.abs(audio)
+    # Avoid log(0)
+    log_audio = np.log(np.maximum(abs_audio, 1e-10))
+    
+    # 2. Lowpass Filter (Smoothing)
+    # Using a simple moving average as a lowpass filter, similar to C code logic
+    window = int(sample_rate * 0.05) # 50ms window
+    if window < 3: window = 3
+    smooth_log = pd.Series(log_audio).rolling(window=window, center=True, min_periods=1).mean().values
+    
+    # 3. Exponential
+    envelope = np.exp(smooth_log)
+    
+    # Normalize
+    max_val = np.max(envelope)
+    if max_val > 0:
+        envelope /= max_val
+    return envelope
+
 def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tuple[np.ndarray, int]:
-    """Reads, filters, and prepares the audio envelope for analysis."""
+    """Reads, filters, and prepares the combined audio envelope using Hilbert/Shannon/Homomorphic."""
     downsample_factor = params['downsample_factor']
     save_debug_file = params['save_filtered_wav']
 
@@ -1015,18 +1006,11 @@ def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tup
     if audio_data.ndim > 1:
         audio_data = np.mean(audio_data, axis=1)
 
-    lowcut, highcut = 20, 150  # Hardcoded bandpass frequencies
+    lowcut, highcut = 25, 150  # Updated to match C code optimal freq
 
-    # Check if the downsample factor is too aggressive for the filter settings.
     max_safe_downsample = int((sample_rate / (highcut * 2)) - 1)
-
     if downsample_factor > max_safe_downsample:
-        logging.warning(
-            f"Original 'downsample_factor' of {downsample_factor} is too high for a "
-            f"{highcut}Hz filter with a {sample_rate}Hz sample rate."
-        )
         downsample_factor = max(1, max_safe_downsample)
-        logging.warning(f"Adjusting 'downsample_factor' to a safe value of {downsample_factor}.")
 
     if downsample_factor > 1:
         new_sample_rate = sample_rate // downsample_factor
@@ -1035,23 +1019,40 @@ def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tup
         new_sample_rate = sample_rate
         audio_downsampled = audio_data
 
+    # Normalize input to -1..1 first for better processing
+    max_amp = np.max(np.abs(audio_downsampled))
+    if max_amp > 0:
+        audio_downsampled = audio_downsampled / max_amp
+
     nyquist = 0.5 * new_sample_rate
     low, high = lowcut / nyquist, highcut / nyquist
-
-    if high >= 1.0:
-        raise ValueError(f"Cannot create a {highcut}Hz filter. The effective sample rate of {new_sample_rate}Hz is too low.")
-
     b, a = butter(2, [low, high], btype='band')
     audio_filtered = filtfilt(b, a, audio_downsampled)
 
-    if save_debug_file:
-        debug_path = f"{os.path.splitext(file_path)[0]}_filtered_debug.wav"
-        normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
-        wavfile.write(debug_path, new_sample_rate, normalized_audio)
+    # --- ENHANCED ENVELOPE CALCULATION ---
+    logging.info("Computing enhanced envelopes (Shannon, Hilbert, Homomorphic)...")
+    
+    env_shannon = compute_shannon_energy_envelope(audio_filtered)
+    env_hilbert = compute_hilbert_envelope(audio_filtered)
+    env_homomorphic = compute_homomorphic_envelope(audio_filtered, new_sample_rate)
+    
+    # Weighted combination (Weights from C code: 0.5, 0.3, 0.2)
+    combined_envelope = (0.5 * env_shannon) + (0.3 * env_hilbert) + (0.2 * env_homomorphic)
+    
+    # Final smoothing (20ms window)
+    smooth_window = int(0.02 * new_sample_rate)
+    if smooth_window < 3: smooth_window = 3
+    final_envelope = pd.Series(combined_envelope).rolling(window=smooth_window, center=True, min_periods=1).mean().values
+    
+    # Final Normalize
+    final_max = np.max(final_envelope)
+    if final_max > 0:
+        final_envelope /= final_max
 
-    audio_abs = np.abs(audio_filtered)
-    window_size = new_sample_rate // 10
-    audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
+    # Convert back to roughly the scale expected by downstream logic (0-32767 scale if needed, or keeping normalized)
+    # The original code worked with whatever scale came out. 
+    # Let's scale it up to be visible on plots (0-1000 range is ample)
+    final_envelope *= 1000.0
 
     if params['save_filtered_wav']:
         base_name = os.path.basename(os.path.splitext(file_path)[0])
@@ -1059,7 +1060,7 @@ def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tup
         normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
         wavfile.write(debug_path, new_sample_rate, normalized_audio)
 
-    return audio_envelope, new_sample_rate
+    return final_envelope, new_sample_rate
 
 def _calculate_dynamic_noise_floor(audio_envelope: np.ndarray, sample_rate: int, params: Dict) -> Tuple[pd.Series, np.ndarray]:
     """Calculates a dynamic noise floor based on a sanitized set of audio troughs."""
