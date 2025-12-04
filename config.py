@@ -97,7 +97,40 @@ DEFAULT_PARAMS = {
     "penalty_waiver_max_s2_s1_ratio": 2.5,    # Safety rail: S2/S1 amp ratio must be below this to allow a correction.
 
     # =================================================================================
-    # 7. Output, HRV & Reporting
+    # 7. Adaptive Noise Handling & Signal Quality
+    # Settings for automatic noise detection and adaptive parameter adjustment.
+    # =================================================================================
+    # --- 7.1. Spectral Subtraction Denoising ---
+    "enable_spectral_subtraction": False,         # Enable spectral subtraction pre-processing for noisy signals.
+    "spectral_noise_estimation_duration": 0.5,    # Seconds of audio used to estimate noise profile.
+
+    # --- 7.2. Envelope Combination Methods ---
+    "use_median_envelope": False,                 # Use median of multiple envelopes (noise-robust mode).
+    "use_weighted_envelope": False,               # Use weighted combination of multiple envelopes.
+    "envelope_weight_shannon": 0.5,               # Weight for Shannon energy envelope (if weighted mode).
+    "envelope_weight_hilbert": 0.3,               # Weight for Hilbert transform envelope (if weighted mode).
+    "envelope_weight_homomorphic": 0.2,           # Weight for homomorphic envelope (if weighted mode).
+
+    # --- 7.3. Adaptive Threshold & Signal Quality ---
+    "enable_adaptive_threshold": True,            # Dynamically adjust thresholds based on signal quality.
+    "noisy_interval_tightening": 0.85,           # Factor to tighten S1-S2 interval cap in noisy signals.
+
+    # --- 7.4. Rescue Mode for Repeated Failures ---
+    "rescue_mode_trigger_count": 5,              # Number of consecutive pairing failures to trigger rescue mode.
+    "rescue_mode_threshold_factor": 0.7,         # Factor to multiply threshold by in rescue mode (0.7 = 30% lower).
+
+    # --- 7.5. Smart Parameter Presets ---
+    "enable_auto_preset": False,                 # Auto-select CLEAN or NOISY preset based on signal analysis.
+    "auto_preset_noise_threshold": 0.5,          # Noise index threshold for auto-preset selection.
+
+    # --- 7.6. Post-Validation Rhythm Check ---
+    "enable_rhythm_validation": True,            # Enable final rhythm-sequence validation pass.
+    "rhythm_validation_threshold": 0.4,          # Minimum score required to keep a beat in rhythm validation.
+    "rhythm_validation_rhythm_weight": 0.7,      # Weight for rhythmic timing in validation.
+    "rhythm_validation_amplitude_weight": 0.3,   # Weight for amplitude consistency in validation.
+
+    # =================================================================================
+    # 8. Output, HRV & Reporting
     # Controls for final calculations, reports, and plots.
     # =================================================================================
     "output_smoothing_window_sec": 5,        # Time window (seconds) for smoothing the final BPM curve for display.
