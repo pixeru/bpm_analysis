@@ -2,6 +2,7 @@ numpy
 pandas
 scipy
 plotly
-pydub
-gradio
 ttkbootstrap
+pydub
+dash
+Pillow
