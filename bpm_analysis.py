@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.io import wavfile
 from scipy.signal import butter, filtfilt, find_peaks
+import librosa
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
@@ -21,192 +22,6 @@ import csv
 # Do not further abstract my code
 # Do not further segment my code
 # Do not over-engineer a solution, keep it simple
-
-# --- Spectral Subtraction Denoising ---
-def spectral_subtraction_denoise(audio: np.ndarray, sample_rate: int, 
-                                 noise_estimation_duration: float = 0.5) -> np.ndarray:
-    """
-    Simple spectral subtraction optimized for heartbeat audio.
-    Estimates noise from the first `noise_estimation_duration` seconds.
-    """
-    from scipy.signal import stft, istft
-    
-    # STFT parameters
-    nperseg = min(256, len(audio) // 10)
-    if nperseg < 16:  # Safety check for very short audio
-        logging.warning("Audio too short for spectral subtraction. Skipping.")
-        return audio
-    
-    # Perform STFT
-    f, t, Zxx = stft(audio, sample_rate, nperseg=nperseg)
-    
-    # Estimate noise spectrum from initial segment
-    noise_frames = int(noise_estimation_duration * sample_rate / nperseg)
-    noise_frames = max(1, min(noise_frames, Zxx.shape[1]))
-    noise_profile = np.mean(np.abs(Zxx[:, :noise_frames]), axis=1, keepdims=True)
-    
-    # Spectral subtraction with over-subtraction factor (beta)
-    beta = 2.0  # Aggressive for heart sounds
-    magnitude = np.abs(Zxx)
-    phase = np.angle(Zxx)
-    
-    # Subtract with flooring to avoid negative values
-    subtracted = magnitude - (beta * noise_profile)
-    spectral_floor = 0.1 * noise_profile
-    subtracted = np.where(subtracted < spectral_floor, spectral_floor, subtracted)
-    
-    # Reconstruct
-    denoised_stft = subtracted * np.exp(1j * phase)
-    _, denoised_audio = istft(denoised_stft, sample_rate, nperseg=nperseg)
-    
-    # Ensure output length matches input
-    if len(denoised_audio) < len(audio):
-        denoised_audio = np.pad(denoised_audio, (0, len(audio) - len(denoised_audio)))
-    else:
-        denoised_audio = denoised_audio[:len(audio)]
-    
-    return denoised_audio
-
-
-# --- Envelope Computation Functions ---
-def compute_shannon_energy_envelope(audio_filtered: np.ndarray) -> np.ndarray:
-    """Compute Shannon energy envelope for heartbeat detection."""
-    # Normalize
-    audio_norm = audio_filtered / (np.max(np.abs(audio_filtered)) + 1e-9)
-    # Shannon energy: -x^2 * log(x^2)
-    x2 = audio_norm ** 2 + 1e-9  # Add small value to avoid log(0)
-    shannon_energy = -x2 * np.log(x2)
-    # Smooth
-    window_size = max(1, len(shannon_energy) // 100)
-    envelope = pd.Series(shannon_energy).rolling(window=window_size, min_periods=1, center=True).mean().values
-    return envelope
-
-
-def compute_hilbert_envelope(audio_filtered: np.ndarray) -> np.ndarray:
-    """Compute Hilbert transform envelope."""
-    from scipy.signal import hilbert
-    analytic_signal = hilbert(audio_filtered)
-    envelope = np.abs(analytic_signal)
-    return envelope
-
-
-def compute_homomorphic_envelope(audio_filtered: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Compute homomorphic envelope for heartbeat detection."""
-    # Take absolute value and add small constant
-    audio_abs = np.abs(audio_filtered) + 1e-9
-    # Log transform
-    log_audio = np.log(audio_abs)
-    # Low-pass filter to get envelope
-    cutoff = 10  # Hz, low-pass for envelope
-    nyquist = sample_rate / 2
-    if cutoff >= nyquist:
-        cutoff = nyquist * 0.8
-    b, a = butter(2, cutoff / nyquist, btype='low')
-    envelope = filtfilt(b, a, log_audio)
-    # Exp transform back
-    envelope = np.exp(envelope)
-    return envelope
-
-
-# --- Post-Validation Filter ---
-def validate_rhythm_sequence(s1_peaks: np.ndarray, audio_envelope: np.ndarray, 
-                             sample_rate: int, params: Dict) -> np.ndarray:
-    """
-    Final validation: Markov-style probability check that each beat fits the emerging rhythm.
-    """
-    if len(s1_peaks) < 10:
-        return s1_peaks
-    
-    rr_intervals = np.diff(s1_peaks) / sample_rate
-    median_rr = np.median(rr_intervals)
-    
-    # Calculate rhythmic likelihood for each beat
-    validated_peaks = [s1_peaks[0]]  # Always keep first
-    
-    for i in range(1, len(s1_peaks) - 1):
-        prev_interval = (s1_peaks[i] - s1_peaks[i-1]) / sample_rate
-        next_interval = (s1_peaks[i+1] - s1_peaks[i]) / sample_rate
-        
-        # Probability based on how close intervals are to median
-        prev_prob = np.exp(-abs(prev_interval - median_rr) / (median_rr + 1e-9))
-        next_prob = np.exp(-abs(next_interval - median_rr) / (median_rr + 1e-9))
-        
-        # Combined rhythmic confidence
-        rhythm_confidence = (prev_prob + next_prob) / 2
-        
-        # Amplitude consistency check
-        central_amp = audio_envelope[s1_peaks[i]]
-        neighbor_amp = (audio_envelope[s1_peaks[i-1]] + audio_envelope[s1_peaks[i+1]]) / 2
-        amp_ratio = central_amp / (neighbor_amp + 1e-9)
-        amp_confidence = np.interp(amp_ratio, [0.3, 0.7, 1.5, 3.0], [0.0, 0.5, 1.0, 0.5])
-        
-        # Combined score
-        rhythm_weight = params.get('rhythm_validation_rhythm_weight', 0.7)
-        amp_weight = params.get('rhythm_validation_amplitude_weight', 0.3)
-        final_score = rhythm_weight * rhythm_confidence + amp_weight * amp_confidence
-        
-        threshold = params.get('rhythm_validation_threshold', 0.4)
-        if final_score > threshold:
-            validated_peaks.append(s1_peaks[i])
-        else:
-            logging.debug(f"Rhythm validation rejected peak at {s1_peaks[i]/sample_rate:.2f}s (score: {final_score:.2f})")
-    
-    validated_peaks.append(s1_peaks[-1])  # Always keep last
-    
-    removed_count = len(s1_peaks) - len(validated_peaks)
-    if removed_count > 0:
-        logging.info(f"Rhythm validation removed {removed_count} peaks.")
-    
-    return np.array(validated_peaks)
-
-
-# --- Smart Parameter Presets ---
-PARAMS_CLEAN = {
-    'pairing_confidence_threshold': 0.65,
-    'lone_s1_confidence_threshold': 0.6,
-    'enable_spectral_subtraction': False,
-    'use_median_envelope': False,
-    'kickstart_override_ratio': 0.6,
-    'cascade_reset_trigger_count': 3,
-    'stability_confidence_floor': 0.85,
-    'stability_confidence_ceiling': 1.10,
-}
-
-PARAMS_NOISY = {
-    'pairing_confidence_threshold': 0.45,  # Lower for noise
-    'lone_s1_confidence_threshold': 0.4,
-    'enable_spectral_subtraction': True,
-    'use_median_envelope': True,
-    'kickstart_override_ratio': 0.7,
-    'cascade_reset_trigger_count': 2,  # More aggressive reset
-    'stability_confidence_floor': 0.70,
-    'stability_confidence_ceiling': 1.20,
-}
-
-
-def auto_select_params(audio_envelope: np.ndarray, sample_rate: int, base_params: Dict) -> Dict:
-    """
-    Auto-select parameter preset based on signal quality estimation.
-    Returns a copy of base_params with appropriate overrides applied.
-    """
-    # Simple heuristic: high variance relative to mean suggests noise
-    envelope_var = np.var(audio_envelope)
-    envelope_mean = np.mean(audio_envelope)
-    noise_index = envelope_var / (envelope_mean + 1e-9)
-    
-    noise_threshold = base_params.get('auto_preset_noise_threshold', 0.5)
-    
-    result_params = base_params.copy()
-    
-    if noise_index > noise_threshold:
-        logging.info(f"Auto-selecting NOISY parameter preset (noise_index={noise_index:.3f} > {noise_threshold})")
-        result_params.update(PARAMS_NOISY)
-    else:
-        logging.info(f"Auto-selecting CLEAN parameter preset (noise_index={noise_index:.3f} <= {noise_threshold})")
-        result_params.update(PARAMS_CLEAN)
-    
-    return result_params
-
 
 # --- Enums and Global Helpers ---
 class PeakType(Enum):
@@ -293,35 +108,8 @@ class PeakClassifier:
         state['sorted_troughs'] = sorted(state['trough_indices'])
         state['consecutive_rr_rejections'] = 0
         state['loop_idx'] = 0
-        
-        # Rescue mode state
-        state['rescue_mode_active'] = False
-        state['failed_pairing_streak'] = 0
-        state['original_pairing_threshold'] = self.params['pairing_confidence_threshold']
 
         return state
-
-    def _estimate_signal_quality(self) -> float:
-        """
-        Estimates a quality score (0=very noisy, 1=very clean) based on envelope statistics.
-        """
-        # Use the deviation series as a proxy for clarity
-        if self.state['smoothed_dev_series'].empty:
-            return 0.5
-        
-        # Clean signals have concentrated deviation values (low std/mean ratio)
-        dev_values = self.state['smoothed_dev_series'].dropna().values
-        if len(dev_values) < 10:
-            return 0.5
-        
-        # Coefficient of variation (lower = cleaner)
-        cv = np.std(dev_values) / (np.mean(dev_values) + 1e-9)
-        
-        # Transform to 0-1 quality score (empirically tuned)
-        quality = np.clip(1.0 - (cv / 2.0), 0.1, 1.0)
-        
-        logging.debug(f"Estimated signal quality: {quality:.2f} (CV: {cv:.2f})")
-        return quality
 
     def classify_peaks(self) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """Main classification loop to iterate through all raw peaks."""
@@ -408,28 +196,8 @@ class PeakClassifier:
             self.state['beat_debug_info'][current_peak_idx] = f"{PeakType.S1_PAIRED.value}§{reason_tag}"
             self.state['beat_debug_info'][next_peak_idx] = f"{PeakType.S2_PAIRED.value}§{reason_tag}"
             self.state['consecutive_rr_rejections'] = 0
-            self.state['failed_pairing_streak'] = 0
-            
-            # Deactivate rescue mode if we're having success
-            if self.state['rescue_mode_active'] and self.state['failed_pairing_streak'] == 0:
-                # Restore original threshold after sustained success
-                self.params['pairing_confidence_threshold'] = self.state['original_pairing_threshold']
-                self.state['rescue_mode_active'] = False
-                logging.info("Rescue mode deactivated - pairing restored.")
-            
             self.state['loop_idx'] += 2
         else:
-            self.state['failed_pairing_streak'] += 1
-            
-            # Activate rescue mode if we've failed repeatedly
-            rescue_trigger_count = self.params.get('rescue_mode_trigger_count', 5)
-            if self.state['failed_pairing_streak'] >= rescue_trigger_count and not self.state['rescue_mode_active']:
-                logging.warning("Activating low-confidence rescue mode due to repeated pairing failures")
-                self.state['rescue_mode_active'] = True
-                # Temporarily lower thresholds
-                rescue_threshold_factor = self.params.get('rescue_mode_threshold_factor', 0.7)
-                self.params['pairing_confidence_threshold'] *= rescue_threshold_factor
-            
             self._classify_lone_peak(current_peak_idx, reason)
             self.state['loop_idx'] += 1
 
@@ -473,22 +241,11 @@ class PeakClassifier:
         confidence, adjust_reason = _adjust_confidence_with_stability_and_ratio(
             confidence, s1_candidate_idx, s2_candidate_idx, self.audio_envelope, self.state['dynamic_noise_floor'],
             self.state['long_term_bpm'], pairing_ratio, self.params, self.sample_rate,
-            self.peak_bpm_time_sec, self.recovery_end_time_sec, len(self.state['candidate_beats'])
+            self.peak_bpm_time_sec, self.recovery_end_time_sec, len(self.state['candidate_beats']), self.state['trough_indices']
         )
         reason += adjust_reason
 
-        # Calculate S1-S2 max interval with signal quality adaptation
-        signal_quality = self._estimate_signal_quality()
-        s1_s2_max_interval = min(
-            self.params['s1_s2_interval_cap_sec'], 
-            (60.0 / self.state['long_term_bpm']) * self.params['s1_s2_interval_rr_fraction']
-        )
-        
-        # In noisy conditions, tighten the interval constraint
-        if signal_quality < 0.5:
-            interval_tightening = self.params.get('noisy_interval_tightening', 0.85)
-            s1_s2_max_interval *= interval_tightening
-            reason += f"\n- Noisy signal detected (quality={signal_quality:.2f}), interval cap tightened to {s1_s2_max_interval:.3f}s"
+        s1_s2_max_interval = min(self.params['s1_s2_interval_cap_sec'], (60.0 / self.state['long_term_bpm']) * self.params['s1_s2_interval_rr_fraction'])
         
         # Apply interval penalty if the S1-S2 interval is too long
         if self.params.get("enable_interval_penalty", True) and interval_sec > s1_s2_max_interval:
@@ -511,17 +268,39 @@ class PeakClassifier:
             interval_reason = ""
         reason += interval_reason
 
-        # Adaptive threshold based on signal quality
-        base_threshold = self.params['pairing_confidence_threshold']
-        if self.params.get('enable_adaptive_threshold', True):
-            adaptive_threshold = base_threshold * signal_quality
-            # Don't let threshold go too low
-            adaptive_threshold = max(adaptive_threshold, base_threshold * 0.6)
-        else:
-            adaptive_threshold = base_threshold
-        
-        is_paired = confidence >= adaptive_threshold
-        reason += f"\n- Final Score: {confidence:.2f} vs Adaptive Threshold {adaptive_threshold:.2f} ({signal_quality:.1%} quality) -> {'Paired' if is_paired else 'Not Paired'}"
+        # --- Forward-Looking Contextual Penalty ---
+        # If pairing S1-S2 causes the next S2→S1 transition to be implausable, penalize it
+        # This prevents: [noise]→[true S1 as S2]→[true S2 bein mislabeled]
+        forward_look_penalty = 0.0
+        if self.state['loop_idx'] + 2 < len(self.state['all_peaks']):
+            next_next_peak_idx = self.state['all_peaks'][self.state['loop_idx'] + 2]
+            
+            # Use prominence for robust amplitude comparison
+            s2_prominence = calculate_peak_prominence(
+                s2_candidate_idx, self.audio_envelope, self.state['trough_indices']
+            )
+            next_s1_prominence = calculate_peak_prominence(
+                next_next_peak_idx, self.audio_envelope, self.state['trough_indices']
+            )
+            
+            # Only apply if we have valid data
+            if s2_prominence > 1e-9 and next_s1_prominence > 1e-9:
+                drop_ratio = next_s1_prominence / s2_prominence
+                
+                # If the following peak is substantially weaker, it suggests s2_candidate
+                # is actually a strong S1, making this S1-S2 pairing incorrect
+                threshold = self.params.get('forward_look_drop_threshold', 0.4)
+                if drop_ratio < threshold:
+                    # Scale penalty by severity of the drop
+                    severity = (threshold - drop_ratio) / threshold
+                    max_pen = self.params.get('forward_look_max_penalty', 0.3)
+                    forward_look_penalty = severity * max_pen
+                    
+                    confidence = max(0.0, confidence - forward_look_penalty)
+                    reason += f"\n- Penalized by Forward-Look {forward_look_penalty:.2f} (S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x)"
+
+        is_paired = confidence >= self.params['pairing_confidence_threshold']
+        reason += f"\n- Final Score: {confidence:.2f} vs Threshold {self.params['pairing_confidence_threshold']:.2f} -> {'Paired' if is_paired else 'Not Paired'}"
         return is_paired, reason
 
     def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
@@ -604,7 +383,7 @@ class Plotter:
                 if "Stability Pre-Adjust" in line:
                     match = re.search(r'x([\d\.]+)', line); new_confidence *= float(match.group(1)) if match else 1
                     output_lines.append(f"    - {line} -> {new_confidence:.3f}")
-                elif "PENALIZED by" in line:
+                elif "Penalized by" in line:
                     match = re.search(r'by ([\d\.]+)', line); new_confidence -= float(match.group(1)) if match else 0
                     output_lines.append(f"    - {line} -> {new_confidence:.3f}")
                 elif "Interval PENALTY by" in line:
@@ -687,7 +466,7 @@ class Plotter:
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     def plot_and_save(self, audio_envelope: np.ndarray, all_raw_peaks: np.ndarray, analysis_data: Dict,
-                      final_metrics: Dict):
+                      final_metrics: Dict, output_options: Optional[Dict] = None):
         """Generates and saves the main analysis plot by calling helper methods."""
         self.time_axis_sec = np.arange(len(audio_envelope)) / self.sample_rate
         time_axis_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in self.time_axis_sec])
@@ -709,21 +488,24 @@ class Plotter:
         logging.info(f"Interactive plot saved to {output_html_path}")
 
         # --- Output CSV for BPM plot ---
-        smoothed_bpm = final_metrics.get('smoothed_bpm')
-        bpm_times = final_metrics.get('bpm_times')
-        if smoothed_bpm is not None and not smoothed_bpm.empty and bpm_times is not None:
-            # Use the raw numpy array of times for the table and match it with the smoothed BPM values
-            csv_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.csv")
-            try:
-                with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow(['Time (s)', 'Average BPM'])
-                    for t, bpm in zip(bpm_times, smoothed_bpm.values):
-                        if not np.isnan(bpm):
-                            writer.writerow([f"{t:.3f}", f"{bpm:.3f}"])
-                logging.info(f"BPM plot data saved to {csv_path}")
-            except Exception as e:
-                logging.error(f"Failed to write BPM plot CSV: {e}")
+        if output_options is None or output_options.get('csv', True):
+            smoothed_bpm = final_metrics.get('smoothed_bpm')
+            bpm_times = final_metrics.get('bpm_times')
+            if smoothed_bpm is not None and not smoothed_bpm.empty and bpm_times is not None:
+                # Use the raw numpy array of times for the table and match it with the smoothed BPM values
+                csv_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.csv")
+                try:
+                    with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow(['Time (s)', 'Average BPM'])
+                        for t, bpm in zip(bpm_times, smoothed_bpm.values):
+                            if not np.isnan(bpm):
+                                writer.writerow([f"{t:.3f}", f"{bpm:.3f}"])
+                    logging.info(f"BPM plot data saved to {csv_path}")
+                except Exception as e:
+                    logging.error(f"Failed to write BPM plot CSV: {e}")
+        else:
+            logging.info("Skipping CSV generation as requested.")
         
         # Return the figure object for Gradio display
         return self.fig
@@ -1257,110 +1039,61 @@ def convert_to_wav(file_path: str, target_path: str) -> bool:
         logging.error(f"Could not convert file {file_path}. Error: {e}")
         return False
 
-def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tuple[np.ndarray, int]:
-    """Reads, filters, and prepares the audio envelope for analysis."""
-    downsample_factor = params['downsample_factor']
-    save_debug_file = params['save_filtered_wav']
+def preprocess_audio(file_path: str, params: Dict, output_directory: str, output_options: Optional[Dict] = None) -> Tuple[np.ndarray, int]:
+    """
+    Reads audio using Librosa (Change 1), but keeps original filtering/enveloping logic.
+    """
+    # Set default output options if none provided
+    if output_options is None:
+        output_options = {
+            'html': True, 'csv': True, 'summary': True, 
+            'debug': True, 'settings': True, 'filtered_wav': True
+        }
+    
+    # Only save WAV files if requested
+    save_debug_file = params['save_filtered_wav'] and output_options.get('filtered_wav', True)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        sample_rate, audio_data = wavfile.read(file_path)
-    if audio_data.ndim > 1:
-        audio_data = np.mean(audio_data, axis=1)
+    # --- CHANGE 1: Use Librosa for Robust Loading & Resampling ---
+    # Instead of manual downsampling (audio[::factor]), we let Librosa resample 
+    # the audio to a target rate (e.g., 2000Hz) which is ideal for heart sounds.
+    # This removes the risk of "downsample_factor too high" errors.
+    
+    target_sample_rate = 500  # Hardcoded standard for PCG analysis
+    try:
+        # librosa.load standardizes to float32 (-1 to 1), mono, and target_sr
+        audio_downsampled, new_sample_rate = librosa.load(file_path, sr=target_sample_rate, mono=True)
+    except Exception as e:
+        logging.error(f"Librosa failed to load file: {e}")
+        raise e
 
+    # --- ORIGINAL LOGIC BELOW (Filter & Envelope) ---
+    
     lowcut, highcut = 20, 150  # Hardcoded bandpass frequencies
-
-    # Check if the downsample factor is too aggressive for the filter settings.
-    max_safe_downsample = int((sample_rate / (highcut * 2)) - 1)
-
-    if downsample_factor > max_safe_downsample:
-        logging.warning(
-            f"Original 'downsample_factor' of {downsample_factor} is too high for a "
-            f"{highcut}Hz filter with a {sample_rate}Hz sample rate."
-        )
-        downsample_factor = max(1, max_safe_downsample)
-        logging.warning(f"Adjusting 'downsample_factor' to a safe value of {downsample_factor}.")
-
-    if downsample_factor > 1:
-        new_sample_rate = sample_rate // downsample_factor
-        audio_downsampled = audio_data[::downsample_factor]
-    else:
-        new_sample_rate = sample_rate
-        audio_downsampled = audio_data
-
     nyquist = 0.5 * new_sample_rate
     low, high = lowcut / nyquist, highcut / nyquist
 
     if high >= 1.0:
-        raise ValueError(f"Cannot create a {highcut}Hz filter. The effective sample rate of {new_sample_rate}Hz is too low.")
+        raise ValueError(f"Cannot create a {highcut}Hz filter. The sample rate of {new_sample_rate}Hz is too low.")
 
+    # Original Scipy Filter
     b, a = butter(2, [low, high], btype='band')
     audio_filtered = filtfilt(b, a, audio_downsampled)
-    
-    # Add spectral subtraction denoising if enabled
-    if params.get('enable_spectral_subtraction', False):
-        logging.info("Applying spectral subtraction denoising...")
-        audio_filtered = spectral_subtraction_denoise(
-            audio_filtered, 
-            new_sample_rate,
-            params.get('spectral_noise_estimation_duration', 0.5)
-        )
 
+    # Save filtered audio WAV if requested
     if save_debug_file:
-        debug_path = f"{os.path.splitext(file_path)[0]}_filtered_debug.wav"
-        normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
-        wavfile.write(debug_path, new_sample_rate, normalized_audio)
-
-    # Compute envelope - either median combination or simple rolling mean
-    if params.get('use_median_envelope', False):
-        logging.info("Using median envelope combination (noise-robust mode)")
-        # Compute individual envelopes
-        env_shannon = compute_shannon_energy_envelope(audio_filtered)
-        env_hilbert = compute_hilbert_envelope(audio_filtered)
-        env_homomorphic = compute_homomorphic_envelope(audio_filtered, new_sample_rate)
-        
-        # Normalize each envelope to same scale before combining
-        env_shannon = env_shannon / (np.max(env_shannon) + 1e-9)
-        env_hilbert = env_hilbert / (np.max(env_hilbert) + 1e-9)
-        env_homomorphic = env_homomorphic / (np.max(env_homomorphic) + 1e-9)
-        
-        # Stack and take median (more robust to outliers)
-        stacked = np.vstack([env_shannon, env_hilbert, env_homomorphic])
-        audio_envelope = np.median(stacked, axis=0)
-        
-        # Scale back to reasonable amplitude
-        audio_envelope = audio_envelope * np.max(np.abs(audio_filtered))
-    elif params.get('use_weighted_envelope', False):
-        logging.info("Using weighted envelope combination")
-        # Compute individual envelopes
-        env_shannon = compute_shannon_energy_envelope(audio_filtered)
-        env_hilbert = compute_hilbert_envelope(audio_filtered)
-        env_homomorphic = compute_homomorphic_envelope(audio_filtered, new_sample_rate)
-        
-        # Normalize each envelope to same scale before combining
-        env_shannon = env_shannon / (np.max(env_shannon) + 1e-9)
-        env_hilbert = env_hilbert / (np.max(env_hilbert) + 1e-9)
-        env_homomorphic = env_homomorphic / (np.max(env_homomorphic) + 1e-9)
-        
-        # Weighted combination
-        w_shannon = params.get('envelope_weight_shannon', 0.5)
-        w_hilbert = params.get('envelope_weight_hilbert', 0.3)
-        w_homomorphic = params.get('envelope_weight_homomorphic', 0.2)
-        audio_envelope = (w_shannon * env_shannon) + (w_hilbert * env_hilbert) + (w_homomorphic * env_homomorphic)
-        
-        # Scale back to reasonable amplitude
-        audio_envelope = audio_envelope * np.max(np.abs(audio_filtered))
-    else:
-        # Original simple rolling mean envelope
-        audio_abs = np.abs(audio_filtered)
-        window_size = new_sample_rate // 10
-        audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
-
-    if params['save_filtered_wav']:
         base_name = os.path.basename(os.path.splitext(file_path)[0])
         debug_path = os.path.join(output_directory, f"{base_name}_filtered_debug.wav")
+        # Convert float32 back to int16 for WAV writing
         normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
         wavfile.write(debug_path, new_sample_rate, normalized_audio)
+        logging.info("Saved filtered audio WAV file as requested.")
+    elif params['save_filtered_wav'] and not output_options.get('filtered_wav', True):
+        logging.info("Skipping filtered audio WAV generation as requested.")
+
+    # Original Rolling Envelope Logic
+    audio_abs = np.abs(audio_filtered)
+    window_size = new_sample_rate // 10
+    audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
 
     return audio_envelope, new_sample_rate
 
@@ -1419,6 +1152,47 @@ def _calculate_dynamic_noise_floor(audio_envelope: np.ndarray, sample_rate: int,
 
     return dynamic_noise_floor, np.array(sanitized_trough_indices)
 
+def calculate_peak_prominence(peak_idx: int, audio_envelope: np.ndarray, trough_indices: np.ndarray) -> float:
+    """
+    Calculate the true prominence of a peak by finding adjacent troughs.
+    Prominence = peak amplitude - higher adjacent trough amplitude (key col)
+    
+    Args:
+        peak_idx: Index of the peak in the audio envelope
+        audio_envelope: The audio envelope signal array
+        trough_indices: Sorted array of trough indices from _calculate_dynamic_noise_floor()
+    
+    Returns:
+        Prominence value (always ≥ 0)
+    """
+    if len(trough_indices) == 0:
+        # Fallback if no troughs available
+        return audio_envelope[peak_idx]
+    
+    # Find nearest trough on each side using binary search
+    insert_pos = np.searchsorted(trough_indices, peak_idx)
+    
+    left_trough_idx = trough_indices[insert_pos - 1] if insert_pos > 0 else None
+    right_trough_idx = trough_indices[insert_pos] if insert_pos < len(trough_indices) else None
+    
+    # Get amplitudes
+    peak_amplitude = audio_envelope[peak_idx]
+    left_trough_amp = audio_envelope[left_trough_idx] if left_trough_idx is not None else None
+    right_trough_amp = audio_envelope[right_trough_idx] if right_trough_idx is not None else None
+    
+    # The key col is the higher (less deep) of the two adjacent troughs
+    if left_trough_amp is not None and right_trough_amp is not None:
+        key_col_amp = max(left_trough_amp, right_trough_amp)
+    elif left_trough_amp is not None:
+        key_col_amp = left_trough_amp
+    elif right_trough_amp is not None:
+        key_col_amp = right_trough_amp
+    else:
+        return peak_amplitude  # Should never reach here if troughs exist
+    
+    prominence = max(0.0, peak_amplitude - key_col_amp)
+    
+    return prominence
 
 def calculate_blended_confidence(deviation: float, bpm: float, params: Dict) -> float:
     """
@@ -1446,13 +1220,17 @@ def calculate_blended_confidence(deviation: float, bpm: float, params: Dict) -> 
     return final_confidence
 
 
-def _adjust_confidence_with_stability_and_ratio(confidence: float, s1_idx: int, s2_idx: int, audio_envelope: np.ndarray, dynamic_noise_floor: pd.Series,
-                                               long_term_bpm: float, pairing_ratio: float, params: Dict, sample_rate: int,
-                                               peak_bpm_time_sec: Optional[float], recovery_end_time_sec: Optional[float], beat_count: int) -> Tuple[float, str]:
-    """Applies a full suite of confidence adjustments based on rhythm stability and S1/S2 strength ratio."""
+# Replace the existing function with this updated version
+def _adjust_confidence_with_stability_and_ratio(confidence: float, s1_idx: int, s2_idx: int, 
+                                               audio_envelope: np.ndarray, dynamic_noise_floor: pd.Series,
+                                               long_term_bpm: float, pairing_ratio: float, params: Dict, 
+                                               sample_rate: int, peak_bpm_time_sec: Optional[float], 
+                                               recovery_end_time_sec: Optional[float], beat_count: int,
+                                               trough_indices: np.ndarray) -> Tuple[float, str]:  # ← ADDED trough_indices
+    """Applies confidence adjustments using prominence-based strength ratio."""
     reason = ""
 
-    # --- 1. Universal Stability Pre-Adjustment ---
+    # --- 1. Stability Pre-Adjustment (unchanged) ---
     if beat_count >= 5:
         floor = params.get("stability_confidence_floor", 0.85)
         ceiling = params.get("stability_confidence_ceiling", 1.10)
@@ -1460,12 +1238,16 @@ def _adjust_confidence_with_stability_and_ratio(confidence: float, s1_idx: int, 
         confidence *= stability_factor
         reason += f"\n- Stability Pre-Adjust: x{stability_factor:.2f} (Pairing Ratio: {pairing_ratio:.0%})"
 
-    # --- 2. Calculate Peak Strengths and Expected Ratio ---
-    s1_strength = max(0, audio_envelope[s1_idx] - dynamic_noise_floor.iloc[s1_idx])
-    s2_strength = max(0, audio_envelope[s2_idx] - dynamic_noise_floor.iloc[s2_idx])
-    current_s2_s1_strength_ratio = s2_strength / (s1_strength + 1e-9)
+    # --- 2. Calculate Prominence-Based Strengths ---
+    s1_prominence = calculate_peak_prominence(s1_idx, audio_envelope, trough_indices)
+    s2_prominence = calculate_peak_prominence(s2_idx, audio_envelope, trough_indices)
+    
+    # Prominence-based ratio (replaces old amplitude-based ratio)
+    current_s2_s1_strength_ratio = s2_prominence / (s1_prominence + 1e-9)
+    
+    reason += f"\n- Prominence Ratio: S2={s2_prominence:.3f}, S1={s1_prominence:.3f}, Ratio={current_s2_s1_strength_ratio:.2f}x"
 
-    # Determine expected ratio based on BPM and recovery state
+    # --- 3. Expected Ratio Logic (unchanged) ---
     is_in_recovery = (peak_bpm_time_sec is not None and recovery_end_time_sec is not None and
                       peak_bpm_time_sec < (s1_idx / sample_rate) < recovery_end_time_sec)
     effective_bpm = max(long_term_bpm, params['contractility_bpm_low']) if is_in_recovery else long_term_bpm
@@ -1473,32 +1255,26 @@ def _adjust_confidence_with_stability_and_ratio(confidence: float, s1_idx: int, 
                                        [params['contractility_bpm_low'], params['contractility_bpm_high']],
                                        [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']])
 
-    # --- 3. Apply Final Dynamic Boost or Penalty Amount ---
+    # --- 4. Apply Prominence-Based Adjustments ---
     if current_s2_s1_strength_ratio > max_expected_s2_s1_ratio:
-        # PENALTY is scaled by the severity of the violation.
         min_penalty = params.get("penalty_amount_min", 0.15)
         max_penalty = params.get("penalty_amount_max", 0.40)
         violation_severity = current_s2_s1_strength_ratio / max_expected_s2_s1_ratio
         severity_scale = np.clip((violation_severity - 1.0) / 2.0, 0, 1)
-        penalty_range = max_penalty - min_penalty
-        penalty_amount = min_penalty + (severity_scale * penalty_range)
+        penalty_amount = min_penalty + (severity_scale * (max_penalty - min_penalty))
         confidence -= penalty_amount
-        reason += f"\n- PENALIZED by {penalty_amount:.2f} (S2 Str. Ratio {current_s2_s1_strength_ratio:.1f}x > Expected {max_expected_s2_s1_ratio:.1f}x)"
-
-    elif s1_strength > (s2_strength * params.get('s1_s2_boost_ratio', 1.2)):
-        # BOOST is now also scaled by severity.
+        reason += f"\n- PENALIZED by {penalty_amount:.2f} (S2 Prominence {current_s2_s1_strength_ratio:.2f}x > Expected {max_expected_s2_s1_ratio:.1f}x)"
+    elif s1_prominence > (s2_prominence * params.get('s1_s2_boost_ratio', 1.2)):
         min_boost = params.get("boost_amount_min", 0.10)
         max_boost = params.get("boost_amount_max", 0.35)
-        actual_s1_s2_ratio = s1_strength / (s2_strength + 1e-9)
+        actual_s1_s2_ratio = s1_prominence / (s2_prominence + 1e-9)
         boost_threshold_ratio = params.get('s1_s2_boost_ratio', 1.2)
         exceedance_scale = np.clip((actual_s1_s2_ratio - boost_threshold_ratio) / (4.0 - boost_threshold_ratio), 0, 1)
-        boost_range = max_boost - min_boost
-        boost_amount = min_boost + (exceedance_scale * boost_range)
+        boost_amount = min_boost + (exceedance_scale * (max_boost - min_boost))
         confidence += boost_amount
-        reason += f"\n- BOOSTED by {boost_amount:.2f} (S1 Str. Ratio {actual_s1_s2_ratio:.1f}x > S2)"
+        reason += f"\n- Boosted by {boost_amount:.2f} (S1 Prominence {actual_s1_s2_ratio:.2f}x > S2)"
 
     return max(0.0, min(1.0, confidence)), reason
-
 
 
 def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_term_bpm: float, audio_envelope: np.ndarray,
@@ -1997,11 +1773,6 @@ def _refine_and_correct_peaks(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray,
     else:
         logging.warning("Correction process reached max iterations without stabilizing.")
 
-    # Apply final rhythm-sequence validation if enabled
-    if params.get('enable_rhythm_validation', True) and len(final_peaks) >= 10:
-        logging.info("Applying final rhythm-sequence validation...")
-        final_peaks = validate_rhythm_sequence(final_peaks, audio_envelope, sample_rate, params)
-
     analysis_data["beat_debug_info"] = current_debug_info
     return final_peaks, analysis_data
 
@@ -2030,21 +1801,13 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     return metrics
 
 
-def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str):
+def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str, output_options: Optional[Dict] = None):
     """Main analysis pipeline that orchestrates the refactored classes."""
     start_time = time.time()
     logging.info(f"--- Processing file: {os.path.basename(original_file_path)} ---")
 
     # STAGE 1: Initialization
-    # First pass with basic preprocessing to estimate signal quality for auto-preset
-    if params.get('enable_auto_preset', False):
-        logging.info("--- Running signal quality estimation for auto-preset selection ---")
-        # Do basic preprocessing first to estimate quality
-        temp_envelope, temp_sample_rate = preprocess_audio(wav_file_path, params.copy(), output_directory)
-        # Auto-select parameters based on signal quality
-        params = auto_select_params(temp_envelope, temp_sample_rate, params)
-    
-    audio_envelope, sample_rate = preprocess_audio(wav_file_path, params, output_directory)
+    audio_envelope, sample_rate = preprocess_audio(wav_file_path, params, output_directory, output_options)
     noise_floor, troughs = _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params)
 
     start_bpm, peak_time, recovery_time = _run_preliminary_pass(
@@ -2072,13 +1835,46 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     logging.info("--- STAGE 6: Calculating Metrics and Generating Outputs ---")
     final_metrics = _calculate_final_metrics(final_peaks, sample_rate, params)
 
-    plotter = Plotter(original_file_path, params, sample_rate, output_directory)
-    plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
+    # Set default output options if none provided
+    if output_options is None:
+        output_options = {
+            'html': True,
+            'csv': True,
+            'summary': True,
+            'debug': True,
+            'settings': True,
+            'filtered_wav': True
+        }
 
-    reporter = ReportGenerator(original_file_path, output_directory)
-    reporter.save_analysis_summary(final_metrics)
-    reporter.create_chronological_log(audio_envelope, sample_rate, all_raw_peaks, analysis_data, final_metrics)
-    reporter.save_analysis_settings(start_bpm_hint)
+    plotly_figure = None
+    
+    # Generate HTML plot if requested
+    if output_options.get('html', True):
+        plotter = Plotter(original_file_path, params, sample_rate, output_directory)
+        plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics, output_options)
+    else:
+        logging.info("Skipping HTML plot generation as requested.")
+
+    # Generate other outputs if requested
+    if output_options.get('summary', True) or output_options.get('debug', True) or output_options.get('settings', True):
+        reporter = ReportGenerator(original_file_path, output_directory)
+        
+        if output_options.get('summary', True):
+            reporter.save_analysis_summary(final_metrics)
+        else:
+            logging.info("Skipping summary generation as requested.")
+            
+        if output_options.get('debug', True):
+            reporter.create_chronological_log(audio_envelope, sample_rate, all_raw_peaks, analysis_data, final_metrics)
+        else:
+            logging.info("Skipping debug log generation as requested.")
+            
+        if output_options.get('settings', True):
+            reporter.save_analysis_settings(start_bpm_hint)
+        else:
+            logging.info("Skipping settings generation as requested.")
+    else:
+        logging.info("Skipping all report generation as requested.")
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
