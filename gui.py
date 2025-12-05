@@ -5,6 +5,8 @@ import queue
 import threading
 import tkinter as tk
 import json
+import subprocess
+import platform
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
@@ -56,11 +58,11 @@ class BPMApp:
 
         # Output file options
         self.output_html = tk.BooleanVar(value=True)
-        self.output_csv = tk.BooleanVar(value=True)
-        self.output_summary = tk.BooleanVar(value=True)
-        self.output_debug = tk.BooleanVar(value=True)
-        self.output_settings = tk.BooleanVar(value=True)
-        self.output_filtered_wav = tk.BooleanVar(value=True)
+        self.output_csv = tk.BooleanVar(value=False)
+        self.output_summary = tk.BooleanVar(value=False)
+        self.output_debug = tk.BooleanVar(value=False)
+        self.output_settings = tk.BooleanVar(value=False)
+        self.output_filtered_wav = tk.BooleanVar(value=False)
 
         # Output files section
         output_frame = ttk.LabelFrame(main_frame, text="Output Files", padding="10")
@@ -105,6 +107,8 @@ class BPMApp:
         btn_frame.grid(row=3, column=0, sticky="ew", pady=20)
         self.analyze_btn = ttk.Button(btn_frame, text="Analyze", command=self.start_analysis_thread, bootstyle=SUCCESS, state=tk.DISABLED)
         self.analyze_btn.pack(side=tk.RIGHT, padx=5)
+        self.open_html_btn = ttk.Button(btn_frame, text="Open Last HTML Report", command=self.open_last_html, bootstyle=INFO)
+        self.open_html_btn.pack(side=tk.RIGHT, padx=5)
 
         # Status Bar
         self.status_var = tk.StringVar(value="Select one or more audio files to begin.")
@@ -221,6 +225,47 @@ class BPMApp:
     def _update_status(self, message):
         """Safely update the status bar from any thread."""
         self.root.after(0, lambda: self.status_var.set(message))
+
+    def open_last_html(self):
+        """Find and open the most recently generated HTML report file."""
+        output_dir = os.path.join(os.getcwd(), "processed_files")
+        
+        if not os.path.exists(output_dir):
+            messagebox.showwarning("No Reports", "No processed files directory found. Run an analysis first.")
+            return
+        
+        # Find all HTML files matching the pattern *_bpm_plot.html
+        html_files = []
+        try:
+            for filename in os.listdir(output_dir):
+                if filename.endswith("_bpm_plot.html"):
+                    file_path = os.path.join(output_dir, filename)
+                    # Get modification time
+                    mtime = os.path.getmtime(file_path)
+                    html_files.append((mtime, file_path, filename))
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read processed files directory: {e}")
+            return
+        
+        if not html_files:
+            messagebox.showwarning("No Reports", "No HTML reports found. Run an analysis first.")
+            return
+        
+        # Sort by modification time (most recent first)
+        html_files.sort(reverse=True)
+        most_recent_file = html_files[0][1]
+        
+        # Open the file with the system's default application
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(most_recent_file)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', most_recent_file])
+            else:  # Linux and others
+                subprocess.run(['xdg-open', most_recent_file])
+            self._update_status(f"Opened: {os.path.basename(most_recent_file)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open HTML file: {e}")
 
     def select_all_outputs(self):
         """Select all output file options."""
