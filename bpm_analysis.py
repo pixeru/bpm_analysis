@@ -687,7 +687,7 @@ class Plotter:
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     def plot_and_save(self, audio_envelope: np.ndarray, all_raw_peaks: np.ndarray, analysis_data: Dict,
-                      final_metrics: Dict):
+                      final_metrics: Dict, output_options: Optional[Dict] = None):
         """Generates and saves the main analysis plot by calling helper methods."""
         self.time_axis_sec = np.arange(len(audio_envelope)) / self.sample_rate
         time_axis_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in self.time_axis_sec])
@@ -709,21 +709,24 @@ class Plotter:
         logging.info(f"Interactive plot saved to {output_html_path}")
 
         # --- Output CSV for BPM plot ---
-        smoothed_bpm = final_metrics.get('smoothed_bpm')
-        bpm_times = final_metrics.get('bpm_times')
-        if smoothed_bpm is not None and not smoothed_bpm.empty and bpm_times is not None:
-            # Use the raw numpy array of times for the table and match it with the smoothed BPM values
-            csv_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.csv")
-            try:
-                with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow(['Time (s)', 'Average BPM'])
-                    for t, bpm in zip(bpm_times, smoothed_bpm.values):
-                        if not np.isnan(bpm):
-                            writer.writerow([f"{t:.3f}", f"{bpm:.3f}"])
-                logging.info(f"BPM plot data saved to {csv_path}")
-            except Exception as e:
-                logging.error(f"Failed to write BPM plot CSV: {e}")
+        if output_options is None or output_options.get('csv', True):
+            smoothed_bpm = final_metrics.get('smoothed_bpm')
+            bpm_times = final_metrics.get('bpm_times')
+            if smoothed_bpm is not None and not smoothed_bpm.empty and bpm_times is not None:
+                # Use the raw numpy array of times for the table and match it with the smoothed BPM values
+                csv_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.csv")
+                try:
+                    with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow(['Time (s)', 'Average BPM'])
+                        for t, bpm in zip(bpm_times, smoothed_bpm.values):
+                            if not np.isnan(bpm):
+                                writer.writerow([f"{t:.3f}", f"{bpm:.3f}"])
+                    logging.info(f"BPM plot data saved to {csv_path}")
+                except Exception as e:
+                    logging.error(f"Failed to write BPM plot CSV: {e}")
+        else:
+            logging.info("Skipping CSV generation as requested.")
         
         # Return the figure object for Gradio display
         return self.fig
@@ -1257,10 +1260,23 @@ def convert_to_wav(file_path: str, target_path: str) -> bool:
         logging.error(f"Could not convert file {file_path}. Error: {e}")
         return False
 
-def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tuple[np.ndarray, int]:
+def preprocess_audio(file_path: str, params: Dict, output_directory: str, output_options: Optional[Dict] = None) -> Tuple[np.ndarray, int]:
     """Reads, filters, and prepares the audio envelope for analysis."""
     downsample_factor = params['downsample_factor']
-    save_debug_file = params['save_filtered_wav']
+    
+    # Set default output options if none provided
+    if output_options is None:
+        output_options = {
+            'html': True,
+            'csv': True,
+            'summary': True,
+            'debug': True,
+            'settings': True,
+            'filtered_wav': True
+        }
+    
+    # Only save WAV files if requested
+    save_debug_file = params['save_filtered_wav'] and output_options.get('filtered_wav', True)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1306,10 +1322,15 @@ def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tup
             params.get('spectral_noise_estimation_duration', 0.5)
         )
 
+    # Save filtered audio WAV if requested (early save before envelope computation)
     if save_debug_file:
-        debug_path = f"{os.path.splitext(file_path)[0]}_filtered_debug.wav"
+        base_name = os.path.basename(os.path.splitext(file_path)[0])
+        debug_path = os.path.join(output_directory, f"{base_name}_filtered_debug.wav")
         normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
         wavfile.write(debug_path, new_sample_rate, normalized_audio)
+        logging.info("Saved filtered audio WAV file as requested.")
+    elif params['save_filtered_wav'] and not output_options.get('filtered_wav', True):
+        logging.info("Skipping filtered audio WAV generation as requested.")
 
     # Compute envelope - either median combination or simple rolling mean
     if params.get('use_median_envelope', False):
@@ -1355,12 +1376,6 @@ def preprocess_audio(file_path: str, params: Dict, output_directory: str) -> Tup
         audio_abs = np.abs(audio_filtered)
         window_size = new_sample_rate // 10
         audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
-
-    if params['save_filtered_wav']:
-        base_name = os.path.basename(os.path.splitext(file_path)[0])
-        debug_path = os.path.join(output_directory, f"{base_name}_filtered_debug.wav")
-        normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
-        wavfile.write(debug_path, new_sample_rate, normalized_audio)
 
     return audio_envelope, new_sample_rate
 
@@ -2030,7 +2045,7 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     return metrics
 
 
-def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str):
+def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str, output_options: Optional[Dict] = None):
     """Main analysis pipeline that orchestrates the refactored classes."""
     start_time = time.time()
     logging.info(f"--- Processing file: {os.path.basename(original_file_path)} ---")
@@ -2040,11 +2055,11 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     if params.get('enable_auto_preset', False):
         logging.info("--- Running signal quality estimation for auto-preset selection ---")
         # Do basic preprocessing first to estimate quality
-        temp_envelope, temp_sample_rate = preprocess_audio(wav_file_path, params.copy(), output_directory)
+        temp_envelope, temp_sample_rate = preprocess_audio(wav_file_path, params.copy(), output_directory, output_options)
         # Auto-select parameters based on signal quality
         params = auto_select_params(temp_envelope, temp_sample_rate, params)
     
-    audio_envelope, sample_rate = preprocess_audio(wav_file_path, params, output_directory)
+    audio_envelope, sample_rate = preprocess_audio(wav_file_path, params, output_directory, output_options)
     noise_floor, troughs = _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params)
 
     start_bpm, peak_time, recovery_time = _run_preliminary_pass(
@@ -2072,13 +2087,46 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     logging.info("--- STAGE 6: Calculating Metrics and Generating Outputs ---")
     final_metrics = _calculate_final_metrics(final_peaks, sample_rate, params)
 
-    plotter = Plotter(original_file_path, params, sample_rate, output_directory)
-    plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
+    # Set default output options if none provided
+    if output_options is None:
+        output_options = {
+            'html': True,
+            'csv': True,
+            'summary': True,
+            'debug': True,
+            'settings': True,
+            'filtered_wav': True
+        }
 
-    reporter = ReportGenerator(original_file_path, output_directory)
-    reporter.save_analysis_summary(final_metrics)
-    reporter.create_chronological_log(audio_envelope, sample_rate, all_raw_peaks, analysis_data, final_metrics)
-    reporter.save_analysis_settings(start_bpm_hint)
+    plotly_figure = None
+    
+    # Generate HTML plot if requested
+    if output_options.get('html', True):
+        plotter = Plotter(original_file_path, params, sample_rate, output_directory)
+        plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics, output_options)
+    else:
+        logging.info("Skipping HTML plot generation as requested.")
+
+    # Generate other outputs if requested
+    if output_options.get('summary', True) or output_options.get('debug', True) or output_options.get('settings', True):
+        reporter = ReportGenerator(original_file_path, output_directory)
+        
+        if output_options.get('summary', True):
+            reporter.save_analysis_summary(final_metrics)
+        else:
+            logging.info("Skipping summary generation as requested.")
+            
+        if output_options.get('debug', True):
+            reporter.create_chronological_log(audio_envelope, sample_rate, all_raw_peaks, analysis_data, final_metrics)
+        else:
+            logging.info("Skipping debug log generation as requested.")
+            
+        if output_options.get('settings', True):
+            reporter.save_analysis_settings(start_bpm_hint)
+        else:
+            logging.info("Skipping settings generation as requested.")
+    else:
+        logging.info("Skipping all report generation as requested.")
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
