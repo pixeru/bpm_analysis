@@ -26,27 +26,22 @@ class BPMApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Heartbeat BPM Analyzer (Batch Mode)")
-        self.root.geometry("550x350")
+        self.root.geometry("800x600")
         self.style = ttkb.Style(theme='minty')
         self.current_files = []
-        self.params = DEFAULT_PARAMS.copy() # Assumes DEFAULT_PARAMS is imported
+        self.params = DEFAULT_PARAMS.copy()
         self.log_queue = queue.Queue()
         self.create_widgets()
         self.root.after(100, self.process_log_queue)
         self._find_initial_audio_file()
-        
-        # Check if output folder exists and enable button if it does
-        output_dir = os.path.join(os.getcwd(), "processed_files")
-        if os.path.exists(output_dir) and os.path.isdir(output_dir):
-            self.open_folder_btn.config(state=tk.NORMAL)
 
     def create_widgets(self):
         main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.grid(row=0, column=0, sticky="nsew")
 
         # File selection
         file_frame = ttk.LabelFrame(main_frame, text="Audio File(s)", padding=10)
-        file_frame.pack(fill=tk.X, pady=5)
+        file_frame.grid(row=0, column=0, sticky="ew", pady=5)
         self.file_label = ttk.Label(file_frame, text="No files selected", wraplength=450)
         self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
         browse_btn = ttk.Button(file_frame, text="Browse", command=self.select_file, bootstyle=INFO)
@@ -54,25 +49,76 @@ class BPMApp:
 
         # Parameters
         param_frame = ttk.LabelFrame(main_frame, text="Analysis Parameters", padding=10)
-        param_frame.pack(fill=tk.X, pady=5)
+        param_frame.grid(row=1, column=0, sticky="ew", pady=5)
         ttk.Label(param_frame, text="Starting BPM (optional):").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.bpm_entry = ttk.Entry(param_frame)
         self.bpm_entry.grid(row=0, column=1, sticky=tk.EW, padx=5, pady=2)
 
+        # Output file options
+        self.output_html = tk.BooleanVar(value=True)
+        self.output_csv = tk.BooleanVar(value=True)
+        self.output_summary = tk.BooleanVar(value=True)
+        self.output_debug = tk.BooleanVar(value=True)
+        self.output_settings = tk.BooleanVar(value=True)
+        self.output_filtered_wav = tk.BooleanVar(value=True)
+
+        # Output files section
+        output_frame = ttk.LabelFrame(main_frame, text="Output Files", padding="10")
+        output_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+
+        # Output file checkboxes
+        ttk.Checkbutton(output_frame, text="HTML Report", variable=self.output_html, 
+                       command=self._update_output_status).grid(row=0, column=0, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="CSV Data", variable=self.output_csv, 
+                       command=self._update_output_status).grid(row=0, column=1, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="Summary Report", variable=self.output_summary, 
+                       command=self._update_output_status).grid(row=1, column=0, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="Debug Report", variable=self.output_debug, 
+                       command=self._update_output_status).grid(row=1, column=1, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="Analysis Settings", variable=self.output_settings, 
+                       command=self._update_output_status).grid(row=2, column=0, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="Filtered Audio WAV", variable=self.output_filtered_wav, 
+                       command=self._update_output_status).grid(row=2, column=1, sticky="w", padx=(0, 20))
+
+        # Select All/None buttons
+        btn_frame_output = ttk.Frame(output_frame)
+        btn_frame_output.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(btn_frame_output, text="Select All", command=self.select_all_outputs, 
+                  bootstyle=SECONDARY).grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(btn_frame_output, text="Select None", command=self.select_none_outputs, 
+                  bootstyle=SECONDARY).grid(row=0, column=1)
+
+        # Output status label
+        self.output_status_label = ttk.Label(output_frame, text="", font=("TkDefaultFont", 9))
+        self.output_status_label.grid(row=5, column=0, columnspan=2, pady=(5, 0))
+        
+        # Bind output option changes to update status
+        self.output_html.trace('w', self._update_output_status)
+        self.output_csv.trace('w', self._update_output_status)
+        self.output_summary.trace('w', self._update_output_status)
+        self.output_debug.trace('w', self._update_output_status)
+        self.output_settings.trace('w', self._update_output_status)
+        self.output_filtered_wav.trace('w', self._update_output_status)
+
         # Action Buttons
         btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X, pady=20)
+        btn_frame.grid(row=3, column=0, sticky="ew", pady=20)
         self.analyze_btn = ttk.Button(btn_frame, text="Analyze", command=self.start_analysis_thread, bootstyle=SUCCESS, state=tk.DISABLED)
         self.analyze_btn.pack(side=tk.RIGHT, padx=5)
-        self.open_folder_btn = ttk.Button(btn_frame, text="Open Output Folder", command=self.open_output_folder, bootstyle=INFO, state=tk.DISABLED)
-        self.open_folder_btn.pack(side=tk.RIGHT, padx=5)
 
         # Status Bar
         self.status_var = tk.StringVar(value="Select one or more audio files to begin.")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        status_bar.grid(row=4, column=0, sticky="ew", pady=(10, 0))
 
+        # Configure grid weights
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
         param_frame.columnconfigure(1, weight=1)
+        output_frame.columnconfigure(0, weight=1)
+        output_frame.columnconfigure(1, weight=1)
 
     def process_log_queue(self):
         try:
@@ -85,7 +131,6 @@ class BPMApp:
                     final_message = msg.data if msg.data else "Analysis complete!"
                     self.status_var.set(final_message)
                     self.analyze_btn.config(state=tk.NORMAL)
-                    self.open_folder_btn.config(state=tk.NORMAL)
                 elif msg.type == UIMessageType.ERROR:
                      self.status_var.set("An error occurred. Check logs and messagebox.")
                      messagebox.showerror("Analysis Error", msg.data)
@@ -173,24 +218,62 @@ class BPMApp:
         else:
             self._update_status(f"Ready to analyze. No previous settings file found.")
 
-    def open_output_folder(self):
-        """Opens the output folder where analysis results are stored."""
-        output_dir = os.path.join(os.getcwd(), "processed_files")
-        if os.path.exists(output_dir):
-            # Use the appropriate command for Windows
-            os.startfile(output_dir)
-            self._update_status(f"Opened output folder: {output_dir}")
-        else:
-            messagebox.showerror("Error", "Output folder does not exist")
-            
     def _update_status(self, message):
         """Safely update the status bar from any thread."""
         self.root.after(0, lambda: self.status_var.set(message))
+
+    def select_all_outputs(self):
+        """Select all output file options."""
+        self.output_html.set(True)
+        self.output_csv.set(True)
+        self.output_summary.set(True)
+        self.output_debug.set(True)
+        self.output_settings.set(True)
+        self.output_filtered_wav.set(True)
+
+    def select_none_outputs(self):
+        """Deselect all output file options."""
+        self.output_html.set(False)
+        self.output_csv.set(False)
+        self.output_summary.set(False)
+        self.output_debug.set(False)
+        self.output_settings.set(False)
+        self.output_filtered_wav.set(False)
+
+    def get_output_options(self):
+        """Get the current output file selection as a dictionary."""
+        return {
+            'html': self.output_html.get(),
+            'csv': self.output_csv.get(),
+            'summary': self.output_summary.get(),
+            'debug': self.output_debug.get(),
+            'settings': self.output_settings.get(),
+            'filtered_wav': self.output_filtered_wav.get()
+        }
+
+    def _update_output_status(self, *args):
+        """Update the output status label based on current selections."""
+        output_options = self.get_output_options()
+        selected_count = sum(output_options.values())
+        total_count = len(output_options)
+        
+        if selected_count == 0:
+            self.output_status_label.config(text="No output types selected", foreground="red")
+        elif selected_count == total_count:
+            self.output_status_label.config(text="All output types selected", foreground="green")
+        else:
+            self.output_status_label.config(text=f"{selected_count}/{total_count} output types selected", foreground="orange")
 
     def start_analysis_thread(self):
         """Starts the analysis in a new thread."""
         if not self.current_files:
             messagebox.showerror("Error", "No files selected")
+            return
+
+        # Check if at least one output option is selected
+        output_options = self.get_output_options()
+        if not any(output_options.values()):
+            messagebox.showerror("Error", "Please select at least one output file type to generate.")
             return
 
         self.analyze_btn.config(state=tk.DISABLED)
@@ -257,9 +340,10 @@ class BPMApp:
                     self.log_queue.put(
                         UIMessage(UIMessageType.STATUS, f"({i + 1}/{total_files}) Analyzing heartbeat..."))
 
-                    # Pass the file-specific start_bpm_hint to the analysis function.
+                    # Pass the file-specific start_bpm_hint and output options to the analysis function.
+                    output_options = self.get_output_options()
                     analyze_wav_file(wav_path, self.params, start_bpm_hint, original_file_path=file_path,
-                                     output_directory=output_dir)
+                                     output_directory=output_dir, output_options=output_options)
                     files_processed += 1
 
                 except Exception as e:
