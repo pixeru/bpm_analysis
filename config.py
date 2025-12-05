@@ -139,6 +139,10 @@ DEFAULT_PARAMS = {
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
     "plot_downsample_factor": 1,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
 
+    # =================================================================================
+    # 9. PVC Detection Parameters
+    # Settings specific to the detection of Premature Ventricular Contractions (PVCs).
+    # =================================================================================
     "pvc_premature_threshold_pct": 0.75,  # Interval < (default: 75%) of median
     "pvc_pause_threshold_pct": 1.10,      # Next interval > 110% of median
 }
