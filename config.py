@@ -130,38 +130,7 @@ DEFAULT_PARAMS = {
     "rhythm_validation_amplitude_weight": 0.3,   # Weight for amplitude consistency in validation.
 
     # =================================================================================
-    # 8. Abnormality Detection
-    # Settings for detecting heart abnormalities like gallops, murmurs, and arrhythmias.
-    # =================================================================================
-    # --- 8.1. Master Switch ---
-    "enable_abnormality_detection": True,        # Enable/disable all abnormality detection modules.
-
-    # --- 8.2. Gallop Detection (S3/S4) ---
-    "enable_gallop_detection": True,             # Enable gallop sound detection.
-    "s3_confidence_threshold": 3.0,              # Minimum confidence score for S3 detection.
-    "s3_window_start": 0.12,                     # Start of S3 search window after S2 (seconds).
-    "s3_window_end": 0.20,                       # End of S3 search window after S2 (seconds).
-    "gallop_band_low": 20,                       # Low frequency for gallop bandpass filter (Hz).
-    "gallop_band_high": 60,                      # High frequency for gallop bandpass filter (Hz).
-
-    # --- 8.3. Murmur Detection ---
-    "enable_murmur_detection": True,             # Enable murmur detection.
-    "murmur_energy_threshold": 2.5,              # Energy ratio threshold for murmur detection.
-    "murmur_band_low": 80,                       # Low frequency for murmur bandpass filter (Hz).
-    "murmur_band_high": 400,                     # High frequency for murmur bandpass filter (Hz).
-
-    # --- 8.4. Rhythm Anomaly Detection ---
-    "enable_rhythm_anomaly_detection": True,     # Enable rhythm anomaly detection.
-    "rr_variability_threshold": 0.15,            # Coefficient of variation threshold for irregular rhythm.
-    "premature_beat_threshold": 0.75,            # RR < 75% of median indicates premature beat.
-    "missed_beat_threshold": 1.75,               # RR > 175% of median indicates missed beat.
-
-    # --- 8.5. Morphological Analysis ---
-    "enable_morphology_analysis": True,          # Enable morphological feature extraction.
-    "morphology_window_sec": 0.1,                # Window size for morphology analysis (seconds).
-
-    # =================================================================================
-    # 9. Output, HRV & Reporting
+    # 8. Output, HRV & Reporting
     # Controls for final calculations, reports, and plots.
     # =================================================================================
     "output_smoothing_window_sec": 5,        # Time window (seconds) for smoothing the final BPM curve for display.
