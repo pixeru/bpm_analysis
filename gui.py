@@ -5,6 +5,7 @@ import queue
 import threading
 import tkinter as tk
 import json
+import webbrowser
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
@@ -106,6 +107,16 @@ class BPMApp:
         self.analyze_btn = ttk.Button(btn_frame, text="Analyze", command=self.start_analysis_thread, bootstyle=SUCCESS, state=tk.DISABLED)
         self.analyze_btn.pack(side=tk.RIGHT, padx=5)
 
+        # Quick access buttons: Open HTML Graph and play WAV files
+        self.open_html_btn = ttk.Button(btn_frame, text="Open HTML Graph", command=self.open_html_graph, bootstyle=PRIMARY, state=tk.DISABLED)
+        self.open_html_btn.pack(side=tk.RIGHT, padx=5)
+
+        self.play_wav_btn = ttk.Button(btn_frame, text="Play WAV", command=self.play_wav, bootstyle=INFO, state=tk.DISABLED)
+        self.play_wav_btn.pack(side=tk.RIGHT, padx=5)
+
+        self.play_wav_debug_btn = ttk.Button(btn_frame, text="Play WAV (Debug)", command=self.play_wav_debug, bootstyle=INFO, state=tk.DISABLED)
+        self.play_wav_debug_btn.pack(side=tk.RIGHT, padx=5)
+
         # Status Bar
         self.status_var = tk.StringVar(value="Select one or more audio files to begin.")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
@@ -153,11 +164,14 @@ class BPMApp:
             # If only one file is chosen, try to load its settings.
             if len(self.current_files) == 1:
                 self._load_settings_for_file(self.current_files[0])
+                # Enable quick access buttons for single file selection
+                self._update_file_action_buttons()
             else:
                 # If multiple files are selected, clear the entry to avoid confusion.
                 # The user must enter a value to be used for the whole batch.
                 self.bpm_entry.delete(0, tk.END)
                 self._update_status(f"Ready to analyze {len(self.current_files)} files.")
+                self._update_file_action_buttons()
 
     def _find_initial_audio_file(self):
         """
@@ -185,9 +199,11 @@ class BPMApp:
                 # If only one file was auto-detected, try to load its settings
                 if len(self.current_files) == 1:
                     self._load_settings_for_file(self.current_files[0])
+                    self._update_file_action_buttons()
                 else:
                     # Otherwise, set a general status for batch processing
                     self._update_status(f"Auto-loaded {len(self.current_files)} files from the current directory.")
+                    self._update_file_action_buttons()
 
         except Exception as e:
             # Fails silently if it can't read the directory
@@ -217,6 +233,8 @@ class BPMApp:
                 print(f"ERROR: Could not parse {settings_path}. Details: {e}")
         else:
             self._update_status(f"Ready to analyze. No previous settings file found.")
+        # Ensure file action buttons reflect the selected file
+        self._update_file_action_buttons()
 
     def _update_status(self, message):
         """Safely update the status bar from any thread."""
@@ -250,6 +268,72 @@ class BPMApp:
             'settings': self.output_settings.get(),
             'filtered_wav': self.output_filtered_wav.get()
         }
+
+    def _update_file_action_buttons(self):
+        """Enable/disable the quick action buttons based on current file selection.
+        These buttons are only enabled when a single file is selected (so it's clear which processed files we mean).
+        """
+        if len(self.current_files) == 1:
+            self.open_html_btn.config(state=tk.NORMAL)
+            self.play_wav_btn.config(state=tk.NORMAL)
+            self.play_wav_debug_btn.config(state=tk.NORMAL)
+        else:
+            self.open_html_btn.config(state=tk.DISABLED)
+            self.play_wav_btn.config(state=tk.DISABLED)
+            self.play_wav_debug_btn.config(state=tk.DISABLED)
+
+    def _get_processed_output_paths(self):
+        """Return the expected processed files (html, wav, filtered debug wav) based on current selected file.
+        Returns (html_path, wav_path, debug_wav_path)
+        """
+        if not self.current_files:
+            return (None, None, None)
+        base_path = self.current_files[0]
+        base_name = os.path.splitext(os.path.basename(base_path))[0]
+        output_dir = os.path.join(os.getcwd(), "processed_files")
+        html_path = os.path.join(output_dir, f"{base_name}_bpm_plot.html")
+        wav_path = os.path.join(output_dir, f"{base_name}.wav")
+        debug_wav_path = os.path.join(output_dir, f"{base_name}_filtered_debug.wav")
+        return (html_path, wav_path, debug_wav_path)
+
+    def open_html_graph(self):
+        html_path, _, _ = self._get_processed_output_paths()
+        if not html_path or not os.path.exists(html_path):
+            messagebox.showerror("Not Found", "Processed HTML graph not found. Run analysis and save outputs first.")
+            return
+        try:
+            # Use webbrowser to open the interactive plot in the default browser
+            webbrowser.open_new_tab(f"file://{html_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open HTML graph: {e}")
+
+    def play_wav(self):
+        _, wav_path, _ = self._get_processed_output_paths()
+        if not wav_path or not os.path.exists(wav_path):
+            messagebox.showerror("Not Found", "Processed WAV file not found. Run analysis to create it.")
+            return
+        try:
+            # On Windows, os.startfile is the simplest way to open with the default player
+            os.startfile(wav_path)
+        except Exception:
+            # Fallback to webbrowser which may also handle file playback in some environments
+            try:
+                webbrowser.open_new_tab(f"file://{wav_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to play WAV: {e}")
+
+    def play_wav_debug(self):
+        _, _, debug_wav_path = self._get_processed_output_paths()
+        if not debug_wav_path or not os.path.exists(debug_wav_path):
+            messagebox.showerror("Not Found", "Filtered debug WAV file not found. Enable 'Filtered Audio WAV' output or run analysis with filtered WAV saving enabled.")
+            return
+        try:
+            os.startfile(debug_wav_path)
+        except Exception:
+            try:
+                webbrowser.open_new_tab(f"file://{debug_wav_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to play debug WAV: {e}")
 
     def _update_output_status(self, *args):
         """Update the output status label based on current selections."""
