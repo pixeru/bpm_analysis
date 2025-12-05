@@ -208,6 +208,399 @@ def auto_select_params(audio_envelope: np.ndarray, sample_rate: int, base_params
     return result_params
 
 
+# --- Abnormality Detection Modules ---
+
+def detect_gallop_sounds(audio_filtered: np.ndarray, s2_peaks: np.ndarray, 
+                         sample_rate: int, params: Dict) -> Dict[str, List]:
+    """
+    Detects S3 (ventricular gallop) and S4 (atrial gallop) sounds.
+    S3 occurs ~0.12-0.18s after S2; S4 occurs just before S1 (but we detect via rhythm).
+    """
+    s3_candidates = []
+    s3_confidences = []
+    s3_window_start = params.get('s3_window_start', 0.12)  # seconds after S2
+    s3_window_end = params.get('s3_window_end', 0.20)
+    
+    if len(s2_peaks) == 0:
+        return {
+            's3_times': [],
+            's3_confidences': [],
+            'has_gallop': False
+        }
+    
+    # Bandpass filter for low-frequency gallop sounds (20-60 Hz)
+    nyquist = sample_rate / 2
+    gallop_low = params.get('gallop_band_low', 20)
+    gallop_high = params.get('gallop_band_high', 60)
+    low_band = gallop_low / nyquist
+    high_band = gallop_high / nyquist
+    
+    if high_band < 1.0 and low_band < high_band:
+        b, a = butter(2, [low_band, high_band], btype='band')
+        gallop_band_signal = filtfilt(b, a, audio_filtered)
+    else:
+        gallop_band_signal = audio_filtered
+    
+    # Look for S3 after each S2
+    for s2_idx in s2_peaks:
+        search_start = s2_idx + int(s3_window_start * sample_rate)
+        search_end = min(len(gallop_band_signal), s2_idx + int(s3_window_end * sample_rate))
+        
+        if search_end > search_start:
+            # Find peaks in this window
+            window_segment = np.abs(gallop_band_signal[search_start:search_end])
+            if len(window_segment) < 3:
+                continue
+            prominence = np.quantile(window_segment, 0.75)
+            
+            local_peaks, properties = find_peaks(
+                window_segment, 
+                prominence=prominence,
+                distance=max(1, int(0.02 * sample_rate))  # Min 20ms between peaks
+            )
+            
+            if len(local_peaks) > 0 and len(properties['prominences']) > 0:
+                # Take the strongest peak
+                strongest_idx = local_peaks[np.argmax(properties['prominences'])]
+                absolute_idx = search_start + strongest_idx
+                
+                # Confidence based on prominence relative to background
+                background_noise = np.median(window_segment) + 1e-9
+                confidence = properties['prominences'].max() / background_noise
+                
+                # Threshold tuned for S3 detection
+                if confidence > params.get('s3_confidence_threshold', 3.0):
+                    s3_candidates.append(absolute_idx / sample_rate)
+                    s3_confidences.append(float(confidence))
+                    logging.debug(f"S3 detected at {absolute_idx/sample_rate:.3f}s (confidence: {confidence:.2f})")
+    
+    has_gallop = len(s3_candidates) > 0
+    if has_gallop:
+        logging.info(f"Gallop detection: Found {len(s3_candidates)} potential S3 sounds")
+    
+    return {
+        's3_times': s3_candidates,
+        's3_confidences': s3_confidences,
+        'has_gallop': has_gallop
+    }
+
+
+def detect_murmurs(audio_filtered: np.ndarray, s1_peaks: np.ndarray, 
+                   s2_peaks: np.ndarray, sample_rate: int, params: Dict) -> List[Dict]:
+    """
+    Detects murmurs based on high-frequency energy between S1 and S2 (systolic)
+    or after S2 (diastolic).
+    """
+    murmurs = []
+    
+    if len(s1_peaks) < 2 or len(s2_peaks) < 2:
+        return murmurs
+    
+    # High-pass filter for murmur frequencies (80-400 Hz)
+    nyquist = sample_rate / 2
+    murmur_low = params.get('murmur_band_low', 80) / nyquist
+    murmur_high = min(params.get('murmur_band_high', 400) / nyquist, 0.95)
+    
+    if murmur_high > murmur_low and murmur_low > 0:
+        b, a = butter(4, [murmur_low, murmur_high], btype='band')
+        murmur_band = filtfilt(b, a, audio_filtered)
+    else:
+        murmur_band = audio_filtered
+    
+    # Calculate instantaneous energy envelope
+    murmur_envelope = np.abs(murmur_band)
+    window_samples = max(1, int(0.01 * sample_rate))
+    murmur_envelope = pd.Series(murmur_envelope).rolling(
+        window=window_samples, min_periods=1, center=True
+    ).mean().values
+    
+    # Check intervals between S1 and S2 (systolic murmurs)
+    for i in range(min(len(s1_peaks), len(s2_peaks)) - 1):
+        s1_idx = s1_peaks[i]
+        # Find the S2 that follows this S1
+        s2_after_s1 = s2_peaks[s2_peaks > s1_idx]
+        if len(s2_after_s1) == 0:
+            continue
+        s2_idx = s2_after_s1[0]
+        
+        # Skip if interval is too short or too long
+        interval = s2_idx - s1_idx
+        if interval < int(0.05 * sample_rate) or interval > int(0.5 * sample_rate):
+            continue
+        
+        # Focus on mid-systole
+        mid_point = int((s1_idx + s2_idx) / 2)
+        window_size = max(1, int(0.05 * sample_rate))  # 50ms window
+        
+        # Ensure indices are within bounds
+        systolic_start = max(0, mid_point - window_size)
+        systolic_end = min(len(murmur_envelope), mid_point + window_size)
+        baseline_start = max(0, s1_idx - window_size)
+        baseline_end = s1_idx
+        
+        if systolic_end <= systolic_start or baseline_end <= baseline_start:
+            continue
+        
+        systolic_energy = np.mean(murmur_envelope[systolic_start:systolic_end])
+        baseline_energy = np.mean(murmur_envelope[baseline_start:baseline_end]) + 1e-9
+        
+        energy_ratio = systolic_energy / baseline_energy
+        
+        murmur_threshold = params.get('murmur_energy_threshold', 2.5)
+        if energy_ratio > murmur_threshold:
+            # Determine severity
+            if energy_ratio < 4:
+                severity = 'mild'
+            elif energy_ratio < 7:
+                severity = 'moderate'
+            else:
+                severity = 'severe'
+            
+            murmurs.append({
+                'type': 'systolic',
+                'time_sec': float(mid_point / sample_rate),
+                'energy_ratio': float(energy_ratio),
+                'severity': severity
+            })
+            logging.debug(f"Systolic murmur detected at {mid_point/sample_rate:.2f}s (ratio: {energy_ratio:.2f})")
+    
+    if len(murmurs) > 0:
+        logging.info(f"Murmur detection: Found {len(murmurs)} potential murmurs")
+    
+    return murmurs
+
+
+def extract_morphological_features(audio_envelope: np.ndarray, peaks: np.ndarray, 
+                                   sample_rate: int, params: Dict) -> pd.DataFrame:
+    """
+    Extracts shape features for each heartbeat: width, skewness, kurtosis, area.
+    Abnormal hearts often have asymmetric or distorted S1/S2 shapes.
+    """
+    features = []
+    window_sec = params.get('morphology_window_sec', 0.1)
+    
+    for peak_idx in peaks:
+        # Extract window around peak
+        half_window = int(window_sec * sample_rate / 2)
+        start_idx = max(0, peak_idx - half_window)
+        end_idx = min(len(audio_envelope), peak_idx + half_window)
+        
+        waveform = audio_envelope[start_idx:end_idx]
+        
+        if len(waveform) < 5:
+            continue
+            
+        # Normalize
+        waveform_max = np.max(waveform) + 1e-9
+        waveform_norm = waveform / waveform_max
+        
+        # Time axis for the window
+        time_axis = np.arange(len(waveform)) / sample_rate
+        
+        # Calculate features
+        width_50 = np.sum(waveform_norm > 0.5) / sample_rate  # Width at 50% amplitude
+        
+        # Skewness measures asymmetry
+        waveform_mean = np.mean(waveform_norm)
+        waveform_std = np.std(waveform_norm) + 1e-9
+        skewness = np.mean((waveform_norm - waveform_mean)**3) / (waveform_std**3)
+        
+        # Kurtosis measures "tailedness"
+        kurtosis = np.mean((waveform_norm - waveform_mean)**4) / (waveform_std**4)
+        
+        # Area under curve (normalized by width)
+        area = np.trapz(waveform_norm, time_axis) / (window_sec + 1e-9)
+        
+        # Rise time (10% to 90%)
+        rise_start = np.where(waveform_norm > 0.1)[0]
+        rise_end = np.where(waveform_norm > 0.9)[0]
+        if len(rise_start) > 0 and len(rise_end) > 0:
+            rise_time = (rise_end[0] - rise_start[0]) / sample_rate
+        else:
+            rise_time = 0.0
+        
+        features.append({
+            'time_sec': float(peak_idx / sample_rate),
+            'width_50': float(width_50),
+            'skewness': float(skewness),
+            'kurtosis': float(kurtosis),
+            'area': float(area),
+            'rise_time': float(rise_time)
+        })
+    
+    return pd.DataFrame(features)
+
+
+def detect_premature_beats(rr_intervals: np.ndarray, params: Dict) -> List[Dict]:
+    """
+    Detects premature beats based on R-R interval analysis.
+    A premature beat has a shorter-than-expected R-R interval.
+    """
+    premature_beats = []
+    
+    if len(rr_intervals) < 3:
+        return premature_beats
+    
+    median_rr = np.median(rr_intervals)
+    threshold = params.get('premature_beat_threshold', 0.75)  # RR < 75% of expected
+    
+    for i, rr in enumerate(rr_intervals):
+        if rr < median_rr * threshold:
+            premature_beats.append({
+                'index': i,
+                'rr_interval': float(rr),
+                'expected_rr': float(median_rr),
+                'ratio': float(rr / median_rr)
+            })
+    
+    if len(premature_beats) > 0:
+        logging.debug(f"Detected {len(premature_beats)} premature beats")
+    
+    return premature_beats
+
+
+def detect_missed_beats(rr_intervals: np.ndarray, params: Dict) -> List[Dict]:
+    """
+    Detects missed/dropped beats based on R-R interval analysis.
+    A missed beat results in an R-R interval that's roughly double the expected.
+    """
+    missed_beats = []
+    
+    if len(rr_intervals) < 3:
+        return missed_beats
+    
+    median_rr = np.median(rr_intervals)
+    threshold = params.get('missed_beat_threshold', 1.75)  # RR > 175% of expected
+    
+    for i, rr in enumerate(rr_intervals):
+        if rr > median_rr * threshold:
+            # Estimate how many beats were missed
+            estimated_missed = round(rr / median_rr) - 1
+            missed_beats.append({
+                'index': i,
+                'rr_interval': float(rr),
+                'expected_rr': float(median_rr),
+                'ratio': float(rr / median_rr),
+                'estimated_missed_count': int(max(1, estimated_missed))
+            })
+    
+    if len(missed_beats) > 0:
+        logging.debug(f"Detected {len(missed_beats)} potential missed beat events")
+    
+    return missed_beats
+
+
+def analyze_rhythm_anomalies(s1_peaks: np.ndarray, sample_rate: int, params: Dict) -> Dict:
+    """
+    Comprehensive rhythm anomaly detection combining multiple indicators.
+    """
+    if len(s1_peaks) < 3:
+        return {
+            'has_irregular_rhythm': False,
+            'premature_beats': [],
+            'missed_beats': [],
+            'rr_variability': 0.0,
+            'total_anomalies': 0
+        }
+    
+    rr_intervals = np.diff(s1_peaks) / sample_rate
+    
+    # Calculate R-R variability (coefficient of variation)
+    rr_mean = np.mean(rr_intervals)
+    rr_std = np.std(rr_intervals)
+    rr_variability = rr_std / (rr_mean + 1e-9)
+    
+    # Threshold for irregular rhythm
+    variability_threshold = params.get('rr_variability_threshold', 0.15)
+    has_irregular_rhythm = rr_variability > variability_threshold
+    
+    # Detect specific anomalies
+    premature_beats = detect_premature_beats(rr_intervals, params)
+    missed_beats = detect_missed_beats(rr_intervals, params)
+    
+    total_anomalies = len(premature_beats) + len(missed_beats)
+    
+    if has_irregular_rhythm:
+        logging.info(f"Rhythm analysis: Irregular rhythm detected (variability: {rr_variability:.3f})")
+    
+    return {
+        'has_irregular_rhythm': has_irregular_rhythm,
+        'premature_beats': premature_beats,
+        'missed_beats': missed_beats,
+        'rr_variability': float(rr_variability),
+        'total_anomalies': total_anomalies
+    }
+
+
+def run_abnormality_detection(audio_filtered: np.ndarray, audio_envelope: np.ndarray,
+                               s1_peaks: np.ndarray, analysis_data: Dict,
+                               sample_rate: int, params: Dict) -> Dict:
+    """
+    Master function to run all abnormality detection modules.
+    Returns a comprehensive dictionary of detected abnormalities.
+    """
+    logging.info("--- Running Abnormality Detection ---")
+    
+    # Extract S2 peaks from debug info
+    debug_info = analysis_data.get('beat_debug_info', {})
+    s2_peaks = np.array([idx for idx, reason in debug_info.items() 
+                         if 'S2' in str(reason)], dtype=np.int64)
+    s2_peaks = np.sort(s2_peaks)
+    
+    abnormalities = {}
+    
+    # Gallop Detection
+    if params.get('enable_gallop_detection', True):
+        try:
+            gallop_results = detect_gallop_sounds(audio_filtered, s2_peaks, sample_rate, params)
+            abnormalities['gallop'] = gallop_results
+        except Exception as e:
+            logging.warning(f"Gallop detection failed: {e}")
+            abnormalities['gallop'] = {'has_gallop': False, 's3_times': [], 's3_confidences': []}
+    
+    # Murmur Detection
+    if params.get('enable_murmur_detection', True):
+        try:
+            murmurs = detect_murmurs(audio_filtered, s1_peaks, s2_peaks, sample_rate, params)
+            abnormalities['murmurs'] = murmurs
+        except Exception as e:
+            logging.warning(f"Murmur detection failed: {e}")
+            abnormalities['murmurs'] = []
+    
+    # Morphological Analysis
+    if params.get('enable_morphology_analysis', True):
+        try:
+            morph_features = extract_morphological_features(audio_envelope, s1_peaks, sample_rate, params)
+            abnormalities['morphology'] = morph_features
+        except Exception as e:
+            logging.warning(f"Morphological analysis failed: {e}")
+            abnormalities['morphology'] = pd.DataFrame()
+    
+    # Rhythm Anomaly Detection
+    if params.get('enable_rhythm_anomaly_detection', True):
+        try:
+            arrhythmia = analyze_rhythm_anomalies(s1_peaks, sample_rate, params)
+            abnormalities['arrhythmia'] = arrhythmia
+        except Exception as e:
+            logging.warning(f"Rhythm anomaly detection failed: {e}")
+            abnormalities['arrhythmia'] = {'has_irregular_rhythm': False, 'premature_beats': [], 'missed_beats': []}
+    
+    # Summary
+    abnormalities['summary'] = {
+        'gallop_detected': abnormalities.get('gallop', {}).get('has_gallop', False),
+        'murmur_count': len(abnormalities.get('murmurs', [])),
+        'irregular_rhythm': abnormalities.get('arrhythmia', {}).get('has_irregular_rhythm', False),
+        'total_rhythm_anomalies': abnormalities.get('arrhythmia', {}).get('total_anomalies', 0)
+    }
+    
+    logging.info(f"Abnormality detection complete: "
+                 f"Gallop={'Yes' if abnormalities['summary']['gallop_detected'] else 'No'}, "
+                 f"Murmurs={abnormalities['summary']['murmur_count']}, "
+                 f"Irregular={'Yes' if abnormalities['summary']['irregular_rhythm'] else 'No'}")
+    
+    return abnormalities
+
+
 # --- Enums and Global Helpers ---
 class PeakType(Enum):
     """Enumeration for classifying heartbeat peaks."""
@@ -697,7 +1090,8 @@ class Plotter:
         self._add_peak_traces(all_raw_peaks, analysis_data.get('beat_debug_info', {}), audio_envelope)
         self._add_bpm_hrv_traces(final_metrics.get('smoothed_bpm'), analysis_data, final_metrics.get('windowed_hrv_df'))
         self._add_slope_traces(final_metrics.get('major_inclines'), final_metrics.get('major_declines'), final_metrics.get('peak_recovery_stats'), final_metrics.get('peak_exertion_stats'))
-        self._add_annotations_and_summary(final_metrics.get('smoothed_bpm'), final_metrics.get('hrv_summary'), final_metrics.get('hrr_stats'), final_metrics.get('peak_recovery_stats'))
+        self._add_abnormality_traces(audio_envelope, final_metrics.get('abnormalities'))
+        self._add_annotations_and_summary(final_metrics.get('smoothed_bpm'), final_metrics.get('hrv_summary'), final_metrics.get('hrr_stats'), final_metrics.get('peak_recovery_stats'), final_metrics.get('abnormalities'))
 
         self._configure_layout()
 
@@ -945,7 +1339,7 @@ class Plotter:
             self.fig.add_trace(go.Scatter(x=hrv_times_dt, y=windowed_hrv_df['sdnn'], name="SDNN", line=dict(color='magenta', width=2), visible='legendonly'), secondary_y=True)
 
 
-    def _add_annotations_and_summary(self, smoothed_bpm, hrv_summary, hrr_stats, peak_recovery_stats):
+    def _add_annotations_and_summary(self, smoothed_bpm, hrv_summary, hrr_stats, peak_recovery_stats, abnormalities=None):
         """Adds min/max BPM annotations and the main summary box."""
         if smoothed_bpm is not None and not smoothed_bpm.empty:
             max_bpm_val = smoothed_bpm.max()
@@ -977,6 +1371,21 @@ class Plotter:
                 annotation_text += f"Avg. Corrected RMSSD: {hrv_summary['avg_rmssdc']:.2f}<br>"
             if hrv_summary.get('avg_sdnn') is not None:
                 annotation_text += f"Avg. Windowed SDNN: {hrv_summary['avg_sdnn']:.2f} ms"
+            
+            # Add abnormality summary if available
+            if abnormalities and abnormalities.get('summary'):
+                summary = abnormalities['summary']
+                annotation_text += "<br><br><b>Abnormality Detection</b><br>"
+                if summary.get('gallop_detected'):
+                    annotation_text += "⚠️ <b>Gallop Detected</b><br>"
+                if summary.get('murmur_count', 0) > 0:
+                    annotation_text += f"⚠️ <b>{summary['murmur_count']} Murmur(s)</b><br>"
+                if summary.get('irregular_rhythm'):
+                    annotation_text += "⚠️ <b>Irregular Rhythm</b><br>"
+                if summary.get('total_rhythm_anomalies', 0) > 0:
+                    annotation_text += f"Rhythm Anomalies: {summary['total_rhythm_anomalies']}"
+                elif not summary.get('gallop_detected') and summary.get('murmur_count', 0) == 0 and not summary.get('irregular_rhythm'):
+                    annotation_text += "✅ No abnormalities detected"
 
             self.fig.add_annotation(text=annotation_text, align='left', showarrow=False,
                                     xref='paper', yref='paper', x=0.02, y=0.98,
@@ -1031,6 +1440,146 @@ class Plotter:
                 visible='legendonly', yaxis='y2',
                 hovertemplate="<b>Peak Exertion Slope</b><br>Slope: +%{customdata[0]:.2f} BPM/sec<br>Duration: %{customdata[1]:.1f}s<extra></extra>",
                 customdata=np.array([[stats['slope_bpm_per_sec'], stats['duration_sec']]]*2)))
+
+    def _add_abnormality_traces(self, audio_envelope: np.ndarray, abnormalities: Optional[Dict]):
+        """Adds markers for detected abnormalities: gallops, murmurs, and rhythm anomalies."""
+        if abnormalities is None:
+            return
+        
+        epoch = datetime.datetime.fromtimestamp(0)
+        
+        # --- Gallop Sounds (S3) ---
+        gallop = abnormalities.get('gallop', {})
+        s3_times = gallop.get('s3_times', [])
+        s3_confidences = gallop.get('s3_confidences', [])
+        
+        if s3_times:
+            s3_times_dt = pd.to_datetime([epoch + datetime.timedelta(seconds=t) for t in s3_times])
+            # Get envelope values at S3 times
+            s3_indices = [int(t * self.sample_rate) for t in s3_times]
+            s3_indices = [min(idx, len(audio_envelope) - 1) for idx in s3_indices]
+            s3_amplitudes = audio_envelope[s3_indices]
+            
+            hover_texts = [f"<b>S3 Gallop</b><br>Time: {t:.3f}s<br>Confidence: {c:.2f}" 
+                          for t, c in zip(s3_times, s3_confidences)]
+            
+            self.fig.add_trace(go.Scatter(
+                x=s3_times_dt,
+                y=s3_amplitudes,
+                mode='markers',
+                name='S3 Gallop ⚠️',
+                marker=dict(color='#ff00ff', size=12, symbol='star', line=dict(width=2, color='white')),
+                customdata=hover_texts,
+                hovertemplate="%{customdata}<extra></extra>"),
+                secondary_y=False)
+        
+        # --- Murmurs ---
+        murmurs = abnormalities.get('murmurs', [])
+        if murmurs:
+            murmur_times = [m['time_sec'] for m in murmurs]
+            murmur_times_dt = pd.to_datetime([epoch + datetime.timedelta(seconds=t) for t in murmur_times])
+            
+            # Get envelope values at murmur times
+            murmur_indices = [int(t * self.sample_rate) for t in murmur_times]
+            murmur_indices = [min(idx, len(audio_envelope) - 1) for idx in murmur_indices]
+            murmur_amplitudes = audio_envelope[murmur_indices]
+            
+            # Color by severity
+            colors = []
+            for m in murmurs:
+                if m['severity'] == 'mild':
+                    colors.append('#ffff00')  # Yellow
+                elif m['severity'] == 'moderate':
+                    colors.append('#ffa500')  # Orange
+                else:
+                    colors.append('#ff0000')  # Red
+            
+            hover_texts = [f"<b>{m['type'].capitalize()} Murmur</b><br>"
+                          f"Time: {m['time_sec']:.2f}s<br>"
+                          f"Severity: {m['severity'].capitalize()}<br>"
+                          f"Energy Ratio: {m['energy_ratio']:.2f}" 
+                          for m in murmurs]
+            
+            self.fig.add_trace(go.Scatter(
+                x=murmur_times_dt,
+                y=murmur_amplitudes,
+                mode='markers',
+                name='Murmurs ⚠️',
+                marker=dict(color=colors, size=10, symbol='triangle-up', line=dict(width=1, color='white')),
+                customdata=hover_texts,
+                hovertemplate="%{customdata}<extra></extra>"),
+                secondary_y=False)
+        
+        # --- Rhythm Anomalies (Premature/Missed Beats) ---
+        arrhythmia = abnormalities.get('arrhythmia', {})
+        
+        # We need S1 peaks to locate rhythm anomalies on the plot
+        # Get them from morphology data which has time_sec
+        morph = abnormalities.get('morphology')
+        if morph is not None and isinstance(morph, pd.DataFrame) and not morph.empty:
+            beat_times = morph['time_sec'].values
+            
+            # Premature beats
+            premature_beats = arrhythmia.get('premature_beats', [])
+            if premature_beats:
+                premature_indices = [pb['index'] for pb in premature_beats if pb['index'] < len(beat_times)]
+                if premature_indices:
+                    premature_times = [beat_times[i] for i in premature_indices]
+                    premature_times_dt = pd.to_datetime([epoch + datetime.timedelta(seconds=t) for t in premature_times])
+                    
+                    # Get envelope values
+                    premature_sample_indices = [int(t * self.sample_rate) for t in premature_times]
+                    premature_sample_indices = [min(idx, len(audio_envelope) - 1) for idx in premature_sample_indices]
+                    premature_amplitudes = audio_envelope[premature_sample_indices]
+                    
+                    hover_texts = [f"<b>Premature Beat</b><br>"
+                                  f"Time: {beat_times[pb['index']]:.2f}s<br>"
+                                  f"R-R: {pb['rr_interval']:.3f}s<br>"
+                                  f"Expected: {pb['expected_rr']:.3f}s<br>"
+                                  f"Ratio: {pb['ratio']:.2f}" 
+                                  for pb in premature_beats if pb['index'] < len(beat_times)]
+                    
+                    self.fig.add_trace(go.Scatter(
+                        x=premature_times_dt,
+                        y=premature_amplitudes,
+                        mode='markers',
+                        name='Premature Beats',
+                        marker=dict(color='#00ffff', size=14, symbol='diamond-open', line=dict(width=3, color='#00ffff')),
+                        customdata=hover_texts,
+                        hovertemplate="%{customdata}<extra></extra>",
+                        visible='legendonly'),
+                        secondary_y=False)
+            
+            # Missed beats - mark the beat BEFORE the gap
+            missed_beats = arrhythmia.get('missed_beats', [])
+            if missed_beats:
+                missed_indices = [mb['index'] for mb in missed_beats if mb['index'] < len(beat_times)]
+                if missed_indices:
+                    missed_times = [beat_times[i] for i in missed_indices]
+                    missed_times_dt = pd.to_datetime([epoch + datetime.timedelta(seconds=t) for t in missed_times])
+                    
+                    # Get envelope values
+                    missed_sample_indices = [int(t * self.sample_rate) for t in missed_times]
+                    missed_sample_indices = [min(idx, len(audio_envelope) - 1) for idx in missed_sample_indices]
+                    missed_amplitudes = audio_envelope[missed_sample_indices]
+                    
+                    hover_texts = [f"<b>Missed Beat(s)</b><br>"
+                                  f"Time: {beat_times[mb['index']]:.2f}s<br>"
+                                  f"R-R: {mb['rr_interval']:.3f}s<br>"
+                                  f"Expected: {mb['expected_rr']:.3f}s<br>"
+                                  f"Est. Missed: {mb['estimated_missed_count']}" 
+                                  for mb in missed_beats if mb['index'] < len(beat_times)]
+                    
+                    self.fig.add_trace(go.Scatter(
+                        x=missed_times_dt,
+                        y=missed_amplitudes,
+                        mode='markers',
+                        name='Missed Beats',
+                        marker=dict(color='#ff6b6b', size=14, symbol='x-open', line=dict(width=3, color='#ff6b6b')),
+                        customdata=hover_texts,
+                        hovertemplate="%{customdata}<extra></extra>",
+                        visible='legendonly'),
+                        secondary_y=False)
 
 class ReportGenerator:
     """Handles the creation of text-based analysis reports."""
@@ -1157,6 +1706,137 @@ class ReportGenerator:
                     log_file.write(f"- **{name}**: `{value:.1f}`\n")
 
             log_file.write("\n\n")
+
+    def save_abnormality_report(self, abnormalities: Dict):
+        """Save a focused report on detected abnormalities."""
+        output_path = os.path.join(self.output_directory, f"{self.base_name}_Abnormality_Report.md")
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(f"# Abnormality Detection Report\n")
+            f.write(f"**File:** {os.path.basename(self.file_name)}\n")
+            f.write(f"*Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
+            
+            # Summary Box
+            f.write("## Quick Summary\n\n")
+            summary = abnormalities.get('summary', {})
+            f.write("| Finding | Status |\n|:---|:---|\n")
+            f.write(f"| **Gallop Sounds (S3/S4)** | {'⚠️ DETECTED' if summary.get('gallop_detected') else '✅ None detected'} |\n")
+            f.write(f"| **Heart Murmurs** | {'⚠️ ' + str(summary.get('murmur_count', 0)) + ' detected' if summary.get('murmur_count', 0) > 0 else '✅ None detected'} |\n")
+            f.write(f"| **Irregular Rhythm** | {'⚠️ YES' if summary.get('irregular_rhythm') else '✅ Regular'} |\n")
+            f.write(f"| **Rhythm Anomalies** | {summary.get('total_rhythm_anomalies', 0)} events |\n\n")
+            
+            # Gallops Section
+            f.write("## Gallop Sounds (S3/S4)\n\n")
+            gallop = abnormalities.get('gallop', {})
+            if gallop.get('has_gallop'):
+                f.write(f"**⚠️ S3 GALLOP DETECTED**\n\n")
+                s3_times = gallop.get('s3_times', [])
+                s3_confidences = gallop.get('s3_confidences', [])
+                if s3_times:
+                    f.write("| Time (s) | Confidence |\n|:---:|:---:|\n")
+                    for t, c in zip(s3_times, s3_confidences):
+                        f.write(f"| {t:.3f} | {c:.2f} |\n")
+                f.write("\n")
+                f.write("*S3 gallops may indicate heart failure or volume overload.*\n\n")
+            else:
+                f.write("No gallop sounds detected.\n\n")
+            
+            # Murmurs Section
+            f.write("## Heart Murmurs\n\n")
+            murmurs = abnormalities.get('murmurs', [])
+            if murmurs:
+                f.write(f"**⚠️ {len(murmurs)} murmur(s) detected:**\n\n")
+                f.write("| Time (s) | Type | Severity | Energy Ratio |\n|:---:|:---|:---|:---:|\n")
+                for murmur in murmurs:
+                    severity_emoji = '🟡' if murmur['severity'] == 'mild' else '🟠' if murmur['severity'] == 'moderate' else '🔴'
+                    f.write(f"| {murmur['time_sec']:.2f} | {murmur['type'].capitalize()} | {severity_emoji} {murmur['severity'].capitalize()} | {murmur['energy_ratio']:.2f} |\n")
+                f.write("\n")
+                f.write("*Murmurs may indicate valve abnormalities or structural heart issues.*\n\n")
+            else:
+                f.write("No significant murmurs detected.\n\n")
+            
+            # Arrhythmia Section
+            f.write("## Rhythm Analysis\n\n")
+            arrhythmia = abnormalities.get('arrhythmia', {})
+            f.write(f"- **Irregular rhythm:** {'⚠️ YES' if arrhythmia.get('has_irregular_rhythm') else '✅ NO'}\n")
+            f.write(f"- **R-R Variability:** {arrhythmia.get('rr_variability', 0):.3f}\n")
+            
+            premature = arrhythmia.get('premature_beats', [])
+            missed = arrhythmia.get('missed_beats', [])
+            
+            if premature:
+                f.write(f"\n### Premature Beats ({len(premature)} detected)\n\n")
+                f.write("| Beat Index | R-R Interval (s) | Expected (s) | Ratio |\n|:---:|:---:|:---:|:---:|\n")
+                for pb in premature[:10]:  # Show first 10
+                    f.write(f"| {pb['index']} | {pb['rr_interval']:.3f} | {pb['expected_rr']:.3f} | {pb['ratio']:.2f} |\n")
+                if len(premature) > 10:
+                    f.write(f"\n*...and {len(premature) - 10} more*\n")
+            
+            if missed:
+                f.write(f"\n### Missed/Dropped Beats ({len(missed)} detected)\n\n")
+                f.write("| Beat Index | R-R Interval (s) | Expected (s) | Est. Missed |\n|:---:|:---:|:---:|:---:|\n")
+                for mb in missed[:10]:  # Show first 10
+                    f.write(f"| {mb['index']} | {mb['rr_interval']:.3f} | {mb['expected_rr']:.3f} | {mb['estimated_missed_count']} |\n")
+                if len(missed) > 10:
+                    f.write(f"\n*...and {len(missed) - 10} more*\n")
+            
+            f.write("\n")
+            
+            # Morphology Section
+            f.write("## Morphological Features\n\n")
+            morph = abnormalities.get('morphology')
+            if morph is not None and isinstance(morph, pd.DataFrame) and not morph.empty:
+                f.write("| Metric | Mean | Std Dev | Min | Max |\n|:---|:---:|:---:|:---:|:---:|\n")
+                f.write(f"| **Width at 50%** | {morph['width_50'].mean():.4f}s | {morph['width_50'].std():.4f} | {morph['width_50'].min():.4f} | {morph['width_50'].max():.4f} |\n")
+                f.write(f"| **Skewness** | {morph['skewness'].mean():.3f} | {morph['skewness'].std():.3f} | {morph['skewness'].min():.3f} | {morph['skewness'].max():.3f} |\n")
+                f.write(f"| **Kurtosis** | {morph['kurtosis'].mean():.3f} | {morph['kurtosis'].std():.3f} | {morph['kurtosis'].min():.3f} | {morph['kurtosis'].max():.3f} |\n")
+                f.write(f"| **Area** | {morph['area'].mean():.3f} | {morph['area'].std():.3f} | {morph['area'].min():.3f} | {morph['area'].max():.3f} |\n")
+                f.write(f"| **Rise Time** | {morph['rise_time'].mean():.4f}s | {morph['rise_time'].std():.4f} | {morph['rise_time'].min():.4f} | {morph['rise_time'].max():.4f} |\n")
+                f.write("\n")
+                f.write("*Skewness: negative=left-skewed, positive=right-skewed. Kurtosis: higher values indicate more peaked waveforms.*\n")
+            else:
+                f.write("No morphological data available.\n")
+            
+            f.write("\n---\n")
+            f.write("*Note: This report is for informational purposes only and should not be used for medical diagnosis.*\n")
+        
+        logging.info(f"Abnormality report saved to {output_path}")
+    
+    def save_abnormalities_json(self, abnormalities: Dict):
+        """Save abnormality data to JSON for programmatic access."""
+        output_path = os.path.join(self.output_directory, f"{self.base_name}_Abnormalities.json")
+        
+        # Prepare JSON-serializable data
+        json_data = {
+            'summary': abnormalities.get('summary', {}),
+            'gallop': abnormalities.get('gallop', {}),
+            'murmurs': abnormalities.get('murmurs', []),
+            'arrhythmia': {
+                'has_irregular_rhythm': abnormalities.get('arrhythmia', {}).get('has_irregular_rhythm', False),
+                'rr_variability': abnormalities.get('arrhythmia', {}).get('rr_variability', 0),
+                'premature_beats': abnormalities.get('arrhythmia', {}).get('premature_beats', []),
+                'missed_beats': abnormalities.get('arrhythmia', {}).get('missed_beats', [])
+            }
+        }
+        
+        # Add morphology stats if available
+        morph = abnormalities.get('morphology')
+        if morph is not None and isinstance(morph, pd.DataFrame) and not morph.empty:
+            json_data['morphology_stats'] = {
+                'width_50_mean': float(morph['width_50'].mean()),
+                'width_50_std': float(morph['width_50'].std()),
+                'skewness_mean': float(morph['skewness'].mean()),
+                'skewness_std': float(morph['skewness'].std()),
+                'kurtosis_mean': float(morph['kurtosis'].mean()),
+                'kurtosis_std': float(morph['kurtosis'].std())
+            }
+        
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=4)
+            logging.info(f"Abnormality JSON saved to {output_path}")
+        except Exception as e:
+            logging.error(f"Failed to save abnormality JSON: {e}")
 
     def _write_summary_header(self, f):
         f.write(f"# Analysis Report for: {os.path.basename(self.file_name)}\n")
@@ -2071,6 +2751,44 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
 
     logging.info("--- STAGE 6: Calculating Metrics and Generating Outputs ---")
     final_metrics = _calculate_final_metrics(final_peaks, sample_rate, params)
+    
+    # === STAGE 7: Abnormality Detection ===
+    if params.get('enable_abnormality_detection', True):
+        logging.info("--- STAGE 7: Running Abnormality Detection ---")
+        # Get filtered audio for abnormality analysis
+        # Re-read and filter the audio (we need the filtered signal, not envelope)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            temp_sr, temp_audio = wavfile.read(wav_file_path)
+        if temp_audio.ndim > 1:
+            temp_audio = np.mean(temp_audio, axis=1)
+        
+        # Apply same downsampling
+        downsample_factor = params['downsample_factor']
+        max_safe_downsample = int((temp_sr / 300) - 1)  # 150Hz * 2
+        if downsample_factor > max_safe_downsample:
+            downsample_factor = max(1, max_safe_downsample)
+        
+        if downsample_factor > 1:
+            temp_audio = temp_audio[::downsample_factor]
+            temp_sr = temp_sr // downsample_factor
+        
+        # Apply bandpass filter
+        nyquist = 0.5 * temp_sr
+        low, high = 20 / nyquist, min(150 / nyquist, 0.95)
+        if high > low:
+            b, a = butter(2, [low, high], btype='band')
+            audio_filtered = filtfilt(b, a, temp_audio)
+        else:
+            audio_filtered = temp_audio
+        
+        # Run abnormality detection
+        abnormalities = run_abnormality_detection(
+            audio_filtered, audio_envelope, final_peaks, analysis_data, sample_rate, params
+        )
+        final_metrics['abnormalities'] = abnormalities
+    else:
+        final_metrics['abnormalities'] = None
 
     plotter = Plotter(original_file_path, params, sample_rate, output_directory)
     plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics)
@@ -2079,6 +2797,11 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     reporter.save_analysis_summary(final_metrics)
     reporter.create_chronological_log(audio_envelope, sample_rate, all_raw_peaks, analysis_data, final_metrics)
     reporter.save_analysis_settings(start_bpm_hint)
+    
+    # Save abnormality reports if detection was run
+    if final_metrics.get('abnormalities'):
+        reporter.save_abnormality_report(final_metrics['abnormalities'])
+        reporter.save_abnormalities_json(final_metrics['abnormalities'])
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
