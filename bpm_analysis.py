@@ -25,7 +25,6 @@ import csv
 
 # --- Enums and Global Helpers ---
 class PeakType(Enum):
-    """Enumeration for classifying heartbeat peaks."""
     S1_PAIRED = "S1 (Paired)"
     S2_PAIRED = "S2 (Paired)"
     LONE_S1_VALIDATED = "Lone S1"
@@ -35,16 +34,19 @@ class PeakType(Enum):
     S1_CORRECTED_GAP = "S1 (Paired - Corrected from Gap)"
     S2_CORRECTED_GAP = "S2 (Paired - Corrected from Gap)"
     S2_CORRECTED_CONFLICT = "S2 (Paired - Corrected from Conflict)"
+    PVC_PREMATURE = "PVC (Premature)"  # <-- NEW
 
     @classmethod
     def is_s1(cls, peak_type_str: str) -> bool:
-        """Check if a string corresponds to any S1 type."""
         return peak_type_str.strip().startswith("S1") or peak_type_str.strip().startswith("Lone S1")
 
     @classmethod
     def is_s2(cls, peak_type_str: str) -> bool:
-        """Check if a string corresponds to any S2 type."""
         return peak_type_str.strip().startswith("S2")
+    
+    @classmethod
+    def is_pvc(cls, peak_type_str: str) -> bool:  # <-- NEW
+        return "PVC" in peak_type_str
 
 
 # --- Setup Professional Logging ---
@@ -129,7 +131,7 @@ class PeakClassifier:
             self._update_long_term_bpm()
 
         return self._finalize_results()
-
+    
     def _kickstart_check(self):
         """Specialized recovery function to kick-start the algorithm if it gets stuck."""
         # Calculate recent rhythm stability as a ratio
@@ -598,6 +600,9 @@ class Plotter:
         s1_peaks = {'indices': [], 'customdata': []}
         s2_peaks = {'indices': [], 'customdata': []}
         noise_peaks = {'indices': [], 'customdata': []}
+        
+        # --- INSERT PVC PEAKS DICTIONARY HERE ---
+        pvc_peaks = {'indices': [], 'customdata': []}  # Add this line
 
         classified_indices = set()
 
@@ -622,13 +627,11 @@ class Plotter:
 
                 if "PAIRING" in tag:
                     formatted_lines = self.format_pairing_details_list(value)
-                elif "LONE_S1_REJECT_REASON" in tag:
-                    formatted_lines = self.format_lone_s1_details_list(value)
-                elif "LONE_S1_VALIDATE_REASON" in tag:
+                elif "LONE_S1" in tag:
                     formatted_lines = self.format_lone_s1_details_list(value)
                 elif "ORIGINAL_REASON" in tag:
                     formatted_lines = ["- Original Classification:",
-                                       f"&nbsp;&nbsp;&nbsp;&nbsp;- {value.replace('`', '')}"]
+                                    f"&nbsp;&nbsp;&nbsp;&nbsp;- {value.replace('`', '')}"]
 
                 if formatted_lines:
                     # Convert the list of strings to a single HTML block
@@ -639,18 +642,9 @@ class Plotter:
             # Join all parts into a single HTML string for the tooltip
             full_hover_text = "<br>".join(hover_text_parts)
             classified_indices.add(peak_idx)
+            
             # Parse reason string to extract peak type
-            if not reason_str:
-                peak_type = "Unknown Peak"
-            else:
-                separators = ['. Pairing Justification: ', '. Rejection: ', '. Original: ', '. ']
-                for sep in separators:
-                    if sep in reason_str:
-                        parts = reason_str.split(sep, 1)
-                        peak_type = parts[0].strip()
-                        break
-                else:
-                    peak_type = reason_str.strip()
+            peak_type = final_peak_type.strip()
 
             # Assign the peak to the correct category for plotting
             if PeakType.is_s1(peak_type):
@@ -659,6 +653,10 @@ class Plotter:
             elif PeakType.is_s2(peak_type):
                 s2_peaks['indices'].append(peak_idx)
                 s2_peaks['customdata'].append(full_hover_text)
+            # --- INSERT PVC CLASSIFICATION HERE ---
+            elif PeakType.is_pvc(peak_type):  # Add this elif block
+                pvc_peaks['indices'].append(peak_idx)
+                pvc_peaks['customdata'].append(full_hover_text)
             else:
                 noise_peaks['indices'].append(peak_idx)
                 noise_peaks['customdata'].append(full_hover_text)
@@ -667,9 +665,9 @@ class Plotter:
         for peak_idx in all_raw_peaks:
             if peak_idx not in classified_indices:
                 hover_text = (f"<b>Type:</b> Unclassified<br>"
-                              f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s<br>"
-                              f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}<br>"
-                              "<b>Details:</b> Peak was not evaluated by the classifier.")
+                            f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s<br>"
+                            f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}<br>"
+                            "<b>Details:</b> Peak was not evaluated by the classifier.")
                 noise_peaks['indices'].append(peak_idx)
                 noise_peaks['customdata'].append(hover_text)
 
@@ -679,30 +677,41 @@ class Plotter:
         # --- Add traces to the plot ---
         if s1_peaks['indices']:
             times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
-                                       (np.array(s1_peaks['indices']) / self.sample_rate)])
+                                    (np.array(s1_peaks['indices']) / self.sample_rate)])
             self.fig.add_trace(
                 go.Scatter(x=times_dt, y=audio_envelope[s1_peaks['indices']], mode='markers', name='S1 Beats',
-                           marker=dict(color='#e36f6f', size=8, symbol='diamond'),
-                           customdata=s1_peaks['customdata'],
-                           hovertemplate=hovertemplate), secondary_y=False)
+                        marker=dict(color='#e36f6f', size=8, symbol='diamond'),
+                        customdata=s1_peaks['customdata'],
+                        hovertemplate=hovertemplate), secondary_y=False)
 
         if s2_peaks['indices']:
             times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
-                                       (np.array(s2_peaks['indices']) / self.sample_rate)])
+                                    (np.array(s2_peaks['indices']) / self.sample_rate)])
             self.fig.add_trace(
                 go.Scatter(x=times_dt, y=audio_envelope[s2_peaks['indices']], mode='markers', name='S2 Beats',
-                           marker=dict(color='orange', symbol='circle', size=6),
-                           customdata=s2_peaks['customdata'],
-                           hovertemplate=hovertemplate), secondary_y=False)
+                        marker=dict(color='orange', symbol='circle', size=6),
+                        customdata=s2_peaks['customdata'],
+                        hovertemplate=hovertemplate), secondary_y=False)
 
         if noise_peaks['indices']:
             times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
-                                       (np.array(noise_peaks['indices']) / self.sample_rate)])
+                                    (np.array(noise_peaks['indices']) / self.sample_rate)])
             self.fig.add_trace(
                 go.Scatter(x=times_dt, y=audio_envelope[noise_peaks['indices']], mode='markers', name='Noise/Rejected',
-                           marker=dict(color='grey', symbol='x', size=6),
-                           customdata=noise_peaks['customdata'],
-                           hovertemplate=hovertemplate), secondary_y=False)
+                        marker=dict(color='grey', symbol='x', size=6),
+                        customdata=noise_peaks['customdata'],
+                        hovertemplate=hovertemplate), secondary_y=False)
+
+        # --- INSERT PVC TRACE HERE ---
+        # Add PVC trace at the end (so they appear on top)
+        if pvc_peaks['indices']:
+            times_dt = pd.to_datetime([datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in
+                                    (np.array(pvc_peaks['indices']) / self.sample_rate)])
+            self.fig.add_trace(
+                go.Scatter(x=times_dt, y=audio_envelope[pvc_peaks['indices']], mode='markers', name='PVC Beats',
+                        marker=dict(color='#ff0000', symbol='star', size=10, line=dict(width=1, color='white')),
+                        customdata=pvc_peaks['customdata'],
+                        hovertemplate=hovertemplate), secondary_y=False)
 
     def _add_bpm_hrv_traces(self, smoothed_bpm, analysis_data, windowed_hrv_df):
         """Adds BPM, BPM trend, and HRV traces."""
@@ -1333,55 +1342,46 @@ def update_long_term_bpm(new_rr_sec: float, current_long_term_bpm: float, params
     new_bpm = current_long_term_bpm + limited_change
     return max(params['min_bpm'], min(new_bpm, params['max_bpm']))
 
-def correct_peaks_by_rhythm(peaks: np.ndarray, audio_envelope: np.ndarray, sample_rate: int, params: Dict) -> np.ndarray:
-    """
-    Refines a list of S1 peaks by removing rhythmically implausible beats.
-    If two beats are too close together, the one with the lower amplitude is discarded.
-    """
-    # If we have too few peaks, correction is unreliable and unnecessary.
-    if len(peaks) < 5:
-        return peaks
+def correct_peaks_by_rhythm(s1_peaks: np.ndarray, audio_envelope: np.ndarray, 
+                           sample_rate: int, params: Dict, debug_info: Dict) -> np.ndarray:
+    """Preserves PVC-marked peaks during rhythm correction."""
+    if len(s1_peaks) < 5:
+        return s1_peaks
 
-    logging.info(f"--- STAGE 4: Correcting peaks based on rhythm. Initial count: {len(peaks)} ---")
+    logging.info(f"--- STAGE 4: Correcting peaks (preserving PVCs). Initial count: {len(s1_peaks)} ---")
 
-    # Calculate the median R-R interval to establish a stable rhythmic expectation.
-    rr_intervals_sec = np.diff(peaks) / sample_rate
+    # Identify PVC peaks to preserve
+    pvc_peaks = {peak for peak in s1_peaks if PeakType.is_pvc(debug_info.get(peak, ""))}
+    if pvc_peaks:
+        logging.info(f"Preserving {len(pvc_peaks)} PVC-marked peaks")
+
+    # Calculate median from non-PVC peaks only
+    non_pvc_peaks = s1_peaks[~np.isin(s1_peaks, list(pvc_peaks))]
+    if len(non_pvc_peaks) < 3:
+        return s1_peaks
+
+    rr_intervals_sec = np.diff(non_pvc_peaks) / sample_rate
     median_rr_sec = np.median(rr_intervals_sec)
-
-    # Any interval shorter than this threshold is considered a conflict.
     correction_threshold_sec = median_rr_sec * params.get("rr_correction_threshold_pct", 0.6)
-    logging.info(f"Median R-R: {median_rr_sec:.3f}s. Correction threshold: {correction_threshold_sec:.3f}s.")
 
-    # We build a new list of corrected peaks. Start with the first peak as a given.
-    corrected_peaks = [peaks[0]]
-
-    # Iterate through the original peaks, starting from the second one.
-    for i in range(1, len(peaks)):
-        current_peak = peaks[i]
-        last_accepted_peak = corrected_peaks[-1]
-        interval_sec = (current_peak - last_accepted_peak) / sample_rate
+    corrected_peaks = [s1_peaks[0]]
+    for i in range(1, len(s1_peaks)):
+        current_peak = s1_peaks[i]
+        last_accepted = corrected_peaks[-1]
+        interval_sec = (current_peak - last_accepted) / sample_rate
+        
+        # Skip PVCs from removal logic
+        if current_peak in pvc_peaks:
+            corrected_peaks.append(current_peak)
+            continue
+            
         if interval_sec < correction_threshold_sec:
-            # CONFLICT: The current peak is too close to the last accepted one.
-            # We must decide which one to keep. The one with the higher amplitude wins.
-            last_peak_amp = audio_envelope[last_accepted_peak]
-            current_peak_amp = audio_envelope[current_peak]
-            if current_peak_amp > last_peak_amp:
-                # The current peak is stronger, so it REPLACES the last accepted peak.
-                logging.info(f"Conflict at {current_peak/sample_rate:.2f}s. Replaced previous peak at {last_accepted_peak/sample_rate:.2f}s due to higher amplitude.")
+            # Normal conflict resolution for non-PVCs
+            if last_accepted in pvc_peaks or audio_envelope[current_peak] > audio_envelope[last_accepted]:
                 corrected_peaks[-1] = current_peak
-            else:
-                # The last accepted peak was stronger, so we DISCARD the current peak.
-                logging.info(f"Conflict at {current_peak/sample_rate:.2f}s. Discarding current peak due to lower amplitude.")
-                pass  # Do nothing, effectively dropping the current_peak
         else:
-            # NO CONFLICT: The interval is plausible. Add the peak to our corrected list.
             corrected_peaks.append(current_peak)
 
-    final_peak_count = len(corrected_peaks)
-    if final_peak_count < len(peaks):
-        logging.info(f"Correction complete. Removed {len(peaks) - final_peak_count} peak(s). Final count: {final_peak_count}")
-    else:
-        logging.info("Correction pass complete. No rhythmic conflicts found.")
     return np.array(corrected_peaks)
 
 
@@ -1730,29 +1730,73 @@ def _run_preliminary_pass(audio_envelope: np.ndarray, sample_rate: int, params: 
 
     return start_bpm, peak_bpm_time_sec, recovery_end_time_sec
 
+def detect_pvc_beats(s1_peaks: np.ndarray, audio_envelope: np.ndarray, sample_rate: int, 
+                     params: Dict, debug_info: Dict) -> Dict:
+    """
+    Detects PVC beats based on rhythm patterns (premature beat + compensatory pause).
+    Returns updated debug_info with PVC labels.
+    """
+    if len(s1_peaks) < 3:
+        return debug_info
+    
+    rr_intervals_sec = np.diff(s1_peaks) / sample_rate
+    rr_median = np.median(rr_intervals_sec)
+    
+    # Thresholds from params (add these to your params dict)
+    premature_threshold = rr_median * params.get('pvc_premature_threshold_pct', 0.75)
+    pause_threshold = rr_median * params.get('pvc_pause_threshold_pct', 1.25)
+    
+    logging.info(f"PVC Detection: Median RR={rr_median:.3f}s, Premature<{premature_threshold:.3f}s, Pause>{pause_threshold:.3f}s")
+    
+    updated_debug_info = debug_info.copy()
+    pvc_count = 0
+    
+    for i in range(len(rr_intervals_sec) - 1):
+        current_rr = rr_intervals_sec[i]
+        next_rr = rr_intervals_sec[i + 1]
+        
+        # PVC pattern: short interval followed by long interval
+        if current_rr < premature_threshold and next_rr > pause_threshold:
+            pvc_peak_idx = s1_peaks[i + 1]
+            
+            # Verify amplitude (PVC S1 typically prominent)
+            prev_s1_amp = audio_envelope[s1_peaks[i]]
+            pvc_s1_amp = audio_envelope[pvc_peak_idx]
+            
+            if pvc_s1_amp >= prev_s1_amp * 0.8:  # Tolerance for amplitude check
+                original_reason = updated_debug_info.get(pvc_peak_idx, "Unknown")
+                updated_debug_info[pvc_peak_idx] = f"{PeakType.PVC_PREMATURE.value}§ORIGINAL_REASON§{original_reason}"
+                pvc_count += 1
+                logging.info(f"PVC detected at {pvc_peak_idx/sample_rate:.2f}s (RR={current_rr:.3f}s, pause={next_rr:.3f}s)")
+    
+    logging.info(f"PVC Detection complete. Found {pvc_count} PVC(s).")
+    return updated_debug_info
 
 def _refine_and_correct_peaks(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray,
                               analysis_data: Dict, audio_envelope: np.ndarray,
                               sample_rate: int, params: Dict) -> Tuple[np.ndarray, Dict]:
     """
-    Applies rhythmic and iterative contextual correction passes to refine S1 peaks.
+    Applies PVC detection, then rhythmic correction, then iterative refinement.
     """
-    logging.info("--- STAGES 4 & 5: Refining peaks with rhythmic and contextual correction ---")
+    logging.info("--- STAGES 4, 5 & 6: Refining peaks with PVC detection and correction ---")
 
-    # STAGE 4: Simple rhythmic correction (e.g., remove beats that are too close)
-    s1_peaks_rhythm_corrected = correct_peaks_by_rhythm(s1_peaks, audio_envelope, sample_rate, params)
-
-    # Prepare data for the iterative pass
+    # STAGE 4: PVC Detection (NEW - runs before any correction)
+    current_debug_info = detect_pvc_beats(
+        s1_peaks, audio_envelope, sample_rate, params, 
+        analysis_data["beat_debug_info"]
+    )
+    
+    # STAGE 5: Rhythm correction (preserves PVCs)
+    s1_peaks_rhythm_corrected = correct_peaks_by_rhythm(
+        s1_peaks, audio_envelope, sample_rate, params, current_debug_info
+    )
+    
+    # STAGE 6: Iterative contextual correction
     dynamic_noise_floor = analysis_data['dynamic_noise_floor_series']
-    current_debug_info = analysis_data["beat_debug_info"].copy()
     final_peaks = s1_peaks_rhythm_corrected
 
-    # iterative correction loop
-    max_iterations = 5  # Safeguard against infinite loops
-    for i in range(max_iterations):
-        logging.info(f"Correction Pass Iteration {i + 1}...")
-
-        new_peaks, new_debug_info, corrections_made = _fix_rhythmic_discontinuities(
+    for i in range(5):  # max_iterations
+        new_peaks, new_debug_info, corrections = _fix_rhythmic_discontinuities(
             s1_peaks=final_peaks,
             all_raw_peaks=all_raw_peaks,
             debug_info=current_debug_info,
@@ -1761,17 +1805,10 @@ def _refine_and_correct_peaks(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray,
             params=params,
             sample_rate=sample_rate
         )
-
-        final_peaks = new_peaks # s1_peaks_rhythm_corrected
+        final_peaks = new_peaks
         current_debug_info = new_debug_info
-
-        if corrections_made == 0:
-            logging.info("Correction process stabilized. Exiting loop.")
+        if corrections == 0:
             break
-        else:
-            logging.info(f"Made {corrections_made} corrections in iteration {i + 1}.")
-    else:
-        logging.warning("Correction process reached max iterations without stabilizing.")
 
     analysis_data["beat_debug_info"] = current_debug_info
     return final_peaks, analysis_data
