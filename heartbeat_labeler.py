@@ -300,6 +300,75 @@ def calculate_temporary_intervals(df):
     
     return intervals
 
+def get_temporary_label_range(df):
+    """Get the time range between the first and last temporary labels if exactly 2 exist"""
+    if df.empty:
+        return None
+    
+    # Get all temporary labels sorted by time
+    temp_labels = df[df["Peak Type"] == "Temporary"].sort_values("Time (s)").reset_index(drop=True)
+    
+    if len(temp_labels) != 2:
+        return None
+    
+    return {
+        'start_time': temp_labels.iloc[0]["Time (s)"],
+        'end_time': temp_labels.iloc[1]["Time (s)"]
+    }
+
+def swap_s1_s2_between_temporary_labels(df):
+    """Swap S1 and S2 labels that fall between two temporary labels"""
+    if df.empty:
+        return df
+    
+    # Get the time range between temporary labels
+    temp_range = get_temporary_label_range(df)
+    if temp_range is None:
+        return df
+    
+    # Create a copy to avoid modifying the original
+    df_copy = df.copy()
+    
+    # Find labels between the temporary labels (inclusive boundaries)
+    time_mask = (df_copy["Time (s)"] >= temp_range['start_time']) & \
+                (df_copy["Time (s)"] <= temp_range['end_time'])
+    
+    # Get S1 labels in range
+    s1_mask = time_mask & (df_copy["Peak Type"] == "S1")
+    # Get S2 labels in range
+    s2_mask = time_mask & (df_copy["Peak Type"] == "S2")
+    
+    # Swap S1 -> S2 and S2 -> S1
+    df_copy.loc[s1_mask, "Peak Type"] = "S2"
+    df_copy.loc[s2_mask, "Peak Type"] = "S1"
+    
+    return df_copy
+
+def delete_labels_between_temporary_labels(df):
+    """Delete all S1 and S2 labels that fall between two temporary labels (keep temporary labels)"""
+    if df.empty:
+        return df
+    
+    # Get the time range between temporary labels
+    temp_range = get_temporary_label_range(df)
+    if temp_range is None:
+        return df
+    
+    # Create a copy to avoid modifying the original
+    df_copy = df.copy()
+    
+    # Find labels between the temporary labels (inclusive boundaries) that are S1 or S2
+    time_mask = (df_copy["Time (s)"] >= temp_range['start_time']) & \
+                (df_copy["Time (s)"] <= temp_range['end_time'])
+    
+    # Get S1 and S2 labels in range (exclude temporary labels)
+    labels_to_delete = time_mask & (df_copy["Peak Type"].isin(["S1", "S2"]))
+    
+    # Delete those labels
+    df_copy = df_copy[~labels_to_delete].reset_index(drop=True)
+    
+    return df_copy
+
 def parse_csv_content(contents, filename):
     """Parse uploaded CSV file content"""
     try:
@@ -578,6 +647,8 @@ app.layout = html.Div([
         html.Button("Save Labels", id="save-btn", n_clicks=0),
         html.Button("Clear Labels", id="clear-btn", n_clicks=0, style={"marginLeft": "10px"}),
         html.Button("Restore Labels from File", id="restore-labels-btn", n_clicks=0, style={"marginLeft": "10px"}),
+        html.Button("Swap S1/S2 Between Temporary Labels", id="swap-s1s2-btn", n_clicks=0, style={"marginLeft": "10px"}),
+        html.Button("Delete Labels Between Temporary Labels", id="delete-between-temp-btn", n_clicks=0, style={"marginLeft": "10px"}),
         html.Button("Clear Temporary Labels", id="clear-temp-btn", n_clicks=0, style={"marginLeft": "10px"}),
         html.Button("Export Labels bpm/time CSV", id="export-csv-btn", n_clicks=0, style={"marginLeft": "10px"}),
         html.Div([
@@ -586,6 +657,8 @@ app.layout = html.Div([
             html.P("Keyboard shortcuts: Press 'Z' for S1, 'X' for S2. Press Ctrl+Z to undo (supports multiple undos).", 
                    style={"fontSize": "12px", "color": "grey", "marginTop": "2px"}),
             html.P("Temporary labels: Use to measure time intervals between two points. Info boxes show the interval.", 
+                   style={"fontSize": "12px", "color": "grey", "marginTop": "2px"}),
+            html.P("Temporary label tools: Place 2 temporary labels, then use 'Swap S1/S2' or 'Delete Labels' to modify labels in that range.", 
                    style={"fontSize": "12px", "color": "grey", "marginTop": "2px"}),
             html.P("⚠️ Important: Labels are NOT saved automatically. Click 'Save Labels' to save your work!", 
                    style={"fontSize": "12px", "color": "orange", "marginTop": "2px", "fontWeight": "bold"})
@@ -776,15 +849,17 @@ def export_labels_to_csv(n_clicks, table_data, selected_file):
     Input("save-btn", "n_clicks"),
     Input("clear-btn", "n_clicks"),
     Input("restore-labels-btn", "n_clicks"),
+    Input("swap-s1s2-btn", "n_clicks"),
+    Input("delete-between-temp-btn", "n_clicks"),
     Input("clear-temp-btn", "n_clicks"),
-    Input("labels-table", "data_timestamp"),
     Input('undo-trigger', 'n_clicks'),
     Input('comparison-csv-data', 'data'),
     State("labels-table", "data"),
+    State("labels-table", "data_timestamp"),
     State("peak-type", "value"),
     State("undo-history", "data")
 )
-def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, restore_clicks, clear_temp_clicks, data_timestamp, undo_clicks, comparison_data, table_data, peak_type, undo_history):
+def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, restore_clicks, swap_clicks, delete_between_clicks, clear_temp_clicks, undo_clicks, comparison_data, table_data, data_timestamp, peak_type, undo_history):
     triggered = ctx.triggered_id
     
     if not selected_file:
@@ -794,6 +869,9 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
     if undo_history is None:
         undo_history = []
     
+    # Optimize: If only comparison data changed, we can skip most processing
+    only_comparison_changed = (triggered == 'comparison-csv-data')
+    
     # Handle initial load, file selection, or restore
     if triggered is None or triggered == "file-selector" or triggered == "restore-labels-btn":
         if triggered == "restore-labels-btn":
@@ -802,6 +880,9 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
         else:
             df = load_labels(selected_file)
             undo_history = []  # Clear undo history when loading a new file
+    elif only_comparison_changed:
+        # Only comparison data changed - use current table data without reloading from file
+        df = pd.DataFrame(table_data) if table_data else pd.DataFrame(columns=["Time (s)", "Average BPM", "Peak Type"])
     else:
         df = pd.DataFrame(table_data) if table_data else pd.DataFrame(columns=["Time (s)", "Average BPM", "Peak Type"])
     
@@ -835,8 +916,8 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
             print(f"Error: No cached data for {selected_file}")
             return go.Figure(), [], []
     
-    # Handle label modifications
-    if triggered == "envelope-plot" and clickData:
+    # Handle label modifications (skip if only comparison data changed)
+    if triggered == "envelope-plot" and clickData and not only_comparison_changed:
         x = clickData["points"][0]["x"]
         x = float(x)
         
@@ -872,6 +953,16 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
     elif triggered == "clear-btn":
         df = pd.DataFrame(columns=["Time (s)", "Average BPM", "Peak Type"])
         undo_history = []  # Clear undo history when clearing all labels
+        # Note: Labels are NOT automatically saved - user must click "Save Labels" to save
+    
+    elif triggered == "swap-s1s2-btn":
+        # Swap S1 and S2 labels between temporary labels
+        df = swap_s1_s2_between_temporary_labels(df)
+        # Note: Labels are NOT automatically saved - user must click "Save Labels" to save
+    
+    elif triggered == "delete-between-temp-btn":
+        # Delete all S1 and S2 labels between temporary labels
+        df = delete_labels_between_temporary_labels(df)
         # Note: Labels are NOT automatically saved - user must click "Save Labels" to save
     
     elif triggered == "clear-temp-btn":
@@ -1008,8 +1099,12 @@ def update_plot_and_labels(selected_file, clickData, save_clicks, clear_clicks, 
                 )
     
     # Check for consecutive same-type labels and add warnings (exclude temporary labels)
-    df_non_temp = df[df["Peak Type"] != "Temporary"]
-    consecutive_warnings = detect_consecutive_same_type_labels(df_non_temp)
+    # Skip warning calculations if only comparison data changed
+    if not only_comparison_changed:
+        df_non_temp = df[df["Peak Type"] != "Temporary"]
+        consecutive_warnings = detect_consecutive_same_type_labels(df_non_temp)
+    else:
+        consecutive_warnings = []
     if consecutive_warnings:
         for warning in consecutive_warnings:
             warning_time = warning['time']
