@@ -33,7 +33,11 @@ class BPMApp:
         self.current_files = []
         self.params = DEFAULT_PARAMS.copy()
         self.log_queue = queue.Queue()
+        self.settings_file = os.path.join(os.getcwd(), "ui_settings.json")
+        self._loading_settings = True  # Prevent saving during initialization
         self.create_widgets()
+        self.load_ui_settings()
+        self._loading_settings = False  # Re-enable saving after load
         self.root.after(100, self.process_log_queue)
         self._find_initial_audio_file()
 
@@ -55,6 +59,9 @@ class BPMApp:
         ttk.Label(param_frame, text="Starting BPM (optional):").grid(row=0, column=0, sticky=tk.W, pady=2)
         self.bpm_entry = ttk.Entry(param_frame)
         self.bpm_entry.grid(row=0, column=1, sticky=tk.EW, padx=5, pady=2)
+        # Save settings when BPM entry changes
+        self.bpm_entry.bind('<KeyRelease>', lambda e: self.save_ui_settings())
+        self.bpm_entry.bind('<FocusOut>', lambda e: self.save_ui_settings())
 
         # Output file options
         self.output_html = tk.BooleanVar(value=True)
@@ -63,6 +70,7 @@ class BPMApp:
         self.output_debug = tk.BooleanVar(value=False)
         self.output_settings = tk.BooleanVar(value=False)
         self.output_filtered_wav = tk.BooleanVar(value=False)
+        self.output_bpm_text = tk.BooleanVar(value=False)
 
         # Output files section
         output_frame = ttk.LabelFrame(main_frame, text="Output Files", padding="10")
@@ -81,6 +89,8 @@ class BPMApp:
                        command=self._update_output_status).grid(row=2, column=0, sticky="w", padx=(0, 20))
         ttk.Checkbutton(output_frame, text="Filtered Audio WAV", variable=self.output_filtered_wav, 
                        command=self._update_output_status).grid(row=2, column=1, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
+                       command=self._update_output_status).grid(row=3, column=0, sticky="w", padx=(0, 20))
 
         # Select All/None buttons
         btn_frame_output = ttk.Frame(output_frame)
@@ -94,13 +104,18 @@ class BPMApp:
         self.output_status_label = ttk.Label(output_frame, text="", font=("TkDefaultFont", 9))
         self.output_status_label.grid(row=5, column=0, columnspan=2, pady=(5, 0))
         
-        # Bind output option changes to update status
-        self.output_html.trace('w', self._update_output_status)
-        self.output_csv.trace('w', self._update_output_status)
-        self.output_summary.trace('w', self._update_output_status)
-        self.output_debug.trace('w', self._update_output_status)
-        self.output_settings.trace('w', self._update_output_status)
-        self.output_filtered_wav.trace('w', self._update_output_status)
+        # Bind output option changes to update status and save settings
+        def on_output_change(*args):
+            self._update_output_status()
+            self.save_ui_settings()
+        
+        self.output_html.trace('w', on_output_change)
+        self.output_csv.trace('w', on_output_change)
+        self.output_summary.trace('w', on_output_change)
+        self.output_debug.trace('w', on_output_change)
+        self.output_settings.trace('w', on_output_change)
+        self.output_filtered_wav.trace('w', on_output_change)
+        self.output_bpm_text.trace('w', on_output_change)
 
         # Action Buttons
         btn_frame = ttk.Frame(main_frame)
@@ -153,6 +168,9 @@ class BPMApp:
             label_text = f"{len(self.current_files)} files selected"
             self.file_label.config(text=label_text)
             self.analyze_btn.config(state=tk.NORMAL)
+            
+            # Save the selected files to settings
+            self.save_ui_settings()
 
             # If only one file is chosen, try to load its settings.
             if len(self.current_files) == 1:
@@ -168,7 +186,12 @@ class BPMApp:
         Automatically finds all supported audio files in the current directory
         and loads them into the application. If only one file is found, it
         attempts to load its corresponding analysis settings.
+        Only runs if no files were already loaded from saved settings.
         """
+        # Skip auto-detection if files were already loaded from saved settings
+        if self.current_files:
+            return
+            
         supported = ('.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.mkv', '.mov')
         found_files = []
         try:
@@ -185,6 +208,9 @@ class BPMApp:
                 label_text = f"{len(self.current_files)} files loaded"
                 self.file_label.config(text=label_text)
                 self.analyze_btn.config(state=tk.NORMAL)
+                
+                # Save the auto-detected files to settings
+                self.save_ui_settings()
 
                 # If only one file was auto-detected, try to load its settings
                 if len(self.current_files) == 1:
@@ -225,6 +251,85 @@ class BPMApp:
     def _update_status(self, message):
         """Safely update the status bar from any thread."""
         self.root.after(0, lambda: self.status_var.set(message))
+
+    def save_ui_settings(self):
+        """Save current UI settings to a JSON file."""
+        # Don't save during initialization when loading settings
+        if self._loading_settings:
+            return
+        try:
+            settings = {
+                'starting_bpm': self.bpm_entry.get().strip(),
+                'output_html': self.output_html.get(),
+                'output_csv': self.output_csv.get(),
+                'output_summary': self.output_summary.get(),
+                'output_debug': self.output_debug.get(),
+                'output_settings': self.output_settings.get(),
+                'output_filtered_wav': self.output_filtered_wav.get(),
+            'output_bpm_text': self.output_bpm_text.get(),
+                'last_files': self.current_files if self.current_files else []
+            }
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=4)
+        except Exception as e:
+            # Silently fail - don't interrupt user workflow
+            print(f"Warning: Could not save UI settings: {e}")
+
+    def load_ui_settings(self):
+        """Load UI settings from a JSON file if it exists."""
+        if not os.path.exists(self.settings_file):
+            return
+        
+        self._loading_settings = True  # Prevent saving during load
+        try:
+            with open(self.settings_file, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+            
+            # Load starting BPM
+            if 'starting_bpm' in settings and settings['starting_bpm']:
+                self.bpm_entry.delete(0, tk.END)
+                self.bpm_entry.insert(0, settings['starting_bpm'])
+            
+            # Load output options
+            if 'output_html' in settings:
+                self.output_html.set(settings['output_html'])
+            if 'output_csv' in settings:
+                self.output_csv.set(settings['output_csv'])
+            if 'output_summary' in settings:
+                self.output_summary.set(settings['output_summary'])
+            if 'output_debug' in settings:
+                self.output_debug.set(settings['output_debug'])
+            if 'output_settings' in settings:
+                self.output_settings.set(settings['output_settings'])
+            if 'output_filtered_wav' in settings:
+                self.output_filtered_wav.set(settings['output_filtered_wav'])
+            if 'output_bpm_text' in settings:
+                self.output_bpm_text.set(settings['output_bpm_text'])
+            
+            # Load last used files (only if they still exist)
+            if 'last_files' in settings and settings['last_files']:
+                existing_files = []
+                for file_path in settings['last_files']:
+                    if os.path.exists(file_path):
+                        existing_files.append(file_path)
+                
+                if existing_files:
+                    self.current_files = existing_files
+                    label_text = f"{len(self.current_files)} files loaded from previous session"
+                    self.file_label.config(text=label_text)
+                    self.analyze_btn.config(state=tk.NORMAL)
+                    
+                    # If only one file was loaded, try to load its settings
+                    if len(self.current_files) == 1:
+                        self._load_settings_for_file(self.current_files[0])
+                    else:
+                        self._update_status(f"Loaded {len(self.current_files)} files from previous session.")
+                
+        except Exception as e:
+            # Silently fail - just use defaults
+            print(f"Warning: Could not load UI settings: {e}")
+        finally:
+            self._loading_settings = False  # Re-enable saving
 
     def open_last_html(self):
         """Find and open the most recently generated HTML report file."""
@@ -275,6 +380,7 @@ class BPMApp:
         self.output_debug.set(True)
         self.output_settings.set(True)
         self.output_filtered_wav.set(True)
+        self.output_bpm_text.set(True)
 
     def select_none_outputs(self):
         """Deselect all output file options."""
@@ -284,6 +390,7 @@ class BPMApp:
         self.output_debug.set(False)
         self.output_settings.set(False)
         self.output_filtered_wav.set(False)
+        self.output_bpm_text.set(False)
 
     def get_output_options(self):
         """Get the current output file selection as a dictionary."""
@@ -293,7 +400,8 @@ class BPMApp:
             'summary': self.output_summary.get(),
             'debug': self.output_debug.get(),
             'settings': self.output_settings.get(),
-            'filtered_wav': self.output_filtered_wav.get()
+            'filtered_wav': self.output_filtered_wav.get(),
+            'bpm_text': self.output_bpm_text.get(),
         }
 
     def _update_output_status(self, *args):
@@ -321,6 +429,9 @@ class BPMApp:
             messagebox.showerror("Error", "Please select at least one output file type to generate.")
             return
 
+        # Save settings before starting analysis
+        self.save_ui_settings()
+
         self.analyze_btn.config(state=tk.DISABLED)
         self._update_status(f"Starting batch analysis of {len(self.current_files)} files...")
 
@@ -330,7 +441,8 @@ class BPMApp:
 
     def _run_analysis_in_background(self):
         try:
-            from bpm_analysis import analyze_wav_file, convert_to_wav
+            from bpm_analysis import analyze_wav_file
+            from audio_io import convert_to_wav
             import shutil
 
             # Check for a global BPM value to override all individual settings.
