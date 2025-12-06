@@ -11,6 +11,12 @@ from enum import Enum
 
 from audio_io import preprocess_audio
 
+# INSTRUCTIONS FOR AI: 
+# Do not remove any debugging code unless specified by the user
+# Do not further abstract my code
+# Do not further segment my code
+# Do not over-engineer a solution, keep it simple
+
 # --- Enums and Global Helpers ---
 class PeakType(Enum):
     """Enumeration for classifying heartbeat peaks."""
@@ -533,7 +539,7 @@ class PeakClassifier:
 
     def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
         """Validates if an unpaired peak is a Lone S1 or Noise."""
-        is_valid, rejection_detail = self._validate_lone_s1(peak_idx)
+        is_valid, lone_s1_lines = self._validate_lone_s1(peak_idx)
         pairing_lines = [
             line.strip().lstrip('- ')
             for line in pairing_failure_reason.strip().split("\n")
@@ -547,12 +553,12 @@ class PeakClassifier:
                 "peak_type": PeakType.LONE_S1_VALIDATED.value,
                 "sections": [
                     {"type": "pairing", "lines": pairing_lines, "success": False},
-                    {"type": "lone_s1", "lines": [rejection_detail], "validated": True},
+                    {"type": "lone_s1", "lines": lone_s1_lines, "validated": True},
                 ],
             }
             self.state['consecutive_rr_rejections'] = 0
         else:
-            is_rhythm_rejection = "Rhythm Fit" in rejection_detail
+            is_rhythm_rejection = any("Rhythm Fit" in ln for ln in lone_s1_lines)
             if is_rhythm_rejection:
                 self.state['consecutive_rr_rejections'] += 1
             else:
@@ -566,7 +572,7 @@ class PeakClassifier:
                     "peak_type": PeakType.LONE_S1_CASCADE.value,
                     "sections": [
                         {"type": "pairing", "lines": pairing_lines, "success": False},
-                        {"type": "lone_s1", "lines": [rejection_detail], "validated": False},
+                        {"type": "lone_s1", "lines": lone_s1_lines, "validated": False},
                     ],
                 }
                 self.state['consecutive_rr_rejections'] = 0
@@ -575,21 +581,23 @@ class PeakClassifier:
                     "peak_type": PeakType.NOISE.value,
                     "sections": [
                         {"type": "pairing", "lines": pairing_lines, "success": False},
-                        {"type": "lone_s1", "lines": [rejection_detail], "validated": False},
+                        {"type": "lone_s1", "lines": lone_s1_lines, "validated": False},
                     ],
                 }
 
-    def _validate_lone_s1(self, current_peak_idx: int) -> Tuple[bool, str]:
+    def _validate_lone_s1(self, current_peak_idx: int) -> Tuple[bool, List[str]]:
         """Performs checks to determine if a peak is a valid Lone S1."""
-        if not self.state['candidate_beats']: return True, "First beat"
+        if not self.state['candidate_beats']:
+            return True, ["Validated Lone S1: First beat (no prior rhythm to compare)."]
 
-        confidence, reason = calculate_lone_s1_confidence(
+        confidence, detail_lines = calculate_lone_s1_confidence(
             current_peak_idx, self.state['candidate_beats'][-1], self.state['long_term_bpm'],
             self.audio_envelope, self.state['dynamic_noise_floor'], self.sample_rate, self.params
         )
         threshold = self.params.get("lone_s1_confidence_threshold", 0.6)
         if confidence < threshold:
-            return False, f"Rejected Lone S1: Confidence {confidence:.2f} < Threshold {threshold:.2f}. ({reason})"
+            detail_lines.append(f"Outcome: Rejected Lone S1 (score {confidence:.2f} < threshold {threshold:.2f})")
+            return False, detail_lines
 
         current_peak_all_peaks_idx = np.searchsorted(self.state['all_peaks'], current_peak_idx)
         if current_peak_all_peaks_idx < len(self.state['all_peaks']) - 1:
@@ -606,18 +614,16 @@ class PeakClassifier:
                 strength_threshold = 1.7
                 if not (current_amp > (next_amp * strength_threshold)): 
                      implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
-                     return False, (
-                         f"Rejected Lone S1: Forward check failed, "
-                         f"Next peak too close (interval {forward_interval_sec:.3f}s < {min_forward_interval:.3f}s, "
-                         f"(45% of expected RR) AND current peak not strong enough "
-                         f"(strength ratio {strength_ratio:.2f}x < threshold {strength_threshold:.1f}x). "
-                         f"- <br> This suggests current peak is S2, not S1. "
-                         f"If accepted, would imply {implied_bpm:.0f} BPM"
-                     )
-        # Get the weights for the calculation
-        rhythm_weight = self.params.get('lone_s1_rhythm_weight', 0.65)
-        amplitude_weight = self.params.get('lone_s1_amplitude_weight', 0.35)
-        return True, f"Validated Lone S1: Confidence {confidence:.3f} >= Threshold {threshold:.2f}. ({reason}, Weights: Rhythm={rhythm_weight:.2f}, Amplitude={amplitude_weight:.2f}, Final={confidence:.3f})"
+                     detail_lines.extend([
+                         "Forward check failed: next peak arrives too quickly for a true S1.",
+                         f"Interval {forward_interval_sec:.3f}s < {min_forward_interval:.3f}s (45% of expected RR) and strength ratio {strength_ratio:.2f}x < {strength_threshold:.1f}x.",
+                         f"This pattern suggests the current peak is S2; accepting it would imply ~{implied_bpm:.0f} BPM."
+                     ])
+                     detail_lines.append("Outcome: Rejected Lone S1 due to forward-check conflict.")
+                     return False, detail_lines
+
+        detail_lines.append(f"Outcome: Validated Lone S1 (score {confidence:.2f} >= threshold {threshold:.2f})")
+        return True, detail_lines
 
 
 
@@ -813,10 +819,11 @@ def _apply_other_pairing_adjustments(
 
 
 def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_term_bpm: float, audio_envelope: np.ndarray,
-                                 dynamic_noise_floor: pd.Series, sample_rate: int, params: Dict) -> Tuple[float, str]:
+                                 dynamic_noise_floor: pd.Series, sample_rate: int, params: Dict) -> Tuple[float, List[str]]:
     """
     Calculates a confidence score for a Lone S1 candidate based on a weighted average of
-    its rhythmic timing and its amplitude consistency with the previous beat.
+    its rhythmic timing and its amplitude consistency with the previous beat, and returns
+    human-readable detail lines explaining the calculation.
     """
     # --- 1. Calculate Rhythmic Fit Score ---
     expected_rr_sec = 60.0 / long_term_bpm
@@ -828,7 +835,10 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
         [0.0, 0.15, 0.30, 0.50],  # Hardcoded rhythm deviation points
         [1.0, 0.8, 0.4, 0.0]      # Hardcoded rhythm confidence curve
     )
-    rhythm_reason = f"Rhythm Fit={rhythm_score:.2f} (Interval {actual_rr_sec:.3f}s vs Expected {expected_rr_sec:.3f}s)"
+    rhythm_reason = (
+        f"Rhythm Fit {rhythm_score:.2f}: interval {actual_rr_sec:.3f}s vs expected {expected_rr_sec:.3f}s "
+        f"(deviation {rhythm_deviation_pct:.0%}; map 0/15/30/50% -> 1.00/0.80/0.40/0.00)"
+    )
 
     # --- 2. Calculate Amplitude Fit Score ---
     last_s1_strength = max(0, audio_envelope[last_s1_idx] - dynamic_noise_floor.iloc[last_s1_idx])
@@ -840,15 +850,25 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
         [0.0, 0.4, 0.7, 1.0],      # Hardcoded amplitude ratio points
         [0.0, 0.4, 0.8, 1.0]       # Hardcoded amplitude confidence curve
     )
-    amplitude_reason = f"Amplitude Fit={amplitude_score:.2f} (Strength Ratio {amplitude_ratio:.2f}x)"
+    amplitude_reason = (
+        f"Amplitude Fit {amplitude_score:.2f}: strength ratio {amplitude_ratio:.2f}x "
+        f"(map 0/0.4/0.7/1.0 -> 0/0.4/0.8/1.0)"
+    )
 
     # --- 3. Combine Scores with Weights ---
     rhythm_weight = params.get('lone_s1_rhythm_weight', 0.65)
     amplitude_weight = params.get('lone_s1_amplitude_weight', 0.35)
     final_confidence = (rhythm_score * rhythm_weight) + (amplitude_score * amplitude_weight)
 
-    reason_str = f"{rhythm_reason}, {amplitude_reason}"
-    return final_confidence, reason_str
+    reason_lines = [
+        rhythm_reason,
+        amplitude_reason,
+        (
+            f"Weighted Score: (Rhythm {rhythm_score:.2f} x {rhythm_weight:.2f}) + "
+            f"(Amplitude {amplitude_score:.2f} x {amplitude_weight:.2f}) = {final_confidence:.3f}"
+        ),
+    ]
+    return final_confidence, reason_lines
 
 def update_long_term_bpm(new_rr_sec: float, current_long_term_bpm: float, params: Dict) -> float:
     """Updates the long-term BPM belief based on a new R-R interval."""
@@ -1390,7 +1410,8 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
             'summary': True,
             'debug': True,
             'settings': True,
-            'filtered_wav': True
+            'filtered_wav': True,
+            'bpm_text': False,
         }
 
     plotly_figure = None
@@ -1403,7 +1424,14 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
         logging.info("Skipping HTML plot generation as requested.")
 
     # Generate other outputs if requested
-    if output_options.get('summary', True) or output_options.get('debug', True) or output_options.get('settings', True):
+    needs_reporter = any([
+        output_options.get('summary', True),
+        output_options.get('debug', True),
+        output_options.get('settings', True),
+        output_options.get('bpm_text', False),
+    ])
+
+    if needs_reporter:
         reporter = ReportGenerator(original_file_path, output_directory)
         
         if output_options.get('summary', True):
@@ -1420,6 +1448,11 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
             reporter.save_analysis_settings(start_bpm_hint)
         else:
             logging.info("Skipping settings generation as requested.")
+
+        if output_options.get('bpm_text', False):
+            reporter.save_bpm_time_txt(final_metrics.get('smoothed_bpm'), final_metrics.get('bpm_times'))
+        else:
+            logging.info("Skipping BPM text export as requested.")
     else:
         logging.info("Skipping all report generation as requested.")
 
