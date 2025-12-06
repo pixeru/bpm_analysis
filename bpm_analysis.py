@@ -27,12 +27,6 @@ except ImportError:
     preproc = None
     ftr = None
 
-# INSTRUCTIONS FOR AI: 
-# Do not remove any debugging code unless specified by the user
-# Do not further abstract my code
-# Do not further segment my code
-# Do not over-engineer a solution, keep it simple
-
 # --- Enums and Global Helpers ---
 class PeakType(Enum):
     """Enumeration for classifying heartbeat peaks."""
@@ -55,6 +49,88 @@ class PeakType(Enum):
     def is_s2(cls, peak_type_str: str) -> bool:
         """Check if a string corresponds to any S2 type."""
         return peak_type_str.strip().startswith("S2")
+
+
+def _get_peak_type_from_debug(entry) -> str:
+    """
+    Helper to safely extract the peak_type string from a debug entry.
+    Supports both the new dict-based structure and legacy string values.
+    """
+    if isinstance(entry, dict):
+        return entry.get("peak_type", "")
+    if isinstance(entry, str):
+        # Legacy packing used '§' as a separator: '<PeakType>§TAG§VALUE...'
+        return entry.split('§', 1)[0] if entry else ""
+    return ""
+
+
+def _is_s1_paired_debug(entry) -> bool:
+    """Returns True if a debug entry represents a paired S1."""
+    return _get_peak_type_from_debug(entry) == PeakType.S1_PAIRED.value
+
+
+def _is_lone_s1_debug(entry) -> bool:
+    """Returns True if a debug entry represents any Lone S1 classification."""
+    pt = _get_peak_type_from_debug(entry)
+    return pt.startswith("Lone S1")
+
+
+def _is_noise_debug(entry) -> bool:
+    """Returns True if a debug entry represents a Noise/Rejected classification."""
+    pt = _get_peak_type_from_debug(entry)
+    return "Noise" in pt
+
+
+def format_debug_entry(debug_entry: Dict) -> List[str]:
+    """
+    Converts a structured debug entry into a list of human-readable lines.
+
+    This is the single formatter used by both the interactive plot tooltips
+    and the chronological debug log. It keeps the display logic in one place.
+    """
+    # Legacy fallback: if we ever receive a plain string, show it as a simple block.
+    if not isinstance(debug_entry, dict):
+        if not debug_entry:
+            return []
+        text = str(debug_entry)
+        return ["- Details:", f"    - {text}"]
+
+    lines: List[str] = []
+    sections = debug_entry.get("sections", [])
+
+    for sec in sections:
+        sec_type = sec.get("type")
+
+        if sec_type == "pairing":
+            lines.append("- S1-S2 pairing decision:")
+            raw_lines = sec.get("lines")
+            if raw_lines is None:
+                text = sec.get("text", "")
+                raw_lines = [t.strip() for t in text.split("\n") if t.strip()]
+            for ln in raw_lines:
+                lines.append(f"    - {ln}")
+
+        elif sec_type == "lone_s1":
+            lines.append("- Lone S1 decision:")
+            raw_lines = sec.get("lines") or []
+            for ln in raw_lines:
+                lines.append(f"    - {ln}")
+
+        elif sec_type == "lookahead":
+            msg = sec.get("text") or sec.get("message")
+            if msg:
+                lines.append(f"- {msg}")
+
+        elif sec_type == "original":
+            original = sec.get("original_debug")
+            if isinstance(original, dict):
+                orig_type = original.get("peak_type", "Unknown")
+                lines.append(f"- Original Classification: {orig_type}")
+            elif original:
+                lines.append("- Original Classification:")
+                lines.append(f"    - {original}")
+
+    return lines
 
 
 # --- Setup Professional Logging ---
@@ -148,7 +224,10 @@ class PeakClassifier:
             pairing_ratio = 0.5
         else:
             recent_beats = self.state['candidate_beats'][-history_window:]
-            paired_count = sum(1 for beat_idx in recent_beats if PeakType.S1_PAIRED.value in self.state['beat_debug_info'].get(beat_idx, ""))
+            paired_count = sum(
+                1 for beat_idx in recent_beats
+                if _is_s1_paired_debug(self.state['beat_debug_info'].get(beat_idx))
+            )
             pairing_ratio = paired_count / history_window
             
         if pairing_ratio >= self.params.get("kickstart_check_threshold", 0.3):
@@ -159,7 +238,10 @@ class PeakClassifier:
             return
 
         min_s1s = 3  # Hardcoded min S1 candidates
-        recent_lone_s1s = [idx for idx in self.state['candidate_beats'][-history:] if "Lone S1" in self.state['beat_debug_info'].get(idx, "")]
+        recent_lone_s1s = [
+            idx for idx in self.state['candidate_beats'][-history:]
+            if _is_lone_s1_debug(self.state['beat_debug_info'].get(idx))
+        ]
         if len(recent_lone_s1s) < min_s1s:
             return
 
@@ -169,7 +251,7 @@ class PeakClassifier:
             current_raw_idx = np.searchsorted(self.state['all_peaks'], s1_idx)
             if current_raw_idx < len(self.state['all_peaks']) - 1:
                 next_raw_peak_idx = self.state['all_peaks'][current_raw_idx + 1]
-                if "Noise" in self.state['beat_debug_info'].get(next_raw_peak_idx, ""):
+                if _is_noise_debug(self.state['beat_debug_info'].get(next_raw_peak_idx)):
                     matches += 1
 
         if matches >= min_matches:
@@ -181,30 +263,134 @@ class PeakClassifier:
     def _handle_last_peak(self, peak_idx: int):
         """Classify the final peak in the sequence."""
         self.state['candidate_beats'].append(peak_idx)
-        self.state['beat_debug_info'][peak_idx] = PeakType.LONE_S1_LAST.value
+        self.state['beat_debug_info'][peak_idx] = {
+            "peak_type": PeakType.LONE_S1_LAST.value,
+            "sections": []
+        }
         self.state['loop_idx'] += 1
+
+    def _calculate_pairing_ratio(self) -> float:
+        """Calculate recent rhythm stability ratio."""
+        history_window = self.params.get("stability_history_window", 20)
+        if len(self.state['candidate_beats']) < history_window:
+            return 0.5
+        
+        recent_beats = self.state['candidate_beats'][-history_window:]
+        paired_count = sum(
+            1 for beat_idx in recent_beats 
+            if _is_s1_paired_debug(self.state['beat_debug_info'].get(beat_idx))
+        )
+        return paired_count / history_window
 
     def _process_peak_pair(self, current_peak_idx: int):
         """Processes a pair of peaks to determine if they are S1-S2."""
-        next_peak_idx = self.state['all_peaks'][self.state['loop_idx'] + 1]
-        # Calculate recent rhythm stability as a ratio
-        history_window = self.params.get("stability_history_window", 20)
-        if len(self.state['candidate_beats']) < history_window:
-            pairing_ratio = 0.5
-        else:
-            recent_beats = self.state['candidate_beats'][-history_window:]
-            paired_count = sum(1 for beat_idx in recent_beats if PeakType.S1_PAIRED.value in self.state['beat_debug_info'].get(beat_idx, ""))
-            pairing_ratio = paired_count / history_window
+        all_peaks = self.state['all_peaks']
+        loop_idx = self.state['loop_idx']
 
+        # Calculate recent rhythm stability as a ratio (shared helper)
+        pairing_ratio = self._calculate_pairing_ratio()
+
+        # We always have at least one "next" peak here (caller guards last-peak case)
+        next_peak_idx = all_peaks[loop_idx + 1]
+
+        # --- LOOKAHEAD: optionally skip a weak middle peak between a strong S1 and S2 ---
+        if self.params.get('enable_lookahead_skipping', True) and loop_idx + 2 < len(all_peaks):
+            middle_peak_idx = next_peak_idx
+            next_next_peak_idx = all_peaks[loop_idx + 2]
+
+            # Heuristic: treat the middle peak as noise if its prominence is much weaker than the S1 candidate
+            current_prom = calculate_peak_prominence(
+                current_peak_idx, self.audio_envelope, self.state['trough_indices']
+            )
+            middle_prom = calculate_peak_prominence(
+                middle_peak_idx, self.audio_envelope, self.state['trough_indices']
+            )
+            noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
+
+            if middle_prom < current_prom * noise_thresh:
+                # Try pairing current + next_next (skip the middle)
+                is_paired_skip, reason_skip = self._attempt_s1_s2_pairing(
+                    current_peak_idx, next_next_peak_idx, pairing_ratio
+                )
+
+                if is_paired_skip:
+                    # Build a shared pairing section from the skip reason
+                    pairing_lines = [
+                        line.strip().lstrip('- ')
+                        for line in reason_skip.strip().split("\n")
+                        if line.strip()
+                    ]
+                    lookahead_msg = (
+                        "LOOKAHEAD SUCCESS: Skipped intermediate weak peak "
+                        f"(middle prominence {middle_prom:.3f} < {noise_thresh:.2f} × "
+                        f"S1 prominence {current_prom:.3f})"
+                    )
+
+                    s1_sections = [
+                        {"type": "lookahead", "text": lookahead_msg},
+                        {"type": "pairing", "lines": pairing_lines, "success": True},
+                    ]
+                    s2_sections = [
+                        {"type": "lookahead", "text": lookahead_msg},
+                        {"type": "pairing", "lines": pairing_lines, "success": True},
+                    ]
+
+                    self.state['candidate_beats'].append(current_peak_idx)
+                    self.state['beat_debug_info'][current_peak_idx] = {
+                        "peak_type": PeakType.S1_PAIRED.value,
+                        "sections": s1_sections,
+                    }
+
+                    original_middle_debug = self.state['beat_debug_info'].get(middle_peak_idx)
+                    self.state['beat_debug_info'][middle_peak_idx] = {
+                        "peak_type": PeakType.NOISE.value,
+                        "sections": [
+                            {
+                                "type": "lookahead",
+                                "text": (
+                                    "Middle peak treated as noise due to weak prominence "
+                                    f"({middle_prom:.3f} < {noise_thresh:.2f} × "
+                                    f"S1 prominence {current_prom:.3f})"
+                                ),
+                            },
+                            {
+                                "type": "original",
+                                "original_debug": original_middle_debug,
+                            },
+                        ],
+                    }
+
+                    self.state['beat_debug_info'][next_next_peak_idx] = {
+                        "peak_type": PeakType.S2_PAIRED.value,
+                        "sections": s2_sections,
+                    }
+
+                    self.state['consecutive_rr_rejections'] = 0
+                    # Skip the S1, middle noise, and S2 peaks
+                    self.state['loop_idx'] += 3
+                    return
+
+        # --- Standard pairing attempt (existing logic) ---
         is_paired, reason = self._attempt_s1_s2_pairing(
             current_peak_idx, next_peak_idx, pairing_ratio
         )
 
         if is_paired:
             self.state['candidate_beats'].append(current_peak_idx)
-            reason_tag = f"PAIRING_SUCCESS_REASON§{reason}"
-            self.state['beat_debug_info'][current_peak_idx] = f"{PeakType.S1_PAIRED.value}§{reason_tag}"
-            self.state['beat_debug_info'][next_peak_idx] = f"{PeakType.S2_PAIRED.value}§{reason_tag}"
+            pairing_lines = [
+                line.strip().lstrip('- ')
+                for line in reason.strip().split("\n")
+                if line.strip()
+            ]
+            sections = [{"type": "pairing", "lines": pairing_lines, "success": True}]
+            self.state['beat_debug_info'][current_peak_idx] = {
+                "peak_type": PeakType.S1_PAIRED.value,
+                "sections": sections,
+            }
+            self.state['beat_debug_info'][next_peak_idx] = {
+                "peak_type": PeakType.S2_PAIRED.value,
+                "sections": sections,
+            }
             self.state['consecutive_rr_rejections'] = 0
             self.state['loop_idx'] += 2
         else:
@@ -242,14 +428,32 @@ class PeakClassifier:
     def _attempt_s1_s2_pairing(self, s1_candidate_idx: int, s2_candidate_idx: int, pairing_ratio: float) -> Tuple[bool, str]:
         """Calculates the confidence score for pairing two candidate peaks."""
         interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
-
-        # --- 1. Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
         bpm = self.state['long_term_bpm']
+
+        # Minimum S1-S2 as fraction of RR interval (adapts to current BPM)
+        min_s1_s2_interval = (60.0 / bpm) * self.params.get('min_s1_s2_interval_rr_fraction', 0.35)
+        
+        # Absolute minimum S1-S2 interval
+        min_s1_s2_interval = max(min_s1_s2_interval, self.params.get('min_s1_s2_interval_sec', 0.15))
+        
+        if interval_sec < min_s1_s2_interval:
+            # Calculate implied BPM for debugging
+            # Assuming S2-S1 is at least as long as S1-S2 (conservative estimate)
+            implied_total_cycle = interval_sec * 2.0  # S1-S2 + S2-S1
+            implied_bpm = 60.0 / implied_total_cycle if implied_total_cycle > 0 else float('inf')
+            
+            debug_msg = (
+                f"Impossible: S1-S2 interval {interval_sec:.3f}s < min {min_s1_s2_interval:.3f}s "
+                f"(implies {implied_bpm:.0f} BPM vs assumed {bpm:.0f} BPM)"
+            )
+            return False, debug_msg
+
+        # --- Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
         base_confidence = 0.60
 
         reason = f"Base Conf: {base_confidence:.2f}"
 
-        # --- 2. Contractility / prominence-based adjustment (S1 vs S2) ---
+        # --- Contractility / prominence-based adjustment (S1 vs S2) ---
         s1_prominence = calculate_peak_prominence(
             s1_candidate_idx, self.audio_envelope, self.state['trough_indices']
         )
@@ -266,7 +470,7 @@ class PeakClassifier:
         )
         reason += contractility_reason
 
-        # --- 3. Other adjustments (stability, ratio history, etc.) ---
+        # --- Other adjustments (stability, ratio history, etc.) ---
         confidence, other_reason = _apply_other_pairing_adjustments(
             confidence,
             s1_candidate_idx,
@@ -344,13 +548,22 @@ class PeakClassifier:
     def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
         """Validates if an unpaired peak is a Lone S1 or Noise."""
         is_valid, rejection_detail = self._validate_lone_s1(peak_idx)
-        pairing_info = f"PAIRING_FAIL_REASON§{pairing_failure_reason.lstrip(' |')}"
+        pairing_lines = [
+            line.strip().lstrip('- ')
+            for line in pairing_failure_reason.strip().split("\n")
+            if line.strip()
+        ]
 
         if is_valid:
             self.state['candidate_beats'].append(peak_idx)
             # For a validated S1, the "rejection_detail" is just the success reason.
-            self.state['beat_debug_info'][
-                peak_idx] = f"{PeakType.LONE_S1_VALIDATED.value}§{pairing_info}§LONE_S1_VALIDATE_REASON§{rejection_detail}"
+            self.state['beat_debug_info'][peak_idx] = {
+                "peak_type": PeakType.LONE_S1_VALIDATED.value,
+                "sections": [
+                    {"type": "pairing", "lines": pairing_lines, "success": False},
+                    {"type": "lone_s1", "lines": [rejection_detail], "validated": True},
+                ],
+            }
             self.state['consecutive_rr_rejections'] = 0
         else:
             is_rhythm_rejection = "Rhythm Fit" in rejection_detail
@@ -359,17 +572,26 @@ class PeakClassifier:
             else:
                 self.state['consecutive_rr_rejections'] = 0
 
-            lone_s1_rejection_info = f"LONE_S1_REJECT_REASON§{rejection_detail}"
-
             if self.state['consecutive_rr_rejections'] >= self.params.get("cascade_reset_trigger_count", 3):
                 logging.info(
                     f"CASCADE RESET: Forcing peak at {peak_idx / self.sample_rate:.2f}s as Lone S1 due to repeated rhythmic failures.")
                 self.state['candidate_beats'].append(peak_idx)
-                self.state['beat_debug_info'][
-                    peak_idx] = f"{PeakType.LONE_S1_CASCADE.value}§{pairing_info}§{lone_s1_rejection_info}"
+                self.state['beat_debug_info'][peak_idx] = {
+                    "peak_type": PeakType.LONE_S1_CASCADE.value,
+                    "sections": [
+                        {"type": "pairing", "lines": pairing_lines, "success": False},
+                        {"type": "lone_s1", "lines": [rejection_detail], "validated": False},
+                    ],
+                }
                 self.state['consecutive_rr_rejections'] = 0
             else:
-                self.state['beat_debug_info'][peak_idx] = f"Noise§{pairing_info}§{lone_s1_rejection_info}"
+                self.state['beat_debug_info'][peak_idx] = {
+                    "peak_type": PeakType.NOISE.value,
+                    "sections": [
+                        {"type": "pairing", "lines": pairing_lines, "success": False},
+                        {"type": "lone_s1", "lines": [rejection_detail], "validated": False},
+                    ],
+                }
 
     def _validate_lone_s1(self, current_peak_idx: int) -> Tuple[bool, str]:
         """Performs checks to determine if a peak is a valid Lone S1."""
@@ -415,100 +637,6 @@ class PeakClassifier:
 class Plotter:
     """Handles the creation and generation of the final analysis plot."""
     
-    @staticmethod
-    def format_pairing_details_list(details_str: str) -> List[str]:
-        """Formats S1-S2 pairing details into a list of strings."""
-        lines = [line.strip().lstrip('- ') for line in details_str.strip().split('\n') if line.strip()]
-        if not lines: return ["- S1-S2 pairing decision:", "    - No details available."]
-
-        output_lines = ["- S1-S2 pairing decision:"]
-        confidence = 0.0
-
-        try:
-            match = re.search(r'([\d\.]+)$', lines[0])
-            if match: confidence = float(match.group(1))
-            output_lines.append(f"    - {lines[0]}")
-
-            for line in lines[1:]:
-                new_confidence = confidence
-                if "Stability Pre-Adjust" in line:
-                    match = re.search(r'x([\d\.]+)', line); new_confidence *= float(match.group(1)) if match else 1
-                    output_lines.append(f"    - {line} -> {new_confidence:.3f}")
-                elif "Penalized by" in line:
-                    match = re.search(r'by ([\d\.]+)', line); new_confidence -= float(match.group(1)) if match else 0
-                    output_lines.append(f"    - {line} -> {new_confidence:.3f}")
-                elif "Interval penalty by" in line:
-                    match = re.search(r'by ([\d\.]+)', line); new_confidence -= float(match.group(1)) if match else 0
-                    output_lines.append(f"    - {line} -> {max(0, new_confidence):.3f}")
-                else:
-                    output_lines.append(f"    - {line}")
-                confidence = new_confidence
-        except (ValueError, IndexError):
-            return ["- S1-S2 pairing decision:", f"    - {details_str}"]
-        return output_lines
-
-    @staticmethod
-    def format_lone_s1_details_list(details_str: str) -> List[str]:
-        """Formats Lone S1 validation details into a readable list of strings."""
-        output_lines = ["- Lone S1 decision:"]
-        
-        # Regex to capture the main components of the validation string
-        main_pattern = re.compile(r"(Validated|Rejected) Lone S1: Confidence ([\d\.]+) (>=|<) Threshold ([\d\.]+)\. \((.*)\)")
-        main_match = main_pattern.search(details_str)
-
-        if not main_match:
-            return ["- Lone S1 decision:", f"\t- {details_str}"]
-
-        try:
-            status, final_conf_str, operator, threshold_str, reason_str = main_match.groups()
-            final_conf = float(final_conf_str)
-            threshold = float(threshold_str)
-
-            # Regex patterns to extract all numerical and descriptive parts
-            patterns = {
-                'rhythm_fit': r"Rhythm Fit=([\d\.]+)",
-                'rhythm_details': r"\(Interval .*?s vs Expected .*?s\)",
-                'amp_fit': r"Amplitude Fit=([\d\.]+)",
-                'amp_details': r"\(Strength Ratio .*?x\)",
-                'rhythm_weight': r"Rhythm=([\d\.]+)",
-                'amp_weight': r"Amplitude=([\d\.]+)",
-            }
-            
-            # Extract all matching values from the reason string
-            extracted = {key: re.search(p, reason_str) for key, p in patterns.items()}
-
-            rhythm_score = float(extracted['rhythm_fit'].group(1))
-            rhythm_details = extracted['rhythm_details'].group(0)
-            output_lines.append(f"\t- Rhythm Fit={rhythm_score:.2f} {rhythm_details}")
-
-            amp_score = float(extracted['amp_fit'].group(1))
-            amp_details = extracted['amp_details'].group(0)
-            output_lines.append(f"\t- Amplitude Fit={amp_score:.2f} {amp_details}")
-
-            # If weight information is available, add the detailed breakdown
-            if extracted['rhythm_weight'] and extracted['amp_weight']:
-                rhythm_weight = float(extracted['rhythm_weight'].group(1))
-                amp_weight = float(extracted['amp_weight'].group(1))
-                
-                rhythm_contrib = rhythm_score * rhythm_weight
-                amp_contrib = amp_score * amp_weight
-
-                output_lines.append("\t- Weighted Calculation:")
-                output_lines.append(f"\t\t- Rhythm: {rhythm_score:.2f} × {rhythm_weight:.2f} = {rhythm_contrib:.3f}")
-                output_lines.append(f"\t\t- Amplitude: {amp_score:.2f} × {amp_weight:.2f} = {amp_contrib:.3f}")
-                output_lines.append(f"\t\t- Final: {rhythm_contrib:.3f} + {amp_contrib:.3f} = {final_conf:.3f}")
-
-            # Add the final summary line
-            outcome_status = "Validated" if "Validated" in status else "Rejected"
-            output_lines.append(f"- Final Score: Confidence {final_conf:.3f} {operator} {threshold:.2f} -> {outcome_status}")
-
-        except (AttributeError, ValueError, IndexError) as e:
-            # Fallback for any parsing error
-            logging.warning(f"Could not parse Lone S1 details string: '{details_str}'. Error: {e}")
-            return ["- Lone S1 decision:", f"\t- {details_str}"]
-        
-        return output_lines
-
     def __init__(self, file_name: str, params: Dict, sample_rate: int, output_directory: str):
         self.file_name = file_name
         self.params = params
@@ -653,55 +781,29 @@ class Plotter:
         classified_indices = set()
 
         # --- Generate detailed hover text for each classified peak ---
-        for peak_idx, reason_str in debug_info.items():
+        for peak_idx, debug_value in debug_info.items():
             hover_text_parts = []
-            parts = reason_str.split('§')
-            final_peak_type, details_list = parts[0], parts[1:]
+
+            # Extract peak type from the structured debug entry (or legacy string)
+            peak_type = _get_peak_type_from_debug(debug_value) or "Unknown Peak"
 
             # Add basic peak info
-            hover_text_parts.append(f"<b>Type:</b> {final_peak_type}")
+            hover_text_parts.append(f"<b>Type:</b> {peak_type}")
             hover_text_parts.append(f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s")
             hover_text_parts.append(f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}")
             hover_text_parts.append("---")  # Visual separator
 
-            # Add detailed, formatted reasons from the debug string
-            i = 0
-            while i < len(details_list):
-                tag = details_list[i]
-                value = details_list[i + 1] if (i + 1) < len(details_list) else ""
-                formatted_lines = []
-
-                if "PAIRING" in tag:
-                    formatted_lines = self.format_pairing_details_list(value)
-                elif "LONE_S1_REJECT_REASON" in tag:
-                    formatted_lines = self.format_lone_s1_details_list(value)
-                elif "LONE_S1_VALIDATE_REASON" in tag:
-                    formatted_lines = self.format_lone_s1_details_list(value)
-                elif "ORIGINAL_REASON" in tag:
-                    formatted_lines = ["- Original Classification:",
-                                       f"&nbsp;&nbsp;&nbsp;&nbsp;- {value.replace('`', '')}"]
-
-                if formatted_lines:
-                    # Convert the list of strings to a single HTML block
-                    sub_text = "<br>".join(l.replace('\t', '&nbsp;&nbsp;&nbsp;&nbsp;') for l in formatted_lines)
-                    hover_text_parts.append(sub_text)
-                i += 2
+            # Add detailed, formatted reasons using the shared formatter
+            formatted_lines = format_debug_entry(debug_value)
+            if formatted_lines:
+                sub_text = "<br>".join(
+                    l.replace('\t', '&nbsp;&nbsp;&nbsp;&nbsp;') for l in formatted_lines
+                )
+                hover_text_parts.append(sub_text)
 
             # Join all parts into a single HTML string for the tooltip
             full_hover_text = "<br>".join(hover_text_parts)
             classified_indices.add(peak_idx)
-            # Parse reason string to extract peak type
-            if not reason_str:
-                peak_type = "Unknown Peak"
-            else:
-                separators = ['. Pairing Justification: ', '. Rejection: ', '. Original: ', '. ']
-                for sep in separators:
-                    if sep in reason_str:
-                        parts = reason_str.split(sep, 1)
-                        peak_type = parts[0].strip()
-                        break
-                else:
-                    peak_type = reason_str.strip()
 
             # Assign the peak to the correct category for plotting
             if PeakType.is_s1(peak_type):
@@ -954,29 +1056,12 @@ class ReportGenerator:
                 if not raw_reason or raw_reason == 'Unknown':
                     log_file.write("**Unclassified Peak**\n")
                 else:
-                    parts = raw_reason.split('§')
-                    final_peak_type, details_list = parts[0], parts[1:]
-                    log_file.write(f"**{final_peak_type}.**\n")
+                    peak_type = _get_peak_type_from_debug(raw_reason) or "Unclassified Peak"
+                    log_file.write(f"**{peak_type}.**\n")
 
-                    i = 0
-                    while i < len(details_list):
-                        tag = details_list[i]
-                        value = details_list[i + 1] if (i + 1) < len(details_list) else ""
-                        formatted_details = ""
-
-                        if "PAIRING" in tag:
-                            formatted_details = "\n".join(Plotter.format_pairing_details_list(value))
-                        elif "LONE_S1_REJECT_REASON" in tag:
-                            formatted_details = "\n".join(Plotter.format_lone_s1_details_list(value))
-                        elif "LONE_S1_VALIDATE_REASON" in tag:
-                            formatted_details = "\n".join(Plotter.format_lone_s1_details_list(value))
-                        elif "ORIGINAL_REASON" in tag:
-                            formatted_details = f"- Original Classification:\n    - `{value}`"
-
-                        if formatted_details:
-                            log_file.write(f"{formatted_details}\n")
-
-                        i += 2  # Move past the tag and its value
+                    formatted_lines = format_debug_entry(raw_reason)
+                    for ln in formatted_lines:
+                        log_file.write(f"{ln}\n")
 
             # Write all available metrics for every event type
             metrics = {
@@ -1550,14 +1635,16 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
         s1_start_idx, s1_end_idx = s1_peaks[i], s1_peaks[i + 1]
         if (s1_end_idx - s1_start_idx) / sample_rate > long_conflict_threshold_sec:
             log_debug(f"Found LONG interval at {s1_start_idx / sample_rate:.2f}s. Investigating gap...")
-            gap_candidates = [p for p in all_raw_peaks if
-                              s1_start_idx < p < s1_end_idx and "Noise" in debug_info.get(p, "")]
+            gap_candidates = [
+                p for p in all_raw_peaks
+                if s1_start_idx < p < s1_end_idx and _is_noise_debug(debug_info.get(p))
+            ]
             for candidate_s1 in gap_candidates:
                 if candidate_s1 in peaks_to_add: continue
                 current_raw_idx = np.searchsorted(all_raw_peaks, candidate_s1)
                 if current_raw_idx + 1 >= len(all_raw_peaks): continue
                 candidate_s2 = all_raw_peaks[current_raw_idx + 1]
-                if candidate_s2 >= s1_end_idx or "Noise" not in debug_info.get(candidate_s2, ""): continue
+                if candidate_s2 >= s1_end_idx or not _is_noise_debug(debug_info.get(candidate_s2)): continue
 
                 s1_strength = max(0, audio_envelope[candidate_s1] - dynamic_noise_floor.iloc[candidate_s1])
                 is_strong_s1 = s1_strength > (
@@ -1569,12 +1656,22 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
                     log_debug(f"  - SUCCESS: Re-labeling S1/S2 pair at {candidate_s1 / sample_rate:.2f}s.")
                     corrections_made += 1
                     peaks_to_add.add(candidate_s1)
-                    original_reason_s1 = corrected_debug_info.get(candidate_s1, "Noise")
-                    corrected_debug_info[
-                        candidate_s1] = f"{PeakType.S1_CORRECTED_GAP.value}§ORIGINAL_REASON§{original_reason_s1}"
-                    original_reason_s2 = corrected_debug_info.get(candidate_s2, "Noise")
-                    corrected_debug_info[
-                        candidate_s2] = f"{PeakType.S2_CORRECTED_GAP.value}§ORIGINAL_REASON§{original_reason_s2}"
+
+                    original_reason_s1 = corrected_debug_info.get(candidate_s1)
+                    corrected_debug_info[candidate_s1] = {
+                        "peak_type": PeakType.S1_CORRECTED_GAP.value,
+                        "sections": [
+                            {"type": "original", "original_debug": original_reason_s1},
+                        ],
+                    }
+
+                    original_reason_s2 = corrected_debug_info.get(candidate_s2)
+                    corrected_debug_info[candidate_s2] = {
+                        "peak_type": PeakType.S2_CORRECTED_GAP.value,
+                        "sections": [
+                            {"type": "original", "original_debug": original_reason_s2},
+                        ],
+                    }
                     break
 
     # --- Pass 2: Look for SHORT intervals (adjacent S1s) ---
