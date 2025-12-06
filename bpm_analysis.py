@@ -17,6 +17,16 @@ import json
 import re
 import csv
 
+try:
+    import pyPCG
+    import pyPCG.preprocessing as preproc
+    PYPCG_AVAILABLE = True
+except ImportError:
+    logging.warning("pyPCG-toolbox not installed. Install with: pip install pyPCG-toolbox")
+    PYPCG_AVAILABLE = False
+    preproc = None
+    ftr = None
+
 # INSTRUCTIONS FOR AI: 
 # Do not remove any debugging code unless specified by the user
 # Do not further abstract my code
@@ -232,18 +242,46 @@ class PeakClassifier:
     def _attempt_s1_s2_pairing(self, s1_candidate_idx: int, s2_candidate_idx: int, pairing_ratio: float) -> Tuple[bool, str]:
         """Calculates the confidence score for pairing two candidate peaks."""
         interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
-        deviation_value = self.state['smoothed_dev_series'].asof(s1_candidate_idx / self.sample_rate)
 
-        confidence = calculate_blended_confidence(deviation_value, self.state['long_term_bpm'], self.params)
-        blend_ratio = np.clip((self.state['long_term_bpm'] - self.params['contractility_bpm_low']) / (self.params['contractility_bpm_high'] - self.params['contractility_bpm_low']), 0, 1)
-        reason = f"Base Conf (Blended Model {blend_ratio:.0%} High): {confidence:.2f}"
+        # --- 1. Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
+        bpm = self.state['long_term_bpm']
+        base_confidence = 0.60
 
-        confidence, adjust_reason = _adjust_confidence_with_stability_and_ratio(
-            confidence, s1_candidate_idx, s2_candidate_idx, self.audio_envelope, self.state['dynamic_noise_floor'],
-            self.state['long_term_bpm'], pairing_ratio, self.params, self.sample_rate,
-            self.peak_bpm_time_sec, self.recovery_end_time_sec, len(self.state['candidate_beats']), self.state['trough_indices']
+        reason = f"Base Conf: {base_confidence:.2f}"
+
+        # --- 2. Contractility / prominence-based adjustment (S1 vs S2) ---
+        s1_prominence = calculate_peak_prominence(
+            s1_candidate_idx, self.audio_envelope, self.state['trough_indices']
         )
-        reason += adjust_reason
+        s2_prominence = calculate_peak_prominence(
+            s2_candidate_idx, self.audio_envelope, self.state['trough_indices']
+        )
+
+        confidence, contractility_reason = adjust_confidence_with_contractility(
+            base_confidence,
+            s1_prominence,
+            s2_prominence,
+            bpm,
+            self.params,
+        )
+        reason += contractility_reason
+
+        # --- 3. Other adjustments (stability, ratio history, etc.) ---
+        confidence, other_reason = _apply_other_pairing_adjustments(
+            confidence,
+            s1_candidate_idx,
+            s2_candidate_idx,
+            self.audio_envelope,
+            self.state['dynamic_noise_floor'],
+            bpm,
+            pairing_ratio,
+            self.params,
+            self.sample_rate,
+            self.peak_bpm_time_sec,
+            self.recovery_end_time_sec,
+            len(self.state['candidate_beats']),
+        )
+        reason += other_reason
 
         s1_s2_max_interval = min(self.params['s1_s2_interval_cap_sec'], (60.0 / self.state['long_term_bpm']) * self.params['s1_s2_interval_rr_fraction'])
         
@@ -350,11 +388,24 @@ class PeakClassifier:
             next_raw_peak_idx = self.state['all_peaks'][current_peak_all_peaks_idx + 1]
             forward_interval_sec = (next_raw_peak_idx - current_peak_idx) / self.sample_rate
             expected_rr_sec = 60.0 / self.state['long_term_bpm']
-            min_forward_interval = expected_rr_sec * self.params.get('lone_s1_forward_check_pct', 0.6)
+            min_forward_interval = expected_rr_sec * self.params.get('lone_s1_forward_check_pct', 0.45)
+            # If the next peak is suspiciously close (<45% of expected RR)...
             if forward_interval_sec < min_forward_interval:
-                if not (self.audio_envelope[current_peak_idx] > (self.audio_envelope[next_raw_peak_idx] * 1.7)):
+                # ...and current peak isn't MUCH stronger (1.7x), then it's probably S2, not S1
+                current_amp = self.audio_envelope[current_peak_idx]
+                next_amp = self.audio_envelope[next_raw_peak_idx]
+                strength_ratio = current_amp / (next_amp + 1e-9)
+                strength_threshold = 1.7
+                if not (current_amp > (next_amp * strength_threshold)): 
                      implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
-                     return False, f"Rejected Lone S1: Forward check failed (Implies {implied_bpm:.0f} BPM)"
+                     return False, (
+                         f"Rejected Lone S1: Forward check failed, "
+                         f"Next peak too close (interval {forward_interval_sec:.3f}s < {min_forward_interval:.3f}s, "
+                         f"(45% of expected RR) AND current peak not strong enough "
+                         f"(strength ratio {strength_ratio:.2f}x < threshold {strength_threshold:.1f}x). "
+                         f"- <br> This suggests current peak is S2, not S1. "
+                         f"If accepted, would imply {implied_bpm:.0f} BPM"
+                     )
         # Get the weights for the calculation
         rhythm_weight = self.params.get('lone_s1_rhythm_weight', 0.65)
         amplitude_weight = self.params.get('lone_s1_amplitude_weight', 0.35)
@@ -1040,50 +1091,75 @@ def convert_to_wav(file_path: str, target_path: str) -> bool:
         return False
 
 def _apply_pypcg_denoising(audio_data: np.ndarray, sample_rate: int, params: Dict) -> np.ndarray:
-    """Apply pyPCG denoising if configured."""
-    if params.get('denoising_method') is None:
+    """Apply pyPCG denoising with tunable strength."""
+    if params.get('denoising_method') is None or not PYPCG_AVAILABLE:
         return audio_data
         
     try:
-        import pyPCG
         sig = pyPCG.pcg_signal(audio_data, sample_rate)
+        method = params['denoising_method']
         
-        if params['denoising_method'] == 'wavelet_auto':
-            # Automatic threshold (Donoho-Johnstone)
-            denoised = pyPCG.preprocessing.wt_denoise_sth(
+        if method.startswith('wavelet'):
+            import pywt
+            wt_family = params.get('wt_family', 'coif4')
+            wt_level = params.get('wt_level', 5)
+            
+            # Perform wavelet decomposition
+            coeffs = pywt.wavedec(sig.data, wt_family, level=wt_level)
+            
+            if method == 'wavelet_auto':
+                # Automatic thresholding with adjustable multiplier
+                thresholded_coeffs = []
+                for i, coeff in enumerate(coeffs):
+                    # Skip approximation coefficients (cA) - preserve low frequencies
+                    if i == 0:
+                        thresholded_coeffs.append(coeff)
+                        continue
+                    
+                    # Estimate noise level using MAD (Median Absolute Deviation)
+                    mad = np.median(np.abs(coeff - np.median(coeff)))
+                    sigma = mad / 0.6745
+                    tau = sigma * np.sqrt(2) * params.get('wavelet_threshold_multiplier', 1.0)
+                    
+                    # Apply soft thresholding
+                    thresholded_coeffs.append(pywt.threshold(coeff, tau, mode='soft'))
+            
+            else:  # wavelet_manual
+                manual_th = params.get('wavelet_threshold', 0.2)
+                thresholded_coeffs = [
+                    coeff if i == 0 else pywt.threshold(coeff, manual_th * np.max(np.abs(coeff)))
+                    for i, coeff in enumerate(coeffs)
+                ]
+            
+            # Reconstruct signal
+            denoised_data = pywt.waverec(thresholded_coeffs, wt_family)
+            logging.info(f"✓ Applied wavelet denoising (family={wt_family}, level={wt_level}, multiplier={params.get('wavelet_threshold_multiplier', 1.0)})")
+            return denoised_data
+            
+        elif method == 'emd_savgol':
+            # EMD + Savitzky-Golay
+            denoised = preproc.emd_denoise_savgol(
                 sig, 
-                wt_family=params['wt_family'], 
-                wt_level=params['wt_level']
+                window=params.get('emd_window', 10),
+                poly=params.get('emd_poly', 3)
             )
-        elif params['denoising_method'] == 'wavelet_manual':
-            # Manual threshold
-            threshold = params['wavelet_threshold'] or 0.2
-            denoised = pyPCG.preprocessing.wt_denoise(
-                sig, 
-                th=threshold,
-                wt_family=params['wt_family'], 
-                wt_level=params['wt_level']
-            )
-        elif params['denoising_method'] == 'emd_savgol':
-            # EMD + Savitzky-Golay (excellent for non-stationary heart sounds)
-            denoised = pyPCG.preprocessing.emd_denoise_savgol(
-                sig,
-                window=params['emd_window'],
-                poly=params['emd_poly']
-            )
+            logging.info(f"✓ Applied EMD denoising (window={params.get('emd_window')}, poly={params.get('emd_poly')})")
+            return denoised.data
+            
         else:
-            logging.warning(f"Unknown denoising method: {params['denoising_method']}")
+            logging.warning(f"Unknown denoising method: {method}")
             return audio_data
             
-        logging.info(f"Applied pyPCG denoising: {params['denoising_method']}")
-        return denoised.data
-        
-    except ImportError:
-        logging.warning("pyPCG not installed. Install with 'pip install pyPCG-toolbox'")
+    except ImportError as e:
+        logging.error(f"❌ pyPCG-toolbox not installed. Install with: pip install pyPCG-toolbox")
+        logging.error(f"Import error: {e}")
         return audio_data
     except Exception as e:
-        logging.error(f"Denoising failed: {e}. Proceeding without it.")
+        logging.error(f"❌ Denoising failed: {e}")
+        import traceback
+        logging.debug(traceback.format_exc())
         return audio_data
+
 
 def preprocess_audio(file_path: str, params: Dict, output_directory: str, output_options: Optional[Dict] = None) -> Tuple[np.ndarray, int]:
     if output_options is None:
@@ -1231,85 +1307,96 @@ def calculate_peak_prominence(peak_idx: int, audio_envelope: np.ndarray, trough_
     
     return prominence
 
-def calculate_blended_confidence(deviation: float, bpm: float, params: Dict) -> float:
+def adjust_confidence_with_contractility(
+    base_confidence: float,
+    s1_prominence: float,
+    s2_prominence: float,
+    bpm: float,
+    params: Dict,
+) -> Tuple[float, str]:
     """
-    Calculates a confidence score for pairing two peaks based on amplitude deviation.
-    This version dynamically constructs the confidence curve based on the current BPM
-    to reflect physiological expectations (heart's contractility).
+    Contractility / prominence adjustment.
+
+    Compares the measured S2/S1 prominence ratio against a BPM-based expectation:
+    - If S2 is too prominent for this BPM → penalize confidence.
+    - If S1 is much more prominent than expected → modestly boost confidence.
     """
-    # Get the anchor points for our dynamic model from params
-    bpm_points = [params['contractility_bpm_low'], params['contractility_bpm_high']]
-    deviation_points = [0.0, 0.25, 0.40, 0.80, 1.0]  # Hardcoded deviation points
-
-    # Get the two boundary curves (for low and high BPM)
-    curve_low = np.array([0.9, 0.9, 0.7, 0.1, 0.1])  # Hardcoded low BPM curve
-    curve_high = np.array([0.1, 0.5, 0.75, 0.65, 0])  # Hardcoded high BPM curve
-
-    # --- Create the Live Confidence Curve ---
-    # Calculate how far the current BPM is into the transition zone (0.0 to 1.0)
-    blend_ratio = np.clip((bpm - bpm_points[0]) / (bpm_points[1] - bpm_points[0]), 0, 1)
-
-    # Linearly interpolate between the low and high curves to get the live curve
-    live_confidence_curve = curve_low + (curve_high - curve_low) * blend_ratio
-
-    final_confidence = np.interp(deviation, deviation_points, live_confidence_curve)
-
-    return final_confidence
-
-
-# Replace the existing function with this updated version
-def _adjust_confidence_with_stability_and_ratio(confidence: float, s1_idx: int, s2_idx: int, 
-                                               audio_envelope: np.ndarray, dynamic_noise_floor: pd.Series,
-                                               long_term_bpm: float, pairing_ratio: float, params: Dict, 
-                                               sample_rate: int, peak_bpm_time_sec: Optional[float], 
-                                               recovery_end_time_sec: Optional[float], beat_count: int,
-                                               trough_indices: np.ndarray) -> Tuple[float, str]:  # ← ADDED trough_indices
-    """Applies confidence adjustments using prominence-based strength ratio."""
     reason = ""
 
-    # --- 1. Stability Pre-Adjustment (unchanged) ---
+    # --- 1. Contractility Model: Expected S2/S1 ratio as a function of BPM ---
+    expected_max_ratio = np.interp(
+        bpm,
+        [params["contractility_bpm_low"], params["contractility_bpm_high"]],
+        [params["s2_s1_ratio_low_bpm"], params["s2_s1_ratio_high_bpm"]],
+    )
+
+    # --- 2. Reality: Measured S2/S1 prominence ratio ---
+    actual_ratio = s2_prominence / (s1_prominence + 1e-9)
+    reason += (
+        f"\n- Prominence: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, "
+        f"S2/S1={actual_ratio:.2f} (Expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM)"
+    )
+
+    # --- 3. Apply contractility logic ---
+    if actual_ratio > expected_max_ratio:
+        # S2 is too prominent for this BPM → penalize
+        violation = (actual_ratio / (expected_max_ratio + 1e-9)) - 1.0
+        penalty_strength = params.get("contractility_penalty_strength", 0.4)
+        penalty = violation * penalty_strength
+        confidence = max(0.0, base_confidence - penalty)
+        reason += (
+            f"\n Contractility Penalty: -{penalty:.2f} "
+            f"(S2 too prominent for BPM; prominence ratio {actual_ratio:.2f} > expected {expected_max_ratio:.2f}) -> {confidence:.2f}"
+        )
+    elif actual_ratio < expected_max_ratio * 0.5:
+        # S1 is much more prominent than expected → mild boost
+        boost = params.get("contractility_boost_amount", 0.15)
+        confidence = min(1.0, base_confidence + boost)
+        reason += (
+            f"\n Contractility Boost: +{boost:.2f} "
+            f"(S1 >> S2 at {bpm:.0f} BPM; prominence ratio {actual_ratio:.2f}) -> {confidence:.2f}"
+        )
+    else:
+        # Within expected range → leave confidence unchanged
+        confidence = base_confidence
+        reason += (
+            f"\n Contractility Neutral: prominence ratio {actual_ratio:.2f} within expected range "
+            f"for {bpm:.0f} BPM, confidence unchanged"
+        )
+
+    return confidence, reason
+
+
+def _apply_other_pairing_adjustments(
+    confidence: float,
+    s1_idx: int,
+    s2_idx: int,
+    audio_envelope: np.ndarray,
+    dynamic_noise_floor: pd.Series,
+    long_term_bpm: float,
+    pairing_ratio: float,
+    params: Dict,
+    sample_rate: int,
+    peak_bpm_time_sec: Optional[float],
+    recovery_end_time_sec: Optional[float],
+    beat_count: int,
+) -> Tuple[float, str]:
+    """
+    Applies non-contractility adjustments:
+    - Stability based on recent pairing success.
+    - (Keeps the door open for future non-prominence heuristics.)
+
+    All S1/S2 prominence-based contractility logic is handled separately.
+    """
+    reason = ""
+
+    # --- Stability adjustment ---
     if beat_count >= 5:
         floor = params.get("stability_confidence_floor", 0.85)
         ceiling = params.get("stability_confidence_ceiling", 1.10)
         stability_factor = np.interp(pairing_ratio, [0.0, 1.0], [floor, ceiling])
         confidence *= stability_factor
-        reason += f"\n- Stability Pre-Adjust: x{stability_factor:.2f} (Pairing Ratio: {pairing_ratio:.0%})"
-
-    # --- 2. Calculate Prominence-Based Strengths ---
-    s1_prominence = calculate_peak_prominence(s1_idx, audio_envelope, trough_indices)
-    s2_prominence = calculate_peak_prominence(s2_idx, audio_envelope, trough_indices)
-    
-    # Prominence-based ratio (replaces old amplitude-based ratio)
-    current_s2_s1_strength_ratio = s2_prominence / (s1_prominence + 1e-9)
-    
-    reason += f"\n- Prominence Ratio: S2={s2_prominence:.3f}, S1={s1_prominence:.3f}, Ratio={current_s2_s1_strength_ratio:.2f}x"
-
-    # --- 3. Expected Ratio Logic (unchanged) ---
-    is_in_recovery = (peak_bpm_time_sec is not None and recovery_end_time_sec is not None and
-                      peak_bpm_time_sec < (s1_idx / sample_rate) < recovery_end_time_sec)
-    effective_bpm = max(long_term_bpm, params['contractility_bpm_low']) if is_in_recovery else long_term_bpm
-    max_expected_s2_s1_ratio = np.interp(effective_bpm,
-                                       [params['contractility_bpm_low'], params['contractility_bpm_high']],
-                                       [params['s2_s1_ratio_low_bpm'], params['s2_s1_ratio_high_bpm']])
-
-    # --- 4. Apply Prominence-Based Adjustments ---
-    if current_s2_s1_strength_ratio > max_expected_s2_s1_ratio:
-        min_penalty = params.get("penalty_amount_min", 0.15)
-        max_penalty = params.get("penalty_amount_max", 0.40)
-        violation_severity = current_s2_s1_strength_ratio / max_expected_s2_s1_ratio
-        severity_scale = np.clip((violation_severity - 1.0) / 2.0, 0, 1)
-        penalty_amount = min_penalty + (severity_scale * (max_penalty - min_penalty))
-        confidence -= penalty_amount
-        reason += f"\n- PENALIZED by {penalty_amount:.2f} (S2 Prominence {current_s2_s1_strength_ratio:.2f}x > Expected {max_expected_s2_s1_ratio:.1f}x)"
-    elif s1_prominence > (s2_prominence * params.get('s1_s2_boost_ratio', 1.2)):
-        min_boost = params.get("boost_amount_min", 0.10)
-        max_boost = params.get("boost_amount_max", 0.35)
-        actual_s1_s2_ratio = s1_prominence / (s2_prominence + 1e-9)
-        boost_threshold_ratio = params.get('s1_s2_boost_ratio', 1.2)
-        exceedance_scale = np.clip((actual_s1_s2_ratio - boost_threshold_ratio) / (4.0 - boost_threshold_ratio), 0, 1)
-        boost_amount = min_boost + (exceedance_scale * (max_boost - min_boost))
-        confidence += boost_amount
-        reason += f"\n- Boosted by {boost_amount:.2f} (S1 Prominence {actual_s1_s2_ratio:.2f}x > S2)"
+        reason += f"\n- Stability Adjust: x{stability_factor:.2f} (Pairing Ratio: {pairing_ratio:.0%}) -> {confidence:.2f}"
 
     return max(0.0, min(1.0, confidence)), reason
 
