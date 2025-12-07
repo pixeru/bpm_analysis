@@ -5,4 +5,5 @@ plotly
 ttkbootstrap
 pydub
 dash
-Pillow
+Pillowpip
+librosa
