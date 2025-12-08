@@ -1817,7 +1817,7 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     
     # Generate HTML plot if requested
     if output_options.get('html', True):
-        plotter = Plotter(original_file_path, params, sample_rate, output_directory)
+        plotter = Plotter(original_file_path, params, sample_rate, output_directory, source_audio_path=wav_file_path)
         plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics, output_options)
     else:
         logging.info("Skipping HTML plot generation as requested.")
