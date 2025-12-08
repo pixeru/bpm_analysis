@@ -6,7 +6,7 @@ import datetime
 import logging
 import sys
 import time
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from enum import Enum
 
 from audio_io import preprocess_audio
@@ -117,6 +117,42 @@ def format_debug_entry(debug_entry: Dict) -> List[str]:
             elif original:
                 lines.append("- Original Classification:")
                 lines.append(f"    - {original}")
+
+        elif sec_type == "prominence":
+            details = sec.get("details", {})
+            lines.append("- Prominence context:")
+
+            def _format_trough(label: str, idx, amp, time):
+                if idx is None or amp is None:
+                    return f"    - {label}: None"
+                time_str = f"{time:.3f}s" if time is not None else "unknown time"
+                return f"    - {label}: idx={idx} ({time_str}), amp={amp:.3f}"
+
+            for peak_label in ("s1", "s2"):
+                peak_data = details.get(peak_label, {})
+                if not peak_data:
+                    continue
+                prom = peak_data.get("prominence")
+                peak_time = peak_data.get("peak_time")
+                peak_amp = peak_data.get("peak_amp")
+                key_col = peak_data.get("key_col_amp")
+                time_str = f"{peak_time:.3f}s" if peak_time is not None else "unknown time"
+                amp_str = f"{peak_amp:.3f}" if peak_amp is not None else "unknown amp"
+                prom_str = f"{prom:.3f}" if prom is not None else "unknown"
+                key_col_str = f"{key_col:.3f}" if key_col is not None else "unknown"
+                lines.append(
+                    f"    - {peak_label.upper()}: prom {prom_str}, peak @ {time_str} (amp {amp_str}), key col {key_col_str}"
+                )
+                lines.append(
+                    _format_trough(
+                        "      Left trough", peak_data.get("left_trough_idx"), peak_data.get("left_trough_amp"), peak_data.get("left_trough_time")
+                    )
+                )
+                lines.append(
+                    _format_trough(
+                        "      Right trough", peak_data.get("right_trough_idx"), peak_data.get("right_trough_amp"), peak_data.get("right_trough_time")
+                    )
+                )
 
     return lines
 
@@ -279,7 +315,7 @@ class PeakClassifier:
         all_peaks = self.state['all_peaks']
         loop_idx = self.state['loop_idx']
 
-        # Calculate recent rhythm stability as a ratio (shared helper)
+        # Calculate recent rhythm stability as a ratio
         pairing_ratio = self._calculate_pairing_ratio()
 
         # We always have at least one "next" peak here (caller guards last-peak case)
@@ -297,11 +333,104 @@ class PeakClassifier:
             middle_prom = calculate_peak_prominence(
                 middle_peak_idx, self.audio_envelope, self.state['trough_indices']
             )
+            next_next_prom = calculate_peak_prominence(
+                next_next_peak_idx, self.audio_envelope, self.state['trough_indices']
+            )
             noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
 
-            if middle_prom < current_prom * noise_thresh:
+            # --- Interval-aware forward look ---
+            # In addition to prominence, also check whether accepting the middle peak as S2
+            # would force an impossible S2→S1 interval to the following peak.
+            #
+            # If the interval from middle_peak_idx (as S2) to next_next_peak_idx (as S1) is
+            # shorter than the existing minimum S1-S2 interval constraint, then
+            #   [current_peak_idx] = S1, [middle_peak_idx] = Noise, [next_next_peak_idx] = S2
+            # is more physiologically plausible than treating the middle peak as S2.
+            bpm = self.state['long_term_bpm']
+            min_s1_s2_interval = (60.0 / bpm) * self.params.get('min_s1_s2_interval_rr_fraction', 0.35)
+            min_s1_s2_interval = max(min_s1_s2_interval, self.params.get('min_s1_s2_interval_sec', 0.15))
+
+            s2_to_next_s1_interval_sec = (next_next_peak_idx - middle_peak_idx) / self.sample_rate
+
+            # Determine if middle is skippable based on BOTH interval AND intensity.
+            middle_is_weak = middle_prom < current_prom * noise_thresh
+            interval_is_impossible = s2_to_next_s1_interval_sec < min_s1_s2_interval
+            next_next_is_strong = next_next_prom > middle_prom
+
+            if middle_is_weak and interval_is_impossible and next_next_is_strong:
+                # Try pairing current_peak_idx + next_next_peak_idx instead, treating the middle as noise.
+                is_paired_interval, reason_interval, prominence_context_interval = self._attempt_s1_s2_pairing(
+                    current_peak_idx, next_next_peak_idx, pairing_ratio
+                )
+
+                if is_paired_interval:
+                    pairing_lines_interval = [
+                        line.strip().lstrip('- ')
+                        for line in reason_interval.strip().split("\n")
+                        if line.strip()
+                    ]
+
+                    lookahead_msg_interval = (
+                        "LOOKAHEAD INTERVAL: Reinterpreted middle peak as noise because the implied "
+                        f"S2→S1 interval {s2_to_next_s1_interval_sec:.3f}s is below the minimum "
+                        f"{min_s1_s2_interval:.3f}s for BPM {bpm:.0f}, and the middle peak is weak "
+                        f"({middle_prom:.3f} < {noise_thresh:.2f} × S1 {current_prom:.3f}) while the "
+                        f"next candidate is stronger ({next_next_prom:.3f} > {middle_prom:.3f})."
+                    )
+
+                    prominence_section_interval = self._build_prominence_section(prominence_context_interval)
+
+                    s1_sections_interval = [
+                        {"type": "lookahead", "text": lookahead_msg_interval},
+                        {"type": "pairing", "lines": pairing_lines_interval, "success": True},
+                        prominence_section_interval,
+                    ]
+                    s2_sections_interval = [
+                        {"type": "lookahead", "text": lookahead_msg_interval},
+                        {"type": "pairing", "lines": pairing_lines_interval, "success": True},
+                        prominence_section_interval,
+                    ]
+
+                    self.state['candidate_beats'].append(current_peak_idx)
+                    self.state['beat_debug_info'][current_peak_idx] = {
+                        "peak_type": PeakType.S1_PAIRED.value,
+                        "sections": s1_sections_interval,
+                    }
+
+                    original_middle_debug_interval = self.state['beat_debug_info'].get(middle_peak_idx)
+                    self.state['beat_debug_info'][middle_peak_idx] = {
+                        "peak_type": PeakType.NOISE.value,
+                        "sections": [
+                            {
+                                "type": "lookahead",
+                                "text": (
+                                    "Middle peak treated as noise due to impossible S2→S1 interval "
+                                    f"({s2_to_next_s1_interval_sec:.3f}s < {min_s1_s2_interval:.3f}s), "
+                                    f"weak prominence ({middle_prom:.3f} < {noise_thresh:.2f} × S1 "
+                                    f"{current_prom:.3f}), and a stronger following candidate "
+                                    f"({next_next_prom:.3f} > {middle_prom:.3f})."
+                                ),
+                            },
+                            {
+                                "type": "original",
+                                "original_debug": original_middle_debug_interval,
+                            },
+                        ],
+                    }
+
+                    self.state['beat_debug_info'][next_next_peak_idx] = {
+                        "peak_type": PeakType.S2_PAIRED.value,
+                        "sections": s2_sections_interval,
+                    }
+
+                    self.state['consecutive_rr_rejections'] = 0
+                    # Skip the S1, middle noise, and S2 peaks
+                    self.state['loop_idx'] += 3
+                    return
+
+            if middle_prom < current_prom * noise_thresh and middle_prom < next_next_prom:
                 # Try pairing current + next_next (skip the middle)
-                is_paired_skip, reason_skip = self._attempt_s1_s2_pairing(
+                is_paired_skip, reason_skip, prominence_context_skip = self._attempt_s1_s2_pairing(
                     current_peak_idx, next_next_peak_idx, pairing_ratio
                 )
 
@@ -315,16 +444,21 @@ class PeakClassifier:
                     lookahead_msg = (
                         "LOOKAHEAD SUCCESS: Skipped intermediate weak peak "
                         f"(middle prominence {middle_prom:.3f} < {noise_thresh:.2f} × "
-                        f"S1 prominence {current_prom:.3f})"
+                        f"S1 prominence {current_prom:.3f} and next candidate prominence "
+                        f"{next_next_prom:.3f} > middle)"
                     )
+
+                    prominence_section = self._build_prominence_section(prominence_context_skip)
 
                     s1_sections = [
                         {"type": "lookahead", "text": lookahead_msg},
                         {"type": "pairing", "lines": pairing_lines, "success": True},
+                        prominence_section,
                     ]
                     s2_sections = [
                         {"type": "lookahead", "text": lookahead_msg},
                         {"type": "pairing", "lines": pairing_lines, "success": True},
+                        prominence_section,
                     ]
 
                     self.state['candidate_beats'].append(current_peak_idx)
@@ -342,7 +476,8 @@ class PeakClassifier:
                                 "text": (
                                     "Middle peak treated as noise due to weak prominence "
                                     f"({middle_prom:.3f} < {noise_thresh:.2f} × "
-                                    f"S1 prominence {current_prom:.3f})"
+                                    f"S1 prominence {current_prom:.3f}) and the following "
+                                    f"candidate is stronger (next prominence {next_next_prom:.3f})."
                                 ),
                             },
                             {
@@ -362,8 +497,8 @@ class PeakClassifier:
                     self.state['loop_idx'] += 3
                     return
 
-        # --- Standard pairing attempt (existing logic) ---
-        is_paired, reason = self._attempt_s1_s2_pairing(
+        # --- Standard pairing attempt ---
+        is_paired, reason, prominence_context = self._attempt_s1_s2_pairing(
             current_peak_idx, next_peak_idx, pairing_ratio
         )
 
@@ -375,6 +510,7 @@ class PeakClassifier:
                 if line.strip()
             ]
             sections = [{"type": "pairing", "lines": pairing_lines, "success": True}]
+            sections.append(self._build_prominence_section(prominence_context))
             self.state['beat_debug_info'][current_peak_idx] = {
                 "peak_type": PeakType.S1_PAIRED.value,
                 "sections": sections,
@@ -417,7 +553,9 @@ class PeakClassifier:
         logging.info(f"Found {len(peaks)} raw peaks using dynamic height threshold.")
         return peaks
 
-    def _attempt_s1_s2_pairing(self, s1_candidate_idx: int, s2_candidate_idx: int, pairing_ratio: float) -> Tuple[bool, str]:
+    def _attempt_s1_s2_pairing(
+        self, s1_candidate_idx: int, s2_candidate_idx: int, pairing_ratio: float
+    ) -> Tuple[bool, str, Dict[str, Any]]:
         """Calculates the confidence score for pairing two candidate peaks."""
         interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
         bpm = self.state['long_term_bpm']
@@ -438,7 +576,7 @@ class PeakClassifier:
                 f"Impossible: S1-S2 interval {interval_sec:.3f}s < min {min_s1_s2_interval:.3f}s "
                 f"(implies {implied_bpm:.0f} BPM vs assumed {bpm:.0f} BPM)"
             )
-            return False, debug_msg
+            return False, debug_msg, {}
 
         # --- Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
         base_confidence = 0.60
@@ -446,12 +584,31 @@ class PeakClassifier:
         reason = f"Base Conf: {base_confidence:.2f}"
 
         # --- Contractility / prominence-based adjustment (S1 vs S2) ---
-        s1_prominence = calculate_peak_prominence(
-            s1_candidate_idx, self.audio_envelope, self.state['trough_indices']
+        s1_details = get_peak_prominence_details(
+            s1_candidate_idx,
+            self.audio_envelope,
+            self.state['trough_indices'],
+            sample_rate=self.sample_rate,
         )
-        s2_prominence = calculate_peak_prominence(
-            s2_candidate_idx, self.audio_envelope, self.state['trough_indices']
+        s2_details = get_peak_prominence_details(
+            s2_candidate_idx,
+            self.audio_envelope,
+            self.state['trough_indices'],
+            sample_rate=self.sample_rate,
         )
+        s1_prominence = s1_details["prominence"]
+        s2_prominence = s2_details["prominence"]
+
+        shared_s1_right_s2_left = (
+            s1_details.get("right_trough_idx") is not None
+            and s2_details.get("left_trough_idx") is not None
+            and s1_details["right_trough_idx"] == s2_details["left_trough_idx"]
+        )
+        prominence_context = {
+            "s1": s1_details,
+            "s2": s2_details,
+            "shared_s1_right_s2_left": shared_s1_right_s2_left,
+        }
 
         confidence, contractility_reason = adjust_confidence_with_contractility(
             base_confidence,
@@ -503,39 +660,57 @@ class PeakClassifier:
         reason += interval_reason
 
         # --- Forward-Looking Contextual Penalty ---
-        # If pairing S1-S2 causes the next S2→S1 transition to be implausable, penalize it
-        # This prevents: [noise]→[true S1 as S2]→[true S2 bein mislabeled]
+        # If pairing S1-S2 causes the next S2→S1 transition to be implausable, penalize it.
+        # Guardrail: only trust this check if the "next S1" peak is strong enough to be
+        # a plausible beat; otherwise it may just be noise and should not veto the pair.
         forward_look_penalty = 0.0
         if self.state['loop_idx'] + 2 < len(self.state['all_peaks']):
             next_next_peak_idx = self.state['all_peaks'][self.state['loop_idx'] + 2]
-            
+
             # Use prominence for robust amplitude comparison
-            s2_prominence = calculate_peak_prominence(
-                s2_candidate_idx, self.audio_envelope, self.state['trough_indices']
+            next_s1_details = get_peak_prominence_details(
+                next_next_peak_idx,
+                self.audio_envelope,
+                self.state['trough_indices'],
+                sample_rate=self.sample_rate,
             )
-            next_s1_prominence = calculate_peak_prominence(
-                next_next_peak_idx, self.audio_envelope, self.state['trough_indices']
-            )
-            
+            next_s1_prominence = next_s1_details["prominence"]
+
             # Only apply if we have valid data
             if s2_prominence > 1e-9 and next_s1_prominence > 1e-9:
-                drop_ratio = next_s1_prominence / s2_prominence
-                
-                # If the following peak is substantially weaker, it suggests s2_candidate
-                # is actually a strong S1, making this S1-S2 pairing incorrect
-                threshold = self.params.get('forward_look_drop_threshold', 0.4)
-                if drop_ratio < threshold:
-                    # Scale penalty by severity of the drop
-                    severity = (threshold - drop_ratio) / threshold
-                    max_pen = self.params.get('forward_look_max_penalty', 0.3)
-                    forward_look_penalty = severity * max_pen
-                    
-                    confidence = max(0.0, confidence - forward_look_penalty)
-                    reason += f"\n- Penalized by Forward-Look {forward_look_penalty:.2f} (S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x)"
+                noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
+
+                # Guardrail: Skip penalty if the "next S1" is too weak to be a credible beat.
+                # This prevents noise from vetoing a valid S1-S2 pair.
+                if next_s1_prominence < s2_prominence * noise_thresh:
+                    # Next peak is likely noise; skip forward-look penalty entirely.
+                    pass
+                else:
+                    # Next peak is strong enough to evaluate; apply penalty if needed.
+                    drop_ratio = next_s1_prominence / (s2_prominence + 1e-9)
+
+                    # If the following peak is substantially weaker, it suggests s2_candidate
+                    # is actually a strong S1, making this S1-S2 pairing incorrect
+                    threshold = self.params.get('forward_look_drop_threshold', 0.4)
+                    if drop_ratio < threshold:
+                        # Scale penalty by severity of the drop
+                        severity = (threshold - drop_ratio) / threshold
+                        max_pen = self.params.get('forward_look_max_penalty', 0.3)
+                        forward_look_penalty = severity * max_pen
+
+                        confidence = max(0.0, confidence - forward_look_penalty)
+                        reason += (
+                            f"\n- Penalized by Forward-Look {forward_look_penalty:.2f} "
+                            f"(S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x)"
+                        )
 
         is_paired = confidence >= self.params['pairing_confidence_threshold']
         reason += f"\n- Final Score: {confidence:.2f} vs Threshold {self.params['pairing_confidence_threshold']:.2f} -> {'Paired' if is_paired else 'Not Paired'}"
-        return is_paired, reason
+        return is_paired, reason, prominence_context
+
+    def _build_prominence_section(self, prominence_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Encapsulates the prominence context into a debug section."""
+        return {"type": "prominence", "details": prominence_context}
 
     def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
         """Validates if an unpaired peak is a Lone S1 or Noise."""
@@ -594,10 +769,6 @@ class PeakClassifier:
             current_peak_idx, self.state['candidate_beats'][-1], self.state['long_term_bpm'],
             self.audio_envelope, self.state['dynamic_noise_floor'], self.sample_rate, self.params
         )
-        threshold = self.params.get("lone_s1_confidence_threshold", 0.6)
-        if confidence < threshold:
-            detail_lines.append(f"Outcome: Rejected Lone S1 (score {confidence:.2f} < threshold {threshold:.2f})")
-            return False, detail_lines
 
         current_peak_all_peaks_idx = np.searchsorted(self.state['all_peaks'], current_peak_idx)
         if current_peak_all_peaks_idx < len(self.state['all_peaks']) - 1:
@@ -607,24 +778,31 @@ class PeakClassifier:
             min_forward_interval = expected_rr_sec * self.params.get('lone_s1_forward_check_pct', 0.45)
             # If the next peak is suspiciously close (<45% of expected RR)...
             if forward_interval_sec < min_forward_interval:
-                # ...and current peak isn't MUCH stronger (1.7x), then it's probably S2, not S1
+                # ...and current peak isn't MUCH stronger (1.69x), then it's probably S2, not S1
                 current_amp = self.audio_envelope[current_peak_idx]
                 next_amp = self.audio_envelope[next_raw_peak_idx]
                 strength_ratio = current_amp / (next_amp + 1e-9)
-                strength_threshold = 1.7
-                if not (current_amp > (next_amp * strength_threshold)): 
-                     implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
-                     detail_lines.extend([
-                         "Forward check failed: next peak arrives too quickly for a true S1.",
-                         f"Interval {forward_interval_sec:.3f}s < {min_forward_interval:.3f}s (45% of expected RR) and strength ratio {strength_ratio:.2f}x < {strength_threshold:.1f}x.",
-                         f"This pattern suggests the current peak is S2; accepting it would imply ~{implied_bpm:.0f} BPM."
-                     ])
-                     detail_lines.append("Outcome: Rejected Lone S1 due to forward-check conflict.")
-                     return False, detail_lines
+                strength_threshold = 1.69
+                if not (current_amp > (next_amp * strength_threshold)):
+                    implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
+                    detail_lines.extend([
+                        "Forward check failed: next peak arrives too quickly for a true S1.",
+                        f"Interval {forward_interval_sec:.3f}s < {min_forward_interval:.3f}s (45% of expected RR) and strength ratio {strength_ratio:.2f}x < {strength_threshold:.2f}x.",
+                        f"This pattern suggests the current peak is S2; accepting it would imply ~{implied_bpm:.0f} BPM."
+                    ])
+                    penalty_factor = self.params.get('lone_s1_forward_penalty_factor', 0.35)
+                    previous_confidence = confidence
+                    confidence = max(0.0, confidence * penalty_factor)
+                    detail_lines.append(
+                        f"Confidence penalized {penalty_factor:.2f}x -> {previous_confidence:.2f} to {confidence:.2f}.")
+
+        threshold = self.params.get("lone_s1_confidence_threshold", 0.6)
+        if confidence < threshold:
+            detail_lines.append(f"Outcome: Rejected Lone S1 (score {confidence:.2f} < threshold {threshold:.2f})")
+            return False, detail_lines
 
         detail_lines.append(f"Outcome: Validated Lone S1 (score {confidence:.2f} >= threshold {threshold:.2f})")
         return True, detail_lines
-
 
 
 def _calculate_dynamic_noise_floor(audio_envelope: np.ndarray, sample_rate: int, params: Dict) -> Tuple[pd.Series, np.ndarray]:
@@ -682,35 +860,38 @@ def _calculate_dynamic_noise_floor(audio_envelope: np.ndarray, sample_rate: int,
 
     return dynamic_noise_floor, np.array(sanitized_trough_indices)
 
-def calculate_peak_prominence(peak_idx: int, audio_envelope: np.ndarray, trough_indices: np.ndarray) -> float:
+def get_peak_prominence_details(
+    peak_idx: int,
+    audio_envelope: np.ndarray,
+    trough_indices: np.ndarray,
+    sample_rate: Optional[int] = None,
+) -> Dict[str, Any]:
     """
-    Calculate the true prominence of a peak by finding adjacent troughs.
-    Prominence = peak amplitude - higher adjacent trough amplitude (key col)
-    
-    Args:
-        peak_idx: Index of the peak in the audio envelope
-        audio_envelope: The audio envelope signal array
-        trough_indices: Sorted array of trough indices from _calculate_dynamic_noise_floor()
-    
-    Returns:
-        Prominence value (always ≥ 0)
+    Returns the details used when computing a peak's prominence.
+    The returned dictionary includes the adjacent trough amplitudes, the key col,
+    and optional timestamps (if `sample_rate` is provided).
     """
     if len(trough_indices) == 0:
-        # Fallback if no troughs available
-        return audio_envelope[peak_idx]
-    
-    # Find nearest trough on each side using binary search
+        return {
+            "peak_idx": peak_idx,
+            "peak_amp": float(audio_envelope[peak_idx]),
+            "left_trough_idx": None,
+            "left_trough_amp": None,
+            "right_trough_idx": None,
+            "right_trough_amp": None,
+            "key_col_amp": 0.0,
+            "prominence": float(audio_envelope[peak_idx]),
+        }
+
     insert_pos = np.searchsorted(trough_indices, peak_idx)
-    
+
     left_trough_idx = trough_indices[insert_pos - 1] if insert_pos > 0 else None
     right_trough_idx = trough_indices[insert_pos] if insert_pos < len(trough_indices) else None
-    
-    # Get amplitudes
-    peak_amplitude = audio_envelope[peak_idx]
-    left_trough_amp = audio_envelope[left_trough_idx] if left_trough_idx is not None else None
-    right_trough_amp = audio_envelope[right_trough_idx] if right_trough_idx is not None else None
-    
-    # The key col is the higher (less deep) of the two adjacent troughs
+
+    peak_amplitude = float(audio_envelope[peak_idx])
+    left_trough_amp = float(audio_envelope[left_trough_idx]) if left_trough_idx is not None else None
+    right_trough_amp = float(audio_envelope[right_trough_idx]) if right_trough_idx is not None else None
+
     if left_trough_amp is not None and right_trough_amp is not None:
         key_col_amp = max(left_trough_amp, right_trough_amp)
     elif left_trough_amp is not None:
@@ -718,11 +899,39 @@ def calculate_peak_prominence(peak_idx: int, audio_envelope: np.ndarray, trough_
     elif right_trough_amp is not None:
         key_col_amp = right_trough_amp
     else:
-        return peak_amplitude  # Should never reach here if troughs exist
-    
+        key_col_amp = 0.0
+
     prominence = max(0.0, peak_amplitude - key_col_amp)
-    
-    return prominence
+
+    details: Dict[str, Any] = {
+        "peak_idx": peak_idx,
+        "peak_amp": peak_amplitude,
+        "left_trough_idx": left_trough_idx,
+        "left_trough_amp": left_trough_amp,
+        "right_trough_idx": right_trough_idx,
+        "right_trough_amp": right_trough_amp,
+        "key_col_amp": key_col_amp,
+        "prominence": prominence,
+    }
+
+    if sample_rate:
+        details["peak_time"] = peak_idx / sample_rate
+        details["left_trough_time"] = (
+            left_trough_idx / sample_rate if left_trough_idx is not None else None
+        )
+        details["right_trough_time"] = (
+            right_trough_idx / sample_rate if right_trough_idx is not None else None
+        )
+
+    return details
+
+
+def calculate_peak_prominence(peak_idx: int, audio_envelope: np.ndarray, trough_indices: np.ndarray) -> float:
+    """
+    Calculate the true prominence of a peak by finding adjacent troughs.
+    """
+    details = get_peak_prominence_details(peak_idx, audio_envelope, trough_indices)
+    return details["prominence"]
 
 def adjust_confidence_with_contractility(
     base_confidence: float,
@@ -800,7 +1009,7 @@ def _apply_other_pairing_adjustments(
 ) -> Tuple[float, str]:
     """
     Applies non-contractility adjustments:
-    - Stability based on recent pairing success.
+    - Stability based on recent pairing success, with recovery-phase awareness.
     - (Keeps the door open for future non-prominence heuristics.)
 
     All S1/S2 prominence-based contractility logic is handled separately.
@@ -811,9 +1020,23 @@ def _apply_other_pairing_adjustments(
     if beat_count >= 5:
         floor = params.get("stability_confidence_floor", 0.85)
         ceiling = params.get("stability_confidence_ceiling", 1.10)
+        
+        # During recovery, S2 may have been physiologically absent during high BPM,
+        # causing pairing_ratio to drop artificially. To avoid penalizing valid S1-S2
+        # pairs when S2 re-emerges, we use a higher (more forgiving) floor.
+        current_time_sec = s1_idx / sample_rate
+        if (peak_bpm_time_sec is not None and 
+            recovery_end_time_sec is not None and
+            peak_bpm_time_sec <= current_time_sec <= recovery_end_time_sec):
+            # Override floor with recovery-specific value (default 1.0 = no penalty)
+            recovery_floor = params.get("recovery_phase_stability_floor", 0.95)
+            original_floor = floor
+            floor = max(floor, recovery_floor)
+            reason += f"\n- Recovery Phase Adjust: floor {original_floor:.2f} → {floor:.2f} (peak at {peak_bpm_time_sec:.1f}s)"
+
         stability_factor = np.interp(pairing_ratio, [0.0, 1.0], [floor, ceiling])
         confidence *= stability_factor
-        reason += f"\n- Stability Adjust: x{stability_factor:.2f} (Pairing Ratio: {pairing_ratio:.0%}) -> {confidence:.2f}"
+        reason += f"\n- Stability Adjust: x{stability_factor:.2f} (Pairing Ratio: {pairing_ratio:.0%}, Floor: {floor:.2f}) → {confidence:.2f}"
 
     return max(0.0, min(1.0, confidence)), reason
 
@@ -832,7 +1055,7 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
 
     rhythm_score = np.interp(
         rhythm_deviation_pct,
-        [0.0, 0.15, 0.30, 0.50],  # Hardcoded rhythm deviation points
+        [0.0, 0.15, 0.40, 0.60],  # Hardcoded rhythm deviation points
         [1.0, 0.8, 0.4, 0.0]      # Hardcoded rhythm confidence curve
     )
     rhythm_reason = (
@@ -848,7 +1071,7 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
     amplitude_score = np.interp(
         amplitude_ratio,
         [0.0, 0.4, 0.7, 1.0],      # Hardcoded amplitude ratio points
-        [0.0, 0.4, 0.8, 1.0]       # Hardcoded amplitude confidence curve
+        [0.0, 0.4, 0.7, 1.0]       # Hardcoded amplitude confidence curve
     )
     amplitude_reason = (
         f"Amplitude Fit {amplitude_score:.2f}: strength ratio {amplitude_ratio:.2f}x "
@@ -1129,6 +1352,181 @@ def calculate_bpm_series(peaks: np.ndarray, sample_rate: int, params: Dict) -> T
     # Return the original numpy time points for compatibility with older functions that need it
     return smoothed_bpm, peak_times[1:][valid_diffs]
 
+
+def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.ndarray) -> List[Dict]:
+    """
+    Detects trapezoid-shaped discontinuities in the average BPM series that are
+    characteristic of a brief extra-beat artifact:
+      - A very fast rise
+      - A sustained (possibly slightly sloped) plateau
+      - A very fast fall that returns to baseline
+
+    This is an in-memory adaptation of the example logic in detectTrapezoid.py.
+    It assumes `smoothed_bpm` contains the average BPM values and `bpm_times_sec`
+    contains the corresponding time stamps in seconds.
+    """
+    if (
+        smoothed_bpm is None
+        or smoothed_bpm.empty
+        or bpm_times_sec is None
+        or len(bpm_times_sec) != len(smoothed_bpm)
+    ):
+        return []
+
+    # Build working DataFrame equivalent to the CSV used in detectTrapezoid.py
+    df = pd.DataFrame(
+        {
+            "Time (s)": bpm_times_sec.astype(float),
+            "Average BPM": smoothed_bpm.to_numpy(dtype=float),
+        }
+    ).dropna(subset=["Time (s)", "Average BPM"])
+
+    if len(df) < 4:
+        return []
+
+    # Calculate differences and instantaneous rate of BPM change
+    df["Δt"] = df["Time (s)"].diff()
+    df["ΔBPM"] = df["Average BPM"].diff()
+    df["Rate"] = df["ΔBPM"] / df["Δt"]
+
+    # --- CONFIGURATION (mirrors detectTrapezoid.py) ---
+    RATE_THRESHOLD = 7.0          # BPM/s: physiologically impossible rate
+    MAX_EDGE_DURATION = 1.5       # Maximum time for rise/fall interval
+    MIN_PLATEAU_DURATION = 1.5    # Minimum plateau length (reduced for sloped cases)
+    MAX_PLATEAU_DURATION = 15.0   # Maximum plateau length
+    BASELINE_TOLERANCE = 5.0      # BPM tolerance for baseline return (increased)
+    MIN_JUMP = 6.0                # Minimum BPM jump to consider
+
+    # Step 1: Identify edge intervals (second point of each edge)
+    df["is_rise"] = (df["Rate"] > RATE_THRESHOLD) & (df["Δt"] < MAX_EDGE_DURATION)
+    df["is_fall"] = (df["Rate"] < -RATE_THRESHOLD) & (df["Δt"] < MAX_EDGE_DURATION)
+
+    rise_indices = df[df["is_rise"]].index.tolist()
+    fall_indices = df[df["is_fall"]].index.tolist()
+
+    trapezoids: List[Dict] = []
+
+    # Step 2: Match edges into trapezoids
+    for rise_idx in rise_indices:
+        # Need at least one sample before the rise edge for t1 / baseline
+        if rise_idx <= 0:
+            continue
+
+        rise_time = float(df.loc[rise_idx, "Time (s)"])
+
+        for fall_idx in list(fall_indices):
+            # Need at least one sample before fall edge for t3
+            if fall_idx <= 0:
+                continue
+
+            fall_time = float(df.loc[fall_idx, "Time (s)"])
+
+            # Timing constraints: plateau must be long enough but not absurdly long
+            plateau_duration = fall_time - rise_time
+            if not (MIN_PLATEAU_DURATION <= plateau_duration <= MAX_PLATEAU_DURATION):
+                continue
+
+            # --- Validate plateau (region strictly between rise and fall) ---
+            plateau_mask = (df["Time (s)"] > rise_time) & (df["Time (s)"] < fall_time)
+            plateau_df = df[plateau_mask]
+            if plateau_df.empty:
+                continue
+
+            # Allow sloped plateaus: median absolute rate should be modest
+            if plateau_df["Rate"].abs().median() > RATE_THRESHOLD / 3.0:
+                continue
+
+            # --- Validate baseline recovery ---
+            # Baseline before: up to 3 points before the rise edge
+            before_start_idx = max(0, rise_idx - 3)
+            before_end_idx = rise_idx - 1
+            if before_end_idx < before_start_idx:
+                continue
+            baseline_before = float(
+                df.loc[before_start_idx:before_end_idx, "Average BPM"].mean()
+            )
+
+            # Baseline after: up to 3 points starting at fall edge
+            after_end_idx = min(fall_idx + 2, df.index[-1])
+            baseline_after = float(
+                df.loc[fall_idx:after_end_idx, "Average BPM"].mean()
+            )
+
+            if abs(baseline_after - baseline_before) > BASELINE_TOLERANCE:
+                continue
+
+            # --- Calculate the four key timestamps ---
+            t1 = float(df.loc[rise_idx - 1, "Time (s)"])
+            t2 = rise_time
+            t3 = float(df.loc[fall_idx - 1, "Time (s)"])
+            t4 = fall_time
+
+            # Validate edge intervals are brief
+            if (t2 - t1) > MAX_EDGE_DURATION or (t4 - t3) > MAX_EDGE_DURATION:
+                continue
+
+            # Calculate jump from baseline to plateau median
+            plateau_median = float(plateau_df["Average BPM"].median())
+            jump_size = plateau_median - baseline_before
+            if jump_size < MIN_JUMP:
+                continue
+
+            plateau_slope = float(
+                plateau_df["Average BPM"].iloc[-1] - plateau_df["Average BPM"].iloc[0]
+            )
+
+            # Store both timestamps and BPM values for debugging/plotting
+            trap = {
+                "t_start_rise": t1,
+                "t_end_rise": t2,
+                "t_start_fall": t3,
+                "t_end_fall": t4,
+                "bpm_start_rise": float(df.loc[rise_idx - 1, "Average BPM"]),
+                "bpm_end_rise": float(df.loc[rise_idx, "Average BPM"]),
+                "bpm_start_fall": float(df.loc[fall_idx - 1, "Average BPM"]),
+                "bpm_end_fall": float(df.loc[fall_idx, "Average BPM"]),
+                "baseline_before": baseline_before,
+                "plateau_median": plateau_median,
+                "plateau_slope": plateau_slope,
+                "jump_size": jump_size,
+                "baseline_after": baseline_after,
+                "baseline_diff": baseline_after - baseline_before,
+                "plateau_duration": plateau_duration,
+                "plateau_points": int(len(plateau_df)),
+            }
+            trapezoids.append(trap)
+
+            # Remove used fall index so it cannot be reused by another rise
+            fall_indices.remove(fall_idx)
+            break
+
+    if trapezoids:
+        logging.info(f"Detected {len(trapezoids)} trapezoid HR artifacts (sudden plateau jumps):")
+        for i, trap in enumerate(trapezoids, 1):
+            logging.info(
+                "  Trapezoid #%d: "
+                "Rise %.3fs (%.1f BPM) → %.3fs (%.1f BPM); "
+                "Plateau %.3fs → %.3fs (Δ%.3fs, %d pts); "
+                "Fall %.3fs (%.1f BPM) → %.3fs (%.1f BPM)",
+                i,
+                trap["t_start_rise"],
+                trap["bpm_start_rise"],
+                trap["t_end_rise"],
+                trap["bpm_end_rise"],
+                trap["t_end_rise"],
+                trap["t_start_fall"],
+                trap["plateau_duration"],
+                trap["plateau_points"],
+                trap["t_start_fall"],
+                trap["bpm_start_fall"],
+                trap["t_end_fall"],
+                trap["bpm_end_fall"],
+            )
+    else:
+        logging.info("No trapezoid-like HR artifacts detected in average BPM series.")
+
+    return trapezoids
+
 def find_major_hr_inclines(smoothed_bpm_series: pd.Series, min_duration_sec: int = 10, min_bpm_increase: int = 15) -> List[Dict]:
     """Identifies significant, sustained periods of heart rate increase."""
     if smoothed_bpm_series.empty or len( smoothed_bpm_series) < 2:
@@ -1348,6 +1746,7 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     """Calculates all final BPM, HRV, and slope metrics for reporting."""
     metrics = {}
     metrics['smoothed_bpm'], metrics['bpm_times'] = calculate_bpm_series(final_peaks, sample_rate, params)
+    metrics['trapezoids'] = detect_trapezoid_discontinuities(metrics['smoothed_bpm'], metrics['bpm_times'])
     metrics['major_inclines'] = find_major_hr_inclines(metrics['smoothed_bpm'])
     metrics['major_declines'] = find_major_hr_declines(metrics['smoothed_bpm'])
     metrics['hrr_stats'] = calculate_hrr(metrics['smoothed_bpm'])
