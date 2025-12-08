@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 from scipy.io import wavfile
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, welch, iirnotch, find_peaks
 import librosa
 
 try:
@@ -22,6 +22,121 @@ except ImportError:
     logging.warning("pyPCG-toolbox not installed. Install with: pip install pyPCG-toolbox")
     PYPCG_AVAILABLE = False
     preproc = None
+
+
+def _detect_and_remove_stationary_hum(
+    audio_data: np.ndarray, sample_rate: int, params: Dict
+) -> Tuple[np.ndarray, Optional[float]]:
+    """
+    Detect a strong, stationary, narrow-band hum and remove it with a notch filter.
+
+    The detection is intentionally conservative so that most recordings (without a
+    clear hum) are left untouched.
+
+    Returns
+    -------
+    filtered_audio : np.ndarray
+        The (possibly) hum-filtered signal.
+    hum_freq_hz : Optional[float]
+        Detected hum frequency in Hz, or None if nothing was removed.
+    """
+    if audio_data.size == 0:
+        return audio_data, None
+
+    if not params.get("enable_hum_removal", True):
+        return audio_data, None
+
+    try:
+        # Use a relatively long window for a stable PSD estimate
+        window_sec = float(params.get("hum_psd_window_sec", 4.0))
+        nperseg = int(sample_rate * window_sec)
+        nperseg = max(256, min(len(audio_data), nperseg))
+
+        if nperseg > len(audio_data):
+            nperseg = len(audio_data)
+
+        freqs, psd = welch(audio_data, fs=sample_rate, nperseg=nperseg)
+    except Exception as e:
+        logging.warning("Hum detection skipped (PSD computation failed): %s", e)
+        return audio_data, None
+
+    # Restrict search to a low-frequency band where hums typically live
+    fmin = float(params.get("hum_min_freq_hz", 30.0))
+    fmax = float(params.get("hum_max_freq_hz", 120.0))
+    band_mask = (freqs >= fmin) & (freqs <= fmax)
+
+    if not np.any(band_mask):
+        return audio_data, None
+
+    freqs_band = freqs[band_mask]
+    psd_band = psd[band_mask]
+
+    if freqs_band.size < 3:
+        return audio_data, None
+
+    # Work in dB relative to the median so we look for a clearly dominant peak
+    psd_db = 10.0 * np.log10(psd_band + 1e-12)
+    median_db = float(np.median(psd_db))
+    psd_db_rel = psd_db - median_db
+
+    min_prom_db = float(params.get("hum_min_prominence_db", 10.0))
+
+    try:
+        peak_indices, properties = find_peaks(psd_db_rel, prominence=min_prom_db)
+    except Exception as e:
+        logging.warning("Hum detection skipped (peak finding failed): %s", e)
+        return audio_data, None
+
+    if peak_indices.size == 0:
+        logging.info(
+            "Hum removal: no strong narrow-band peak detected in %.1f–%.1f Hz.", fmin, fmax
+        )
+        return audio_data, None
+
+    prominences = properties.get("prominences", None)
+    if prominences is None or len(prominences) == 0:
+        return audio_data, None
+
+    best_idx_in_peaks = int(np.argmax(prominences))
+    best_prom = float(prominences[best_idx_in_peaks])
+
+    # Optional extra check: ensure the strongest peak clearly stands out from the rest
+    if len(prominences) > 1:
+        # Second-strongest prominence
+        second_best = float(np.partition(prominences, -2)[-2])
+    else:
+        second_best = 0.0
+
+    min_gap_db = float(params.get("hum_min_prominence_over_second_db", 3.0))
+    if second_best > 0.0 and (best_prom - second_best) < min_gap_db:
+        logging.info(
+            "Hum removal: strongest peak not clearly dominant (Δ%.1f dB). Skipping.",
+            best_prom - second_best,
+        )
+        return audio_data, None
+
+    hum_freq_hz = float(freqs_band[peak_indices[best_idx_in_peaks]])
+
+    # Sanity check on frequency
+    if hum_freq_hz <= 0.0 or hum_freq_hz >= (sample_rate / 2.0):
+        return audio_data, None
+
+    q = float(params.get("hum_notch_q", 30.0))
+
+    try:
+        # Normalized frequency (0–1) for iirnotch
+        w0 = hum_freq_hz / (sample_rate / 2.0)
+        b, a = iirnotch(w0, Q=q)
+        filtered = filtfilt(b, a, audio_data)
+        logging.info(
+            "Hum removal: applied narrow notch at %.2f Hz (Q=%.1f).", hum_freq_hz, q
+        )
+        return filtered, hum_freq_hz
+    except Exception as e:
+        logging.warning(
+            "Hum removal failed when applying notch at %.2f Hz: %s", hum_freq_hz, e
+        )
+        return audio_data, None
 
 
 def convert_to_wav(file_path: str, target_path: str) -> bool:
@@ -131,6 +246,13 @@ def preprocess_audio(
         raise
 
     audio_downsampled = _apply_pypcg_denoising(audio_downsampled, new_sample_rate, params)
+
+    # Optional adaptive hum removal (e.g., ~50–70 Hz mains / equipment hum)
+    audio_downsampled, detected_hum = _detect_and_remove_stationary_hum(
+        audio_downsampled, new_sample_rate, params
+    )
+    if detected_hum is not None:
+        logging.info("Detected and removed stationary hum at ~%.2f Hz.", detected_hum)
 
     lowcut, highcut = 20, 150
     nyquist = 0.5 * new_sample_rate

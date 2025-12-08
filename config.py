@@ -15,13 +15,20 @@ DEFAULT_PARAMS = {
     'emd_window': 40,
     'emd_poly': 2,
     'wavelet_threshold': None,  # None for auto, or float (0.0-1.0)
+    "enable_hum_removal": True,           # Detect and notch narrow low-frequency hums if present
+    "hum_psd_window_sec": 4.0,            # PSD window length (seconds) for hum detection
+    "hum_min_freq_hz": 40.0,              # Min frequency of narrow-band hum to consider
+    "hum_max_freq_hz": 100.0,             # Max frequency of narrow-band hum to consider
+    "hum_min_prominence_db": 8.0,        # Minimum prominence (dB) above local median to trigger notch
+    "hum_min_prominence_over_second_db": 3.0,  # Gap over next peak before trusting detection
+    "hum_notch_q": 35.0,                  # Q factor, Higher = narrower notch (try 35-40 for sharp hums)
 
     # =================================================================================
     # 2. Signal Feature Detection
     # Governs the initial identification of peaks and troughs in the audio envelope.
     # =================================================================================
-    "min_peak_distance_sec": 0.05,      # Minimum time allowed between any two raw peaks.
-    "peak_prominence_quantile": 0.1,    # How much a spike must stand out to be considered a 'peak'.
+    "min_peak_distance_sec": 0.1,       # I Adjusted This✔ Minimum time allowed between any two raw peaks.
+    "peak_prominence_quantile": 0.05,    # I Adjusted This✔ How much a spike must stand out to be considered a 'peak'.
     "trough_prominence_quantile": 0.1,  # How much a dip must stand out to be considered a 'trough'.
 
     # =================================================================================
@@ -30,8 +37,8 @@ DEFAULT_PARAMS = {
     # =================================================================================
     # --- 3.1. Dynamic Noise Floor ---
     "noise_floor_quantile": 0.20,       # Quantile of troughs used to calculate the noise floor. (0.2 = 20th percentile).
-    "noise_window_sec": 10,             # Rolling window (in seconds) for calculating the dynamic noise floor.
-    "trough_rejection_multiplier": 4.0, # A trough N-times higher than the draft noise floor is rejected.
+    "noise_window_sec": 4,             # I Adjusted This✔ Rolling window in seconds. smaller means more sensitive to noise.
+    "trough_rejection_multiplier": 10.0, # I Adjusted This✔ A trough N-times higher than the draft noise floor is rejected.
 
     # --- 3.2. Peak Noise Vetoing ---
     "noise_confidence_threshold": 0.6,  # A peak is rejected if its calculated "noise confidence" exceeds this.
@@ -57,8 +64,9 @@ DEFAULT_PARAMS = {
 
     # --- 4.3. Physiology-Based Confidence Adjustment ---
     "stability_history_window": 20,         # Number of recent beats used to determine rhythm stability.
-    "stability_confidence_floor": 0.65,     # I Adjusted This✔ At 0% pairing success, confidence is multiplied by this (e.g., a 50% reduction).
+    "stability_confidence_floor": 0.7,     # I Adjusted This✔ At 0% pairing success, confidence is multiplied by this.
     "stability_confidence_ceiling": 1.3,    # I Adjusted This✔ At 100% pairing success, confidence is multiplied by this (e.g., a 10% boost).
+    "recovery_phase_stability_floor": 0.90,  # Disable stability penalty during recovery (0% pairing → factor = 1.0)
     "s1_s2_boost_ratio": 1.2,               # S1 strength must be > (S2 strength * this value) to get a confidence boost.
     "boost_amount_min": 0.10,               # Additive confidence boost for a "good" pair in an unstable section.
     "boost_amount_max": 0.35,               # Additive confidence boost for a "good" pair in a stable section.
@@ -66,10 +74,11 @@ DEFAULT_PARAMS = {
     "penalty_amount_max": 0.30,             # Subtractive confidence penalty for a "bad" pair in an unstable section.
     "forward_look_drop_threshold": 0.4,     # If next peak < 60% of S2, it's suspicious
     "forward_look_max_penalty": 0.4,        # Max penalty for this scenario
-    "s2_s1_ratio_low_bpm": 1.5,             # At low BPM, allows S2 to be up to 1.5x S1 strength before penalty.
-    "s2_s1_ratio_high_bpm": 1.1,            # At high BPM, expects S2 to be no more than 1.1x S1 strength.
+    "s2_s1_ratio_low_bpm": 1.6,             # I adjusted this✔ to 1.6 because at low BPM, allows S2 to be up to 1.6x S1 strength before penalty.
+    "s2_s1_ratio_high_bpm": 1.2,            # I adjusted this✔ At high BPM, expects S2 to be no more than 1.2x S1 strength.
     "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
     "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
+    "contractility_penalty_strength": 0.35,  # Strength of the contractility penalty.
     "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
 
     # --- 4.4. Interval-Based Confidence Penalty ---
@@ -92,8 +101,9 @@ DEFAULT_PARAMS = {
     # --- 5.2. Beat-to-Beat Validation ---
     "rr_interval_max_decrease_pct": 0.45, # A new R-R interval can't be more than 45% shorter than the previous one.
     "rr_interval_max_increase_pct": 0.70, # A new R-R interval can't be more than 70% longer than the previous one.
-    "lone_s1_min_strength_ratio": 0.30,   # A Lone S1 candidate's strength must be at least this fraction of the previous S1's.
-    "lone_s1_forward_check_pct": 0.45,    # A Lone S1 is rejected if the next peak is too close, implying a BPM spike.
+    "lone_s1_min_strength_ratio": 0.29,   # I Adjusted This✔ A Lone S1 candidate's strength must be at least this fraction of the previous S1's.
+    "lone_s1_forward_check_pct": 0.44,    # I Adjusted This✔ A Lone S1 is rejected if the next peak is too close, implying a BPM spike.
+    "lone_s1_forward_penalty_factor": 0.52,  # I Adjusted This✔ Multiplier applied when forward check suspects the peak is actually an S2.
 
     # --- 5.4. Lone S1 Gradient Confidence Engine ---
     "lone_s1_confidence_threshold": 0.50, # Final combined score needed to be accepted as a Lone S1.

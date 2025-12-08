@@ -131,15 +131,23 @@ class ReportGenerator:
                     for ln in formatted_lines:
                         log_file.write(f"{ln}\n")
 
-            metrics = {
+            metric_values = {
                 "Raw Amp": getattr(row, "amp", None),
                 "Noise Floor": getattr(row, "noise_floor", None),
                 "Average BPM (Smoothed)": getattr(row, "smoothed_bpm", None),
                 "Long-Term BPM (Belief)": getattr(row, "lt_bpm", None),
             }
-            for name, value in metrics.items():
+            metric_formats = {
+                "Raw Amp": "{value:.3f}",
+                "Noise Floor": "{value:.3f}",
+                "Average BPM (Smoothed)": "{value:.1f}",
+                "Long-Term BPM (Belief)": "{value:.1f}",
+            }
+            for name, value in metric_values.items():
                 if pd.notna(value):
-                    log_file.write(f"- **{name}**: `{value:.1f}`\n")
+                    fmt = metric_formats.get(name, "{value}")
+                    formatted = fmt.format(value=value)
+                    log_file.write(f"- **{name}**: `{formatted}`\n")
 
             log_file.write("\n\n")
 

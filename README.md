@@ -1,7 +1,5 @@
 # Heartbeat BPM Analyzer v4.0
 The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordings of heart sounds to detect heartbeats and calculate the Beats Per Minute (BPM) over time. It is designed to work with various audio file formats and provides a visual representation of the analysis, with a focus on robust, non-blocking performance.
-## Usage
-Run main.py
 ## Features
 - **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A, MOV) by converting them to a standard format for analysis.
@@ -41,11 +39,17 @@ To run this script, you will need Python and the following libraries:
 - **`plotly`**
 - **`ttkbootstrap`**
 - **`pydub`**
+- **`soxr`**
+- **`librosa`** (handles audio loading and resampling)
+- **`PyWavelets`** (provides the `pywt` module used for wavelet denoising)
+- **`pyPCG-toolbox`** (enables optional, tunable pyPCG denoising; the feature is only active when you configure `denoising_method` in `config.py`)
 You will also need **FFmpeg** installed and accessible in your system's PATH for `pydub` to function correctly.
+check if you have Microsoft Visual C++ Redistributable Latest supported v14 (for Visual Studio 2017–2026) https://aka.ms/vc14/vc_redist.x64.exe
+
 ## How to Use
 1. **Install Dependencies:**
     ```
-    pip install numpy pandas scipy plotly ttkbootstrap pydub
+    pip install numpy pandas scipy plotly ttkbootstrap pydub librosa PyWavelets pyPCG-toolbox
     ```
 2. **Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
 3. **Run the Script:**
