@@ -11,10 +11,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
 import librosa
 import librosa.display
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
+
+matplotlib.use("Agg")  # Use non-interactive backend for spectrogram generation
 import matplotlib.pyplot as plt
 
 from bpm_analysis import _get_peak_type_from_debug, format_debug_entry, PeakType
@@ -23,14 +25,22 @@ from bpm_analysis import _get_peak_type_from_debug, format_debug_entry, PeakType
 class Plotter:
     """Handles the creation and generation of the final analysis plot."""
 
-    def __init__(self, file_name: str, params: Dict, sample_rate: int, output_directory: str):
+    def __init__(
+        self,
+        file_name: str,
+        params: Dict,
+        sample_rate: int,
+        output_directory: str,
+        source_audio_path: Optional[str] = None,
+    ):
         self.file_name = file_name
         self.params = params
         self.sample_rate = sample_rate
         self.output_directory = output_directory
+        self.audio_source_path = source_audio_path or file_name
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
         self.audio_duration_sec = None  # Will be set during plot_and_save
-        self.spectrogram_base64 = None  # Will be set when generating spectrogram
+        self.spectrogram_base64: Optional[str] = None  # For optional background overlay
 
     def _generate_spectrogram_image(self) -> Optional[str]:
         """
@@ -39,67 +49,79 @@ class Plotter:
         """
         try:
             # Load audio at a reasonable sample rate for spectrogram
-            audio_data, sr = librosa.load(self.file_name, sr=22050, mono=True)
-            
+            audio_path = self.audio_source_path or self.file_name
+            audio_data, sr = librosa.load(audio_path, sr=22050, mono=True)
+
             if audio_data is None or len(audio_data) == 0:
                 logging.warning("Could not load audio for spectrogram generation")
                 return None
-            
+
             # Compute mel spectrogram for better visual representation
             n_fft = 2048
             hop_length = 512
             n_mels = 128
-            
+
             # Generate mel spectrogram
             S = librosa.feature.melspectrogram(
                 y=audio_data, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
             )
-            
+
             # Convert to dB scale
             S_dB = librosa.power_to_db(S, ref=np.max)
-            
+
             # Calculate figure dimensions based on audio duration
             duration = len(audio_data) / sr
             # Width should be proportional to duration, height fixed
             fig_width = max(20, duration / 10)  # Scale width with duration
             fig_height = 6
-            
+
             # Create figure with transparent background
             fig, ax = plt.subplots(figsize=(fig_width, fig_height))
             fig.patch.set_alpha(0)
             ax.patch.set_alpha(0)
-            
+
             # Display spectrogram with a colormap that works well as background
-            img = librosa.display.specshow(
-                S_dB, sr=sr, hop_length=hop_length, x_axis='time', y_axis='mel',
-                ax=ax, cmap='magma'
+            librosa.display.specshow(
+                S_dB,
+                sr=sr,
+                hop_length=hop_length,
+                x_axis="time",
+                y_axis="mel",
+                ax=ax,
+                cmap="magma",
             )
-            
+
             # Remove axes, labels, and all decorations for clean overlay
-            ax.axis('off')
-            ax.set_xlabel('')
-            ax.set_ylabel('')
-            ax.set_title('')
-            
+            ax.axis("off")
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.set_title("")
+
             # Remove all margins
             plt.tight_layout(pad=0)
             plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-            
+
             # Save to buffer as PNG with transparency
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', transparent=True, dpi=100, 
-                       bbox_inches='tight', pad_inches=0)
+            fig.savefig(
+                buf,
+                format="png",
+                transparent=True,
+                dpi=100,
+                bbox_inches="tight",
+                pad_inches=0,
+            )
             buf.seek(0)
-            
+
             # Encode to base64
-            img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-            
+            img_base64 = base64.b64encode(buf.read()).decode("utf-8")
+
             plt.close(fig)
             buf.close()
-            
+
             logging.info("Generated spectrogram image for background overlay")
             return img_base64
-            
+
         except Exception as e:
             logging.warning(f"Failed to generate spectrogram image: {e}")
             return None
@@ -146,10 +168,10 @@ class Plotter:
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {"scrollZoom": True, "toImageButtonOptions": {"filename": plot_title, "format": "png", "scale": 2}}
-        
-        # Generate spectrogram image for background overlay
+
+        # Generate spectrogram image for optional background overlay
         self.spectrogram_base64 = self._generate_spectrogram_image()
-        
+
         # Generate the base Plotly HTML
         plotly_html = self.fig.to_html(config=plot_config, full_html=False, include_plotlyjs='cdn')
         
@@ -595,33 +617,61 @@ class Plotter:
     def _generate_custom_html(self, plotly_html: str, plot_title: str, base_name: str) -> str:
         """
         Generates custom HTML with audio player, timeline scrubber, and synchronized playhead.
-        Similar to DaVinci Resolve's timeline functionality.
+        Fixes audio path issues and adds debugging capabilities.
         """
-        # Get the audio file name for the HTML
-        audio_file_name = os.path.basename(self.file_name)
+        audio_file_name = os.path.basename(self.audio_source_path)
         duration_sec = self.audio_duration_sec or 0
-        
-        # Copy audio file to output directory if it exists
+
         audio_src = ""
-        if os.path.exists(self.file_name):
+        if os.path.exists(self.audio_source_path):
             dest_audio_path = os.path.join(self.output_directory, audio_file_name)
-            if os.path.abspath(self.file_name) != os.path.abspath(dest_audio_path):
+            src_abspath = os.path.abspath(self.audio_source_path)
+            dest_abspath = os.path.abspath(dest_audio_path)
+
+            if src_abspath != dest_abspath:
                 try:
-                    shutil.copy2(self.file_name, dest_audio_path)
-                    audio_src = audio_file_name
-                    logging.info(f"Copied audio file to {dest_audio_path}")
+                    shutil.copy2(self.audio_source_path, dest_audio_path)
+                    logging.info(f"✅ Copied audio file to {dest_audio_path}")
                 except Exception as e:
-                    logging.warning(f"Could not copy audio file: {e}")
-                    audio_src = self.file_name  # Use original path as fallback
+                    logging.error(f"❌ Could not copy audio file: {e}")
+            audio_src = audio_file_name.replace('\\', '/')
+        else:
+            logging.error(f"❌ Audio source file does NOT exist: {self.audio_source_path}")
+            dest_audio_path = os.path.join(self.output_directory, audio_file_name)
+            if os.path.exists(dest_audio_path):
+                audio_src = audio_file_name.replace('\\', '/')
+                logging.info(f"✅ Found audio file in output directory: {dest_audio_path}")
             else:
-                audio_src = audio_file_name
-        
-        # Prepare spectrogram data
+                logging.error(f"❌ Audio file not found anywhere: {audio_file_name}")
+                audio_src = ""
+
+        filtered_debug_file_name = f"{base_name}_filtered_debug.wav"
+        filtered_debug_path = os.path.join(self.output_directory, filtered_debug_file_name)
+        filtered_available = os.path.exists(filtered_debug_path)
+        filtered_audio_src = filtered_debug_file_name.replace('\\', '/') if filtered_available else ""
+        if filtered_available:
+            logging.info(f"🎧 Using filtered debug audio: {filtered_debug_path}")
+
+        logging.info(f"🎵 HTML audio source path: '{audio_src}'")
+        import urllib.parse
+        audio_src_escaped = urllib.parse.quote(audio_src)
+        filtered_audio_src_escaped = urllib.parse.quote(filtered_audio_src) if filtered_audio_src else ""
+
+        # Prepare spectrogram data (optional)
         spectrogram_src = ""
         spectrogram_available = "false"
-        if self.spectrogram_base64:
+        if getattr(self, "spectrogram_base64", None):
             spectrogram_src = f"data:image/png;base64,{self.spectrogram_base64}"
             spectrogram_available = "true"
+
+        audio_source_options = ['<option value="original">Original Audio</option>']
+        if filtered_available:
+            audio_source_options.append('<option value="filtered">Filtered Debug</option>')
+        audio_source_select_html = (
+            '<select id="audio-source-select" class="audio-source-select">'
+            + "".join(audio_source_options)
+            + '</select>'
+        )
         
         html_template = f'''<!DOCTYPE html>
 <html>
@@ -723,6 +773,16 @@ class Plotter:
             background: #00d4ff;
             border-radius: 50%;
             cursor: pointer;
+        }}
+
+        #audio-source-select {{
+            background: #1e1e2e;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-family: 'Segoe UI', sans-serif;
         }}
         
         #total-time {{
@@ -841,27 +901,6 @@ class Plotter:
             display: none;
         }}
         
-        /* Keyboard shortcuts hint */
-        #shortcuts-hint {{
-            position: fixed;
-            bottom: 8px;
-            right: 8px;
-            background: rgba(30, 30, 40, 0.85);
-            padding: 6px 10px;
-            border-radius: 4px;
-            font-size: 10px;
-            color: #777;
-            z-index: 1000;
-        }}
-        
-        #shortcuts-hint kbd {{
-            background: #333;
-            padding: 1px 4px;
-            border-radius: 2px;
-            margin: 0 1px;
-            font-size: 9px;
-        }}
-        
         /* Spectrogram overlay */
         #spectrogram-container {{
             position: absolute;
@@ -887,53 +926,40 @@ class Plotter:
             opacity: 0;
         }}
         
-        /* Spectrogram toggle button */
-        #spectrogram-btn {{
-            background: #2a2a3a;
-            border: 1px solid #444;
-            color: #e0e0e0;
-            padding: 3px 10px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 11px;
-            transition: all 0.15s;
+        /* Audio error overlay */
+        #audio-error {{
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #ff4757;
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            display: none;
+            z-index: 2000;
+            font-family: monospace;
         }}
         
-        #spectrogram-btn:hover {{
-            background: #3a3a4a;
-            border-color: #ff9f43;
+        /* Keyboard shortcuts hint */
+        #shortcuts-hint {{
+            position: fixed;
+            bottom: 8px;
+            right: 8px;
+            background: rgba(30, 30, 40, 0.85);
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 10px;
+            color: #777;
+            z-index: 1000;
         }}
         
-        #spectrogram-btn.active {{
-            background: #ff9f43;
-            color: #111;
-        }}
-        
-        /* Spectrogram opacity slider */
-        #spectrogram-controls {{
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 11px;
-            color: #888;
-        }}
-        
-        #spectrogram-opacity {{
-            width: 50px;
-            height: 3px;
-            -webkit-appearance: none;
+        #shortcuts-hint kbd {{
             background: #333;
+            padding: 1px 4px;
             border-radius: 2px;
-            outline: none;
-        }}
-        
-        #spectrogram-opacity::-webkit-slider-thumb {{
-            -webkit-appearance: none;
-            width: 10px;
-            height: 10px;
-            background: #ff9f43;
-            border-radius: 50%;
-            cursor: pointer;
+            margin: 0 1px;
+            font-size: 9px;
         }}
     </style>
 </head>
@@ -955,6 +981,7 @@ class Plotter:
                         <span>🔊</span>
                         <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
                     </div>
+                    {audio_source_select_html}
                 </div>
                 <span id="total-time">{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}</span>
                 <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
@@ -980,11 +1007,11 @@ class Plotter:
     
     <!-- Hidden audio player -->
     <audio id="audio-player" preload="auto">
-        <source src="{audio_src}" type="audio/wav">
-        <source src="{audio_src}" type="audio/mpeg">
-        <source src="{audio_src}" type="audio/ogg">
         Your browser does not support audio playback.
     </audio>
+    
+    <!-- Audio error overlay -->
+    <div id="audio-error"></div>
     
     <!-- Keyboard shortcuts hint -->
     <div id="shortcuts-hint">
@@ -999,6 +1026,14 @@ class Plotter:
         const TOTAL_DURATION = {duration_sec};
         const EPOCH = new Date(0);
         const SPECTROGRAM_AVAILABLE = {spectrogram_available};
+        const AUDIO_SOURCES = {{
+            original: "{audio_src_escaped}",
+            filtered: "{filtered_audio_src_escaped}"
+        }};
+        const AUDIO_LABELS = {{
+            original: "{audio_file_name}",
+            filtered: "{filtered_debug_file_name if filtered_available else audio_file_name}"
+        }};
         
         // DOM Elements
         const audio = document.getElementById('audio-player');
@@ -1017,14 +1052,56 @@ class Plotter:
         const timelineTicks = document.getElementById('timeline-ticks');
         const chartPlayhead = document.getElementById('chart-playhead');
         const chartContainer = document.getElementById('chart-container');
+        const audioFileNameEl = document.getElementById('audio-file-name');
+        const audioSourceSelect = document.getElementById('audio-source-select');
         
-        // State
+        const DEFAULT_AUDIO_KEY = "original";
+        let currentAudioKey = DEFAULT_AUDIO_KEY;
+        audioFileNameEl.dataset.defaultName = audioFileNameEl.textContent;
+        
         let isPlaying = false;
         let isSynced = true;
         let isSpectrogramVisible = false;
         let plotlyGraphDiv = null;
         let xAxisRange = null;
         let fullXAxisRange = null;  // Store the full x-axis range for spectrogram positioning
+
+        const logAudioSource = () => {{
+            console.log("🔊 Audio source path:", audio.src);
+            console.log("📁 Expected audio file location relative to HTML:", audio.src);
+        }};
+
+        const updateAudioSource = (key, resumePlayback = false) => {{
+            const candidateKey = key && AUDIO_SOURCES[key] ? key : DEFAULT_AUDIO_KEY;
+            const src = AUDIO_SOURCES[candidateKey];
+
+            if (!src) {{
+                console.warn("🔇 Audio source unavailable for", key);
+                return;
+            }}
+
+            currentAudioKey = candidateKey;
+            audio.src = src;
+            audioFileNameEl.textContent = AUDIO_LABELS[candidateKey] || audioFileNameEl.dataset.defaultName;
+            audioFileNameEl.title = audioFileNameEl.textContent;
+            if (audioSourceSelect) {{
+                audioSourceSelect.value = candidateKey;
+            }}
+            audio.load();
+            logAudioSource();
+            console.log("🔁 Switched audio to", AUDIO_LABELS[candidateKey] || candidateKey, src);
+            if (resumePlayback && isPlaying) {{
+                audio.play().catch((e) => console.log("Audio play error:", e));
+            }}
+        }};
+
+        if (audioSourceSelect) {{
+            audioSourceSelect.addEventListener("change", (event) => {{
+                updateAudioSource(event.target.value, isPlaying);
+            }});
+        }}
+
+        updateAudioSource(audioSourceSelect ? audioSourceSelect.value : DEFAULT_AUDIO_KEY);
         
         // Format time as MM:SS.mmm (seconds)
         function formatTime(seconds) {{
@@ -1182,7 +1259,7 @@ class Plotter:
         
         // Update spectrogram position and scale based on current view
         function updateSpectrogramPosition() {{
-            if (!plotlyGraphDiv || !isSpectrogramVisible || !SPECTROGRAM_AVAILABLE) return;
+            if (!plotlyGraphDiv || !isSpectrogramVisible || !SPECTROGRAM_AVAILABLE || !xAxisRange) return;
             
             const plotArea = plotlyGraphDiv._fullLayout;
             if (!plotArea) return;
@@ -1265,7 +1342,41 @@ class Plotter:
         document.addEventListener('mouseup', () => {{
             isDragging = false;
         }});
-        
+
+        // Audio error handling
+        audio.addEventListener('error', function(e) {{
+            let error_msg = "Unknown error";
+            switch(audio.error?.code) {{
+                case 1: error_msg = "Audio loading aborted"; break;
+                case 2: error_msg = "Network error - file not found or inaccessible"; break;
+                case 3: error_msg = "Audio decoding error - file may be corrupted"; break;
+                case 4: error_msg = "Audio format not supported"; break;
+            }}
+
+            console.error("❌ Audio Error:", error_msg, "Code:", audio.error?.code);
+
+            const errorDiv = document.getElementById('audio-error');
+            errorDiv.innerHTML = `
+                <strong>Audio Playback Error</strong><br><br>
+                ${{error_msg}}<br><br>
+                <strong>File attempted:</strong> ${{decodeURIComponent(AUDIO_SOURCES[currentAudioKey] || AUDIO_SOURCES.original)}}<br>
+                <strong>Solution:</strong> Ensure the audio file is in the same folder as this HTML file.<br>
+                Press F12 and check the Console for more details.
+            `;
+            errorDiv.style.display = 'block';
+
+            setTimeout(() => {{ errorDiv.style.display = 'none'; }}, 10000);
+        }});
+
+        // Debug: log audio load status
+        audio.addEventListener('canplaythrough', function() {{
+            console.log("✅ Audio file loaded successfully and can play through");
+        }});
+
+        audio.addEventListener('loadstart', function() {{
+            console.log("🔄 Starting to load audio...");
+        }});
+
         // Audio time update
         audio.addEventListener('timeupdate', () => {{
             updatePlayhead(audio.currentTime);
@@ -1384,11 +1495,32 @@ class Plotter:
                 spectrogramOpacity.style.opacity = '0.5';
             }}
         }}
-        
+
         // Initialize
         initTimelineTicks();
         initSpectrogramControls();
         setTimeout(initPlotlyIntegration, 500);
+
+        // DEBUG: List audio file presence relative to HTML
+        const debugAudioPath = AUDIO_SOURCES[currentAudioKey] || AUDIO_SOURCES.original;
+        if (debugAudioPath) {{
+            console.log("📂 Checking for audio file in same directory...", debugAudioPath);
+            fetch('./' + decodeURIComponent(debugAudioPath), {{ method: 'HEAD' }})
+                .then(response => {{
+                    if (response.ok) {{
+                        console.log("✅ Audio file found at expected location!");
+                    }} else {{
+                        console.error("❌ Audio file NOT found at expected location");
+                    }}
+                }})
+                .catch(err => {{
+                    console.error("❌ Cannot access audio file:", err);
+                    console.log("💡 If you're using file:// protocol, try running a local server instead:");
+                    console.log("   python -m http.server 8000");
+                }});
+        }} else {{
+            console.warn("⚠️ No audio file specified for HEAD check.");
+        }}
     </script>
 </body>
 </html>'''
