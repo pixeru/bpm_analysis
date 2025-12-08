@@ -4,12 +4,18 @@ import logging
 import csv
 import base64
 import shutil
+import io
 from typing import Dict, Optional, List
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import librosa
+import librosa.display
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
 
 from bpm_analysis import _get_peak_type_from_debug, format_debug_entry, PeakType
 
@@ -24,6 +30,79 @@ class Plotter:
         self.output_directory = output_directory
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
         self.audio_duration_sec = None  # Will be set during plot_and_save
+        self.spectrogram_base64 = None  # Will be set when generating spectrogram
+
+    def _generate_spectrogram_image(self) -> Optional[str]:
+        """
+        Generate a spectrogram image from the audio file and return as base64 PNG.
+        The spectrogram is rendered with a transparent background for overlay.
+        """
+        try:
+            # Load audio at a reasonable sample rate for spectrogram
+            audio_data, sr = librosa.load(self.file_name, sr=22050, mono=True)
+            
+            if audio_data is None or len(audio_data) == 0:
+                logging.warning("Could not load audio for spectrogram generation")
+                return None
+            
+            # Compute mel spectrogram for better visual representation
+            n_fft = 2048
+            hop_length = 512
+            n_mels = 128
+            
+            # Generate mel spectrogram
+            S = librosa.feature.melspectrogram(
+                y=audio_data, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
+            )
+            
+            # Convert to dB scale
+            S_dB = librosa.power_to_db(S, ref=np.max)
+            
+            # Calculate figure dimensions based on audio duration
+            duration = len(audio_data) / sr
+            # Width should be proportional to duration, height fixed
+            fig_width = max(20, duration / 10)  # Scale width with duration
+            fig_height = 6
+            
+            # Create figure with transparent background
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            fig.patch.set_alpha(0)
+            ax.patch.set_alpha(0)
+            
+            # Display spectrogram with a colormap that works well as background
+            img = librosa.display.specshow(
+                S_dB, sr=sr, hop_length=hop_length, x_axis='time', y_axis='mel',
+                ax=ax, cmap='magma'
+            )
+            
+            # Remove axes, labels, and all decorations for clean overlay
+            ax.axis('off')
+            ax.set_xlabel('')
+            ax.set_ylabel('')
+            ax.set_title('')
+            
+            # Remove all margins
+            plt.tight_layout(pad=0)
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            
+            # Save to buffer as PNG with transparency
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', transparent=True, dpi=100, 
+                       bbox_inches='tight', pad_inches=0)
+            buf.seek(0)
+            
+            # Encode to base64
+            img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+            
+            plt.close(fig)
+            buf.close()
+            
+            logging.info("Generated spectrogram image for background overlay")
+            return img_base64
+            
+        except Exception as e:
+            logging.warning(f"Failed to generate spectrogram image: {e}")
+            return None
 
     def plot_and_save(
         self,
@@ -67,6 +146,9 @@ class Plotter:
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {"scrollZoom": True, "toImageButtonOptions": {"filename": plot_title, "format": "png", "scale": 2}}
+        
+        # Generate spectrogram image for background overlay
+        self.spectrogram_base64 = self._generate_spectrogram_image()
         
         # Generate the base Plotly HTML
         plotly_html = self.fig.to_html(config=plot_config, full_html=False, include_plotlyjs='cdn')
@@ -534,6 +616,13 @@ class Plotter:
             else:
                 audio_src = audio_file_name
         
+        # Prepare spectrogram data
+        spectrogram_src = ""
+        spectrogram_available = "false"
+        if self.spectrogram_base64:
+            spectrogram_src = f"data:image/png;base64,{self.spectrogram_base64}"
+            spectrogram_available = "true"
+        
         html_template = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -772,6 +861,80 @@ class Plotter:
             margin: 0 1px;
             font-size: 9px;
         }}
+        
+        /* Spectrogram overlay */
+        #spectrogram-container {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+            overflow: hidden;
+        }}
+        
+        #spectrogram-image {{
+            position: absolute;
+            height: 100%;
+            opacity: 0.4;
+            pointer-events: none;
+            image-rendering: auto;
+            transition: opacity 0.2s ease;
+        }}
+        
+        #spectrogram-image.hidden {{
+            opacity: 0;
+        }}
+        
+        /* Spectrogram toggle button */
+        #spectrogram-btn {{
+            background: #2a2a3a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            padding: 3px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.15s;
+        }}
+        
+        #spectrogram-btn:hover {{
+            background: #3a3a4a;
+            border-color: #ff9f43;
+        }}
+        
+        #spectrogram-btn.active {{
+            background: #ff9f43;
+            color: #111;
+        }}
+        
+        /* Spectrogram opacity slider */
+        #spectrogram-controls {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #888;
+        }}
+        
+        #spectrogram-opacity {{
+            width: 50px;
+            height: 3px;
+            -webkit-appearance: none;
+            background: #333;
+            border-radius: 2px;
+            outline: none;
+        }}
+        
+        #spectrogram-opacity::-webkit-slider-thumb {{
+            -webkit-appearance: none;
+            width: 10px;
+            height: 10px;
+            background: #ff9f43;
+            border-radius: 50%;
+            cursor: pointer;
+        }}
     </style>
 </head>
 <body>
@@ -784,6 +947,10 @@ class Plotter:
                     <button id="play-btn" title="Play/Pause (Space)">▶ Play</button>
                     <button id="stop-btn" title="Stop (S)">⏹ Stop</button>
                     <button id="sync-btn" class="active" title="Sync playhead">🔗</button>
+                    <button id="spectrogram-btn" title="Toggle Spectrogram (G)">📊 Spectrogram</button>
+                    <div id="spectrogram-controls">
+                        <input type="range" id="spectrogram-opacity" min="0.1" max="0.8" step="0.05" value="0.4" title="Spectrogram opacity">
+                    </div>
                     <div id="volume-control">
                         <span>🔊</span>
                         <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
@@ -801,6 +968,9 @@ class Plotter:
         
         <!-- Chart container - takes up remaining space -->
         <div id="chart-container">
+            <div id="spectrogram-container">
+                <img id="spectrogram-image" class="hidden" src="{spectrogram_src}" alt="Spectrogram" />
+            </div>
             <div id="chart-playhead"></div>
             <div id="plotly-chart">
                 {plotly_html}
@@ -820,19 +990,25 @@ class Plotter:
     <div id="shortcuts-hint">
         <kbd>Space</kbd> Play &nbsp;
         <kbd>S</kbd> Stop &nbsp;
-        <kbd>←→</kbd> Seek
+        <kbd>←→</kbd> Seek &nbsp;
+        <kbd>G</kbd> Spectrogram
     </div>
     
     <script>
         // Configuration
         const TOTAL_DURATION = {duration_sec};
         const EPOCH = new Date(0);
+        const SPECTROGRAM_AVAILABLE = {spectrogram_available};
         
         // DOM Elements
         const audio = document.getElementById('audio-player');
         const playBtn = document.getElementById('play-btn');
         const stopBtn = document.getElementById('stop-btn');
         const syncBtn = document.getElementById('sync-btn');
+        const spectrogramBtn = document.getElementById('spectrogram-btn');
+        const spectrogramOpacity = document.getElementById('spectrogram-opacity');
+        const spectrogramContainer = document.getElementById('spectrogram-container');
+        const spectrogramImage = document.getElementById('spectrogram-image');
         const volumeSlider = document.getElementById('volume-slider');
         const currentTimeEl = document.getElementById('current-time');
         const timelineScrubber = document.getElementById('timeline-scrubber');
@@ -845,8 +1021,10 @@ class Plotter:
         // State
         let isPlaying = false;
         let isSynced = true;
+        let isSpectrogramVisible = false;
         let plotlyGraphDiv = null;
         let xAxisRange = null;
+        let fullXAxisRange = null;  // Store the full x-axis range for spectrogram positioning
         
         // Format time as MM:SS.mmm (seconds)
         function formatTime(seconds) {{
@@ -983,10 +1161,82 @@ class Plotter:
             }}
         }}
         
+        // Toggle spectrogram visibility
+        function toggleSpectrogram() {{
+            if (!SPECTROGRAM_AVAILABLE) {{
+                alert('Spectrogram not available for this file.');
+                return;
+            }}
+            isSpectrogramVisible = !isSpectrogramVisible;
+            spectrogramBtn.classList.toggle('active', isSpectrogramVisible);
+            spectrogramImage.classList.toggle('hidden', !isSpectrogramVisible);
+            if (isSpectrogramVisible) {{
+                updateSpectrogramPosition();
+            }}
+        }}
+        
+        // Update spectrogram opacity
+        function updateSpectrogramOpacity(value) {{
+            spectrogramImage.style.opacity = value;
+        }}
+        
+        // Update spectrogram position and scale based on current view
+        function updateSpectrogramPosition() {{
+            if (!plotlyGraphDiv || !isSpectrogramVisible || !SPECTROGRAM_AVAILABLE) return;
+            
+            const plotArea = plotlyGraphDiv._fullLayout;
+            if (!plotArea) return;
+            
+            const xaxis = plotArea.xaxis;
+            const yaxis = plotArea.yaxis;
+            if (!xaxis || !yaxis) return;
+            
+            // Get plot area dimensions
+            const plotLeft = xaxis._offset;
+            const plotWidth = xaxis._length;
+            const plotTop = yaxis._offset;
+            const plotHeight = yaxis._length;
+            
+            // Get current view range
+            const viewXMin = new Date(xAxisRange[0]).getTime();
+            const viewXMax = new Date(xAxisRange[1]).getTime();
+            
+            // Get full data range (0 to total duration)
+            const fullXMin = EPOCH.getTime();
+            const fullXMax = EPOCH.getTime() + TOTAL_DURATION * 1000;
+            
+            // Calculate what portion of the full data is visible
+            const visibleStartRatio = (viewXMin - fullXMin) / (fullXMax - fullXMin);
+            const visibleEndRatio = (viewXMax - fullXMin) / (fullXMax - fullXMin);
+            const visibleRatio = visibleEndRatio - visibleStartRatio;
+            
+            // Calculate spectrogram dimensions
+            // The spectrogram should stretch to cover the full data range
+            const spectrogramFullWidth = plotWidth / visibleRatio;
+            const spectrogramLeft = plotLeft - (visibleStartRatio * spectrogramFullWidth);
+            
+            // Position the spectrogram container to match plot area
+            spectrogramContainer.style.left = plotLeft + 'px';
+            spectrogramContainer.style.top = plotTop + 'px';
+            spectrogramContainer.style.width = plotWidth + 'px';
+            spectrogramContainer.style.height = plotHeight + 'px';
+            
+            // Position the spectrogram image
+            spectrogramImage.style.left = (spectrogramLeft - plotLeft) + 'px';
+            spectrogramImage.style.width = spectrogramFullWidth + 'px';
+            spectrogramImage.style.height = plotHeight + 'px';
+            spectrogramImage.style.top = '0px';
+        }}
+        
         // Event Listeners
         playBtn.addEventListener('click', togglePlay);
         stopBtn.addEventListener('click', stopPlayback);
         syncBtn.addEventListener('click', toggleSync);
+        spectrogramBtn.addEventListener('click', toggleSpectrogram);
+        
+        spectrogramOpacity.addEventListener('input', (e) => {{
+            updateSpectrogramOpacity(parseFloat(e.target.value));
+        }});
         
         volumeSlider.addEventListener('input', (e) => {{
             audio.volume = parseFloat(e.target.value);
@@ -1056,6 +1306,9 @@ class Plotter:
                     e.preventDefault();
                     seekTo(TOTAL_DURATION);
                     break;
+                case 'KeyG':
+                    toggleSpectrogram();
+                    break;
             }}
         }});
         
@@ -1070,6 +1323,10 @@ class Plotter:
                 function updateAxisRange() {{
                     if (plotlyGraphDiv._fullLayout && plotlyGraphDiv._fullLayout.xaxis) {{
                         xAxisRange = plotlyGraphDiv._fullLayout.xaxis.range;
+                        // Store full range on first load
+                        if (!fullXAxisRange) {{
+                            fullXAxisRange = [...xAxisRange];
+                        }}
                     }}
                 }}
                 
@@ -1079,12 +1336,20 @@ class Plotter:
                 plotlyGraphDiv.on('plotly_relayout', function(eventdata) {{
                     updateAxisRange();
                     updatePlayhead(audio.currentTime);
+                    updateSpectrogramPosition();
+                }});
+                
+                // Also listen for plotly_afterplot for initial render
+                plotlyGraphDiv.on('plotly_afterplot', function() {{
+                    updateAxisRange();
+                    updateSpectrogramPosition();
                 }});
                 
                 // Update on window resize
                 window.addEventListener('resize', () => {{
                     updateAxisRange();
                     updatePlayhead(audio.currentTime);
+                    updateSpectrogramPosition();
                     // Resize Plotly chart to fit container
                     Plotly.Plots.resize(plotlyGraphDiv);
                 }});
@@ -1101,14 +1366,28 @@ class Plotter:
                         }}
                     }}
                 }});
+                
+                // Initial spectrogram position update
+                setTimeout(updateSpectrogramPosition, 100);
             }} else {{
                 // Retry after a short delay
                 setTimeout(initPlotlyIntegration, 100);
             }}
         }}
         
+        // Initialize spectrogram controls based on availability
+        function initSpectrogramControls() {{
+            if (!SPECTROGRAM_AVAILABLE) {{
+                spectrogramBtn.style.opacity = '0.5';
+                spectrogramBtn.style.cursor = 'not-allowed';
+                spectrogramOpacity.disabled = true;
+                spectrogramOpacity.style.opacity = '0.5';
+            }}
+        }}
+        
         // Initialize
         initTimelineTicks();
+        initSpectrogramControls();
         setTimeout(initPlotlyIntegration, 500);
     </script>
 </body>
