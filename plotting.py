@@ -2,7 +2,7 @@ import os
 import datetime
 import logging
 import csv
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import numpy as np
 import pandas as pd
@@ -48,6 +48,7 @@ class Plotter:
             final_metrics.get("peak_recovery_stats"),
             final_metrics.get("peak_exertion_stats"),
         )
+        self._add_trapezoid_shapes(final_metrics.get("trapezoids"))
         self._add_annotations_and_summary(
             final_metrics.get("smoothed_bpm"),
             final_metrics.get("hrv_summary"),
@@ -143,7 +144,7 @@ class Plotter:
                     y=plot_noise_floor.values,
                     name="Dynamic Noise Floor",
                     line=dict(color="green", dash="dot", width=1.5),
-                    hovertemplate="Noise Floor: %{y:.2f}<extra></extra>",
+                    hovertemplate="Noise Floor: %{y:.4f}<extra></extra>",
                 ),
                 secondary_y=False,
             )
@@ -457,3 +458,41 @@ class Plotter:
                 )
             )
 
+    def _seconds_to_datetime(self, seconds: float) -> datetime.datetime:
+        """Converts elapsed seconds since epoch to timezone-naive datetime."""
+        epoch = datetime.datetime.fromtimestamp(0)
+        return epoch + datetime.timedelta(seconds=seconds)
+
+    def _add_trapezoid_shapes(self, trapezoids: Optional[List[Dict]]):
+        """Draws trapezoid outlines and markers for detected HR artifacts."""
+        if not trapezoids:
+            return
+
+        for idx, trap in enumerate(trapezoids, start=1):
+            event_sequence = [
+                ("Start of rise", trap["t_start_rise"], trap["bpm_start_rise"]),
+                ("End of rise", trap["t_end_rise"], trap["bpm_end_rise"]),
+                ("Start of fall", trap["t_start_fall"], trap["bpm_start_fall"]),
+                ("End of fall", trap["t_end_fall"], trap["bpm_end_fall"]),
+            ]
+            x_times = [self._seconds_to_datetime(t) for _, t, _ in event_sequence]
+            y_values = [bpm for _, _, bpm in event_sequence]
+            customdata = [
+                f"<b>{label}</b><br>{t:.3f}s<br>{bpm:.1f} BPM" for label, t, bpm in event_sequence
+            ]
+
+            self.fig.add_trace(
+                go.Scatter(
+                    x=x_times,
+                    y=y_values,
+                    mode="lines+markers",
+                    name="Trapezoid Artifacts",
+                    marker=dict(symbol="circle-open", size=8, color="#ffd166"),
+                    line=dict(color="#ffd166", dash="dot", width=2),
+                    customdata=customdata,
+                    hovertemplate="%{customdata}<extra></extra>",
+                    legendgroup="Trapezoid Artifacts",
+                    showlegend=(idx == 1),
+                ),
+                secondary_y=True,
+            )
