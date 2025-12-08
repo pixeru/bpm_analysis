@@ -2,6 +2,8 @@ import os
 import datetime
 import logging
 import csv
+import base64
+import shutil
 from typing import Dict, Optional, List
 
 import numpy as np
@@ -21,6 +23,7 @@ class Plotter:
         self.sample_rate = sample_rate
         self.output_directory = output_directory
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
+        self.audio_duration_sec = None  # Will be set during plot_and_save
 
     def plot_and_save(
         self,
@@ -32,6 +35,8 @@ class Plotter:
     ):
         """Generates and saves the main analysis plot by calling helper methods."""
         self.time_axis_sec = np.arange(len(audio_envelope)) / self.sample_rate
+        self.audio_duration_sec = self.time_axis_sec[-1] if len(self.time_axis_sec) > 0 else 0
+        
         time_axis_dt = pd.to_datetime(
             [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in self.time_axis_sec]
         )
@@ -62,8 +67,16 @@ class Plotter:
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {"scrollZoom": True, "toImageButtonOptions": {"filename": plot_title, "format": "png", "scale": 2}}
-        self.fig.write_html(output_html_path, config=plot_config)
-        logging.info(f"Interactive plot saved to {output_html_path}")
+        
+        # Generate the base Plotly HTML
+        plotly_html = self.fig.to_html(config=plot_config, full_html=False, include_plotlyjs='cdn')
+        
+        # Generate custom HTML with audio player and playhead
+        custom_html = self._generate_custom_html(plotly_html, plot_title, base_name)
+        
+        with open(output_html_path, 'w', encoding='utf-8') as f:
+            f.write(custom_html)
+        logging.info(f"Interactive plot with audio player saved to {output_html_path}")
 
         if output_options is None or output_options.get("csv", True):
             smoothed_bpm = final_metrics.get("smoothed_bpm")
@@ -496,3 +509,609 @@ class Plotter:
                 ),
                 secondary_y=True,
             )
+
+    def _generate_custom_html(self, plotly_html: str, plot_title: str, base_name: str) -> str:
+        """
+        Generates custom HTML with audio player, timeline scrubber, and synchronized playhead.
+        Similar to DaVinci Resolve's timeline functionality.
+        """
+        # Get the audio file name for the HTML
+        audio_file_name = os.path.basename(self.file_name)
+        duration_sec = self.audio_duration_sec or 0
+        
+        # Copy audio file to output directory if it exists
+        audio_src = ""
+        if os.path.exists(self.file_name):
+            dest_audio_path = os.path.join(self.output_directory, audio_file_name)
+            if os.path.abspath(self.file_name) != os.path.abspath(dest_audio_path):
+                try:
+                    shutil.copy2(self.file_name, dest_audio_path)
+                    audio_src = audio_file_name
+                    logging.info(f"Copied audio file to {dest_audio_path}")
+                except Exception as e:
+                    logging.warning(f"Could not copy audio file: {e}")
+                    audio_src = self.file_name  # Use original path as fallback
+            else:
+                audio_src = audio_file_name
+        
+        html_template = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>{plot_title}</title>
+    <style>
+        * {{
+            box-sizing: border-box;
+        }}
+        body {{
+            margin: 0;
+            padding: 0;
+            background-color: #111;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            color: #e0e0e0;
+        }}
+        
+        /* Main container - full viewport */
+        #main-container {{
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }}
+        
+        /* Timeline Scrubber - compact bar above the graph */
+        #timeline-container {{
+            background: linear-gradient(180deg, #1e1e2e 0%, #151520 100%);
+            border-bottom: 1px solid #333;
+            padding: 4px 10px;
+            flex-shrink: 0;
+        }}
+        
+        /* Controls row */
+        #controls-row {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+            flex-wrap: wrap;
+        }}
+        
+        #current-time {{
+            font-size: 12px;
+            font-weight: bold;
+            color: #00d4ff;
+            font-family: 'Consolas', 'Monaco', monospace;
+            min-width: 140px;
+        }}
+        
+        #audio-controls {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        
+        #audio-controls button {{
+            background: #2a2a3a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            padding: 3px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.15s;
+        }}
+        
+        #audio-controls button:hover {{
+            background: #3a3a4a;
+            border-color: #00d4ff;
+        }}
+        
+        #audio-controls button.active {{
+            background: #00d4ff;
+            color: #111;
+        }}
+        
+        #volume-control {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+        }}
+        
+        #volume-slider {{
+            width: 60px;
+            height: 3px;
+            -webkit-appearance: none;
+            background: #333;
+            border-radius: 2px;
+            outline: none;
+        }}
+        
+        #volume-slider::-webkit-slider-thumb {{
+            -webkit-appearance: none;
+            width: 10px;
+            height: 10px;
+            background: #00d4ff;
+            border-radius: 50%;
+            cursor: pointer;
+        }}
+        
+        #total-time {{
+            font-size: 12px;
+            color: #888;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }}
+        
+        #audio-file-name {{
+            font-size: 10px;
+            color: #666;
+            margin-left: auto;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+        
+        /* Timeline scrubber bar */
+        #timeline-scrubber {{
+            position: relative;
+            height: 18px;
+            background: #1a1a2a;
+            border-radius: 3px;
+            cursor: pointer;
+            overflow: hidden;
+            border: 1px solid #333;
+        }}
+        
+        #timeline-progress {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff44 0%, #00d4ff22 100%);
+            pointer-events: none;
+        }}
+        
+        #timeline-playhead {{
+            position: absolute;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            background: #00d4ff;
+            box-shadow: 0 0 6px #00d4ff;
+            pointer-events: none;
+        }}
+        
+        #timeline-ticks {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+        }}
+        
+        .timeline-tick {{
+            position: absolute;
+            top: 0;
+            width: 1px;
+            background: #333;
+        }}
+        
+        .timeline-tick.major {{
+            height: 100%;
+            background: #444;
+        }}
+        
+        .timeline-tick.minor {{
+            height: 40%;
+            top: 60%;
+        }}
+        
+        .tick-label {{
+            position: absolute;
+            top: 1px;
+            font-size: 8px;
+            color: #666;
+            transform: translateX(-50%);
+            pointer-events: none;
+        }}
+        
+        /* Chart container - fills remaining space */
+        #chart-container {{
+            flex: 1;
+            position: relative;
+            min-height: 0;
+        }}
+        
+        #plotly-chart {{
+            width: 100%;
+            height: 100%;
+        }}
+        
+        #plotly-chart > div {{
+            width: 100% !important;
+            height: 100% !important;
+        }}
+        
+        /* Vertical playhead line on chart */
+        #chart-playhead {{
+            position: absolute;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            background: #ff4757;
+            box-shadow: 0 0 8px #ff4757;
+            pointer-events: none;
+            z-index: 100;
+            display: none;
+        }}
+        
+        /* Hidden audio element */
+        #audio-player {{
+            display: none;
+        }}
+        
+        /* Keyboard shortcuts hint */
+        #shortcuts-hint {{
+            position: fixed;
+            bottom: 8px;
+            right: 8px;
+            background: rgba(30, 30, 40, 0.85);
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 10px;
+            color: #777;
+            z-index: 1000;
+        }}
+        
+        #shortcuts-hint kbd {{
+            background: #333;
+            padding: 1px 4px;
+            border-radius: 2px;
+            margin: 0 1px;
+            font-size: 9px;
+        }}
+    </style>
+</head>
+<body>
+    <div id="main-container">
+        <!-- Timeline Scrubber - compact bar above graph -->
+        <div id="timeline-container">
+            <div id="controls-row">
+                <span id="current-time">00:00.000 (0.00s)</span>
+                <div id="audio-controls">
+                    <button id="play-btn" title="Play/Pause (Space)">▶ Play</button>
+                    <button id="stop-btn" title="Stop (S)">⏹ Stop</button>
+                    <button id="sync-btn" class="active" title="Sync playhead">🔗</button>
+                    <div id="volume-control">
+                        <span>🔊</span>
+                        <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
+                    </div>
+                </div>
+                <span id="total-time">{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}</span>
+                <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
+            </div>
+            <div id="timeline-scrubber">
+                <div id="timeline-ticks"></div>
+                <div id="timeline-progress"></div>
+                <div id="timeline-playhead"></div>
+            </div>
+        </div>
+        
+        <!-- Chart container - takes up remaining space -->
+        <div id="chart-container">
+            <div id="chart-playhead"></div>
+            <div id="plotly-chart">
+                {plotly_html}
+            </div>
+        </div>
+    </div>
+    
+    <!-- Hidden audio player -->
+    <audio id="audio-player" preload="auto">
+        <source src="{audio_src}" type="audio/wav">
+        <source src="{audio_src}" type="audio/mpeg">
+        <source src="{audio_src}" type="audio/ogg">
+        Your browser does not support audio playback.
+    </audio>
+    
+    <!-- Keyboard shortcuts hint -->
+    <div id="shortcuts-hint">
+        <kbd>Space</kbd> Play &nbsp;
+        <kbd>S</kbd> Stop &nbsp;
+        <kbd>←→</kbd> Seek
+    </div>
+    
+    <script>
+        // Configuration
+        const TOTAL_DURATION = {duration_sec};
+        const EPOCH = new Date(0);
+        
+        // DOM Elements
+        const audio = document.getElementById('audio-player');
+        const playBtn = document.getElementById('play-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const syncBtn = document.getElementById('sync-btn');
+        const volumeSlider = document.getElementById('volume-slider');
+        const currentTimeEl = document.getElementById('current-time');
+        const timelineScrubber = document.getElementById('timeline-scrubber');
+        const timelineProgress = document.getElementById('timeline-progress');
+        const timelinePlayhead = document.getElementById('timeline-playhead');
+        const timelineTicks = document.getElementById('timeline-ticks');
+        const chartPlayhead = document.getElementById('chart-playhead');
+        const chartContainer = document.getElementById('chart-container');
+        
+        // State
+        let isPlaying = false;
+        let isSynced = true;
+        let plotlyGraphDiv = null;
+        let xAxisRange = null;
+        
+        // Format time as MM:SS.mmm (seconds)
+        function formatTime(seconds) {{
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            const ms = Math.floor((seconds % 1) * 1000);
+            return `${{String(mins).padStart(2, '0')}}:${{String(secs).padStart(2, '0')}}.${{String(ms).padStart(3, '0')}} (${{seconds.toFixed(2)}}s)`;
+        }}
+        
+        // Convert seconds to datetime (epoch + seconds)
+        function secondsToDatetime(seconds) {{
+            return new Date(EPOCH.getTime() + seconds * 1000);
+        }}
+        
+        // Get x-axis position for a given time
+        function getXPositionForTime(seconds) {{
+            if (!plotlyGraphDiv || !xAxisRange) return null;
+            
+            const datetime = secondsToDatetime(seconds);
+            const xMin = new Date(xAxisRange[0]).getTime();
+            const xMax = new Date(xAxisRange[1]).getTime();
+            const xTime = datetime.getTime();
+            
+            // Calculate position within the plot area
+            const plotArea = plotlyGraphDiv._fullLayout;
+            if (!plotArea) return null;
+            
+            const xaxis = plotArea.xaxis;
+            if (!xaxis) return null;
+            
+            const plotLeft = xaxis._offset;
+            const plotWidth = xaxis._length;
+            
+            const ratio = (xTime - xMin) / (xMax - xMin);
+            return plotLeft + ratio * plotWidth;
+        }}
+        
+        // Initialize timeline ticks
+        function initTimelineTicks() {{
+            timelineTicks.innerHTML = '';
+            const numMajorTicks = 10;
+            const numMinorTicks = 50;
+            
+            // Major ticks with labels
+            for (let i = 0; i <= numMajorTicks; i++) {{
+                const percent = (i / numMajorTicks) * 100;
+                const time = (i / numMajorTicks) * TOTAL_DURATION;
+                
+                const tick = document.createElement('div');
+                tick.className = 'timeline-tick major';
+                tick.style.left = percent + '%';
+                timelineTicks.appendChild(tick);
+                
+                const label = document.createElement('div');
+                label.className = 'tick-label';
+                label.style.left = percent + '%';
+                label.textContent = `${{Math.floor(time / 60)}}:${{String(Math.floor(time % 60)).padStart(2, '0')}}`;
+                timelineTicks.appendChild(label);
+            }}
+            
+            // Minor ticks
+            for (let i = 0; i < numMinorTicks; i++) {{
+                if (i % (numMinorTicks / numMajorTicks) === 0) continue;
+                const percent = (i / numMinorTicks) * 100;
+                
+                const tick = document.createElement('div');
+                tick.className = 'timeline-tick minor';
+                tick.style.left = percent + '%';
+                timelineTicks.appendChild(tick);
+            }}
+        }}
+        
+        // Update playhead positions
+        function updatePlayhead(currentTime) {{
+            const percent = (currentTime / TOTAL_DURATION) * 100;
+            
+            // Update timeline
+            timelineProgress.style.width = percent + '%';
+            timelinePlayhead.style.left = percent + '%';
+            
+            // Update time display
+            currentTimeEl.textContent = formatTime(currentTime);
+            
+            // Update chart playhead if synced
+            if (isSynced && plotlyGraphDiv) {{
+                const xPos = getXPositionForTime(currentTime);
+                if (xPos !== null) {{
+                    chartPlayhead.style.display = 'block';
+                    chartPlayhead.style.left = xPos + 'px';
+                }} else {{
+                    chartPlayhead.style.display = 'none';
+                }}
+            }}
+        }}
+        
+        // Seek to position
+        function seekTo(seconds) {{
+            audio.currentTime = Math.max(0, Math.min(seconds, TOTAL_DURATION));
+            updatePlayhead(audio.currentTime);
+        }}
+        
+        // Play/Pause toggle
+        function togglePlay() {{
+            if (isPlaying) {{
+                audio.pause();
+                playBtn.textContent = '▶ Play';
+                playBtn.classList.remove('active');
+            }} else {{
+                audio.play().catch(e => console.log('Audio play error:', e));
+                playBtn.textContent = '⏸ Pause';
+                playBtn.classList.add('active');
+            }}
+            isPlaying = !isPlaying;
+        }}
+        
+        // Stop playback
+        function stopPlayback() {{
+            audio.pause();
+            audio.currentTime = 0;
+            isPlaying = false;
+            playBtn.textContent = '▶ Play';
+            playBtn.classList.remove('active');
+            updatePlayhead(0);
+        }}
+        
+        // Toggle sync
+        function toggleSync() {{
+            isSynced = !isSynced;
+            syncBtn.classList.toggle('active', isSynced);
+            if (!isSynced) {{
+                chartPlayhead.style.display = 'none';
+            }} else {{
+                updatePlayhead(audio.currentTime);
+            }}
+        }}
+        
+        // Event Listeners
+        playBtn.addEventListener('click', togglePlay);
+        stopBtn.addEventListener('click', stopPlayback);
+        syncBtn.addEventListener('click', toggleSync);
+        
+        volumeSlider.addEventListener('input', (e) => {{
+            audio.volume = parseFloat(e.target.value);
+        }});
+        
+        // Timeline scrubber click/drag
+        let isDragging = false;
+        
+        function handleTimelineInteraction(e) {{
+            const rect = timelineScrubber.getBoundingClientRect();
+            const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            seekTo(percent * TOTAL_DURATION);
+        }}
+        
+        timelineScrubber.addEventListener('mousedown', (e) => {{
+            isDragging = true;
+            handleTimelineInteraction(e);
+        }});
+        
+        document.addEventListener('mousemove', (e) => {{
+            if (isDragging) {{
+                handleTimelineInteraction(e);
+            }}
+        }});
+        
+        document.addEventListener('mouseup', () => {{
+            isDragging = false;
+        }});
+        
+        // Audio time update
+        audio.addEventListener('timeupdate', () => {{
+            updatePlayhead(audio.currentTime);
+        }});
+        
+        audio.addEventListener('ended', () => {{
+            isPlaying = false;
+            playBtn.textContent = '▶ Play';
+            playBtn.classList.remove('active');
+        }});
+        
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {{
+            // Don't trigger if typing in an input
+            if (e.target.tagName === 'INPUT') return;
+            
+            switch(e.code) {{
+                case 'Space':
+                    e.preventDefault();
+                    togglePlay();
+                    break;
+                case 'KeyS':
+                    stopPlayback();
+                    break;
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    seekTo(audio.currentTime - 5);
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    seekTo(audio.currentTime + 5);
+                    break;
+                case 'Home':
+                    e.preventDefault();
+                    seekTo(0);
+                    break;
+                case 'End':
+                    e.preventDefault();
+                    seekTo(TOTAL_DURATION);
+                    break;
+            }}
+        }});
+        
+        // Initialize Plotly integration after chart loads
+        function initPlotlyIntegration() {{
+            // Find the Plotly graph div
+            const graphDivs = document.querySelectorAll('.plotly-graph-div');
+            if (graphDivs.length > 0) {{
+                plotlyGraphDiv = graphDivs[0];
+                
+                // Get initial axis range
+                function updateAxisRange() {{
+                    if (plotlyGraphDiv._fullLayout && plotlyGraphDiv._fullLayout.xaxis) {{
+                        xAxisRange = plotlyGraphDiv._fullLayout.xaxis.range;
+                    }}
+                }}
+                
+                updateAxisRange();
+                
+                // Listen for zoom/pan changes
+                plotlyGraphDiv.on('plotly_relayout', function(eventdata) {{
+                    updateAxisRange();
+                    updatePlayhead(audio.currentTime);
+                }});
+                
+                // Update on window resize
+                window.addEventListener('resize', () => {{
+                    updateAxisRange();
+                    updatePlayhead(audio.currentTime);
+                    // Resize Plotly chart to fit container
+                    Plotly.Plots.resize(plotlyGraphDiv);
+                }});
+                
+                // Click on chart to seek
+                plotlyGraphDiv.on('plotly_click', function(data) {{
+                    if (data.points && data.points.length > 0) {{
+                        const point = data.points[0];
+                        if (point.x) {{
+                            // Convert datetime back to seconds
+                            const clickTime = new Date(point.x);
+                            const seconds = (clickTime.getTime() - EPOCH.getTime()) / 1000;
+                            seekTo(seconds);
+                        }}
+                    }}
+                }});
+            }} else {{
+                // Retry after a short delay
+                setTimeout(initPlotlyIntegration, 100);
+            }}
+        }}
+        
+        // Initialize
+        initTimelineTicks();
+        setTimeout(initPlotlyIntegration, 500);
+    </script>
+</body>
+</html>'''
+        
+        return html_template
