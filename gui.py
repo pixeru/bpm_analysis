@@ -71,6 +71,8 @@ class BPMApp:
         self.output_settings = tk.BooleanVar(value=False)
         self.output_filtered_wav = tk.BooleanVar(value=False)
         self.output_bpm_text = tk.BooleanVar(value=False)
+        # HTML spectrogram overlay can be slow to generate; expose as a separate toggle.
+        self.output_spectrogram = tk.BooleanVar(value=True)
 
         # Output files section
         output_frame = ttk.LabelFrame(main_frame, text="Output Files", padding="10")
@@ -91,6 +93,8 @@ class BPMApp:
                        command=self._update_output_status).grid(row=2, column=1, sticky="w", padx=(0, 20))
         ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
                        command=self._update_output_status).grid(row=3, column=0, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="HTML Spectrogram", variable=self.output_spectrogram,
+                       command=self._update_output_status).grid(row=3, column=1, sticky="w", padx=(0, 20))
 
         # Select All/None buttons
         btn_frame_output = ttk.Frame(output_frame)
@@ -116,6 +120,7 @@ class BPMApp:
         self.output_settings.trace('w', on_output_change)
         self.output_filtered_wav.trace('w', on_output_change)
         self.output_bpm_text.trace('w', on_output_change)
+        self.output_spectrogram.trace('w', on_output_change)
 
         # Action Buttons
         btn_frame = ttk.Frame(main_frame)
@@ -266,7 +271,8 @@ class BPMApp:
                 'output_debug': self.output_debug.get(),
                 'output_settings': self.output_settings.get(),
                 'output_filtered_wav': self.output_filtered_wav.get(),
-            'output_bpm_text': self.output_bpm_text.get(),
+                'output_bpm_text': self.output_bpm_text.get(),
+                'output_spectrogram': self.output_spectrogram.get(),
                 'last_files': self.current_files if self.current_files else []
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
@@ -305,6 +311,8 @@ class BPMApp:
                 self.output_filtered_wav.set(settings['output_filtered_wav'])
             if 'output_bpm_text' in settings:
                 self.output_bpm_text.set(settings['output_bpm_text'])
+            if 'output_spectrogram' in settings:
+                self.output_spectrogram.set(settings['output_spectrogram'])
             
             # Load last used files (only if they still exist)
             if 'last_files' in settings and settings['last_files']:
@@ -369,6 +377,7 @@ class BPMApp:
             else:  # Linux and others
                 subprocess.run(['xdg-open', most_recent_file])
             self._update_status(f"Opened: {os.path.basename(most_recent_file)}")
+            self.root.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"Could not open HTML file: {e}")
 
@@ -381,6 +390,7 @@ class BPMApp:
         self.output_settings.set(True)
         self.output_filtered_wav.set(True)
         self.output_bpm_text.set(True)
+        self.output_spectrogram.set(True)
 
     def select_none_outputs(self):
         """Deselect all output file options."""
@@ -391,6 +401,7 @@ class BPMApp:
         self.output_settings.set(False)
         self.output_filtered_wav.set(False)
         self.output_bpm_text.set(False)
+        self.output_spectrogram.set(False)
 
     def get_output_options(self):
         """Get the current output file selection as a dictionary."""
@@ -402,6 +413,7 @@ class BPMApp:
             'settings': self.output_settings.get(),
             'filtered_wav': self.output_filtered_wav.get(),
             'bpm_text': self.output_bpm_text.get(),
+            'spectrogram': self.output_spectrogram.get(),
         }
 
     def _update_output_status(self, *args):

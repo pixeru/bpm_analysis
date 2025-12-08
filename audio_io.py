@@ -271,7 +271,8 @@ def preprocess_audio(
         # Resample to a browser‑friendly sample rate for HTML5 audio playback.
         # Very low sample rates (e.g. 500 Hz) can cause some browsers to report
         # "Audio format not supported", even though the WAV file is valid.
-        debug_sample_rate = 5000
+        # Increased to 10k to avoid Empty filters detected in mel frequency basis warnings.
+        debug_sample_rate = 10000
         try:
             peak = float(np.max(np.abs(audio_filtered))) if audio_filtered.size else 0.0
             if peak > 0:

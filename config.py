@@ -129,4 +129,14 @@ DEFAULT_PARAMS = {
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
     "plot_downsample_factor": 1,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
+
+    # --- 7.1. Trapezoid Artifact Detection ---
+    # These control detection of brief, trapezoid-shaped BPM jumps that are often extra-beat artifacts.
+    "trapezoid_rate_threshold": 7.0,            # BPM/s: physiologically implausible rate for rise/fall edges.
+    "trapezoid_max_edge_duration_sec": 2,     # Maximum duration (seconds) for the rise/fall edges.
+    "trapezoid_min_plateau_duration_sec": 1.5,  # Minimum plateau length between rise and fall.
+    "trapezoid_max_plateau_duration_sec": 15.0, # Maximum plateau length between rise and fall.
+    "trapezoid_baseline_tolerance_bpm": 5.0,    # Allowed BPM difference between pre- and post-artifact baseline.
+    "trapezoid_min_jump_bpm": 3.0,              # Minimum BPM jump from baseline to plateau median.
+    "trapezoid_min_fall_delta_bpm": 3.0,        # Minimum absolute BPM drop across the fall edge (start vs end of fall).
 }

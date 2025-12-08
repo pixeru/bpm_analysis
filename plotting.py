@@ -40,16 +40,18 @@ class Plotter:
         self.audio_source_path = source_audio_path or file_name
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
         self.audio_duration_sec = None  # Will be set during plot_and_save
-        self.spectrogram_base64: Optional[str] = None  # For optional background overlay
+        # Optional spectrogram image (original audio); filtered spectrograms are generated on demand.
+        self.spectrogram_base64: Optional[str] = None
+        self.bpm_axis_center: float = float(params.get("default_bpm_axis_center", 125))
+        self.bpm_axis_span: float = float(params.get("bpm_axis_span", 150))
 
-    def _generate_spectrogram_image(self) -> Optional[str]:
+    def _generate_spectrogram_image(self, audio_path: str) -> Optional[str]:
         """
         Generate a spectrogram image from the audio file and return as base64 PNG.
         The spectrogram is rendered with a transparent background for overlay.
         """
         try:
             # Load audio at a reasonable sample rate for spectrogram
-            audio_path = self.audio_source_path or self.file_name
             audio_data, sr = librosa.load(audio_path, sr=22050, mono=True)
 
             if audio_data is None or len(audio_data) == 0:
@@ -58,8 +60,8 @@ class Plotter:
 
             # Compute mel spectrogram for better visual representation
             n_fft = 2048
-            hop_length = 512
-            n_mels = 128
+            hop_length = 128
+            n_mels = 512
 
             # Generate mel spectrogram
             S = librosa.feature.melspectrogram(
@@ -161,6 +163,7 @@ class Plotter:
             final_metrics.get("hrr_stats"),
             final_metrics.get("peak_recovery_stats"),
         )
+        self._prepare_bpm_axis_center(final_metrics)
 
         self._configure_layout()
 
@@ -169,8 +172,22 @@ class Plotter:
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {"scrollZoom": True, "toImageButtonOptions": {"filename": plot_title, "format": "png", "scale": 2}}
 
-        # Generate spectrogram image for optional background overlay
-        self.spectrogram_base64 = self._generate_spectrogram_image()
+        # Determine whether spectrogram generation is enabled (can be disabled via GUI/output options).
+        self.spectrogram_enabled = True
+        if output_options is not None:
+            self.spectrogram_enabled = output_options.get("spectrogram", True)
+
+        # Generate spectrogram image for optional background overlay (original audio only).
+        # Filtered spectrograms are generated later in `_generate_custom_html` if needed.
+        if self.spectrogram_enabled:
+            try:
+                self.spectrogram_base64 = self._generate_spectrogram_image(
+                    self.audio_source_path or self.file_name
+                )
+            except Exception as e:
+                logging.warning(f"Failed to generate original spectrogram: {e}")
+        else:
+            logging.info("Skipping original spectrogram generation as requested (spectrogram output disabled).")
 
         # Generate the base Plotly HTML
         plotly_html = self.fig.to_html(config=plot_config, full_html=False, include_plotlyjs='cdn')
@@ -202,6 +219,17 @@ class Plotter:
 
         return self.fig
 
+    def _prepare_bpm_axis_center(self, final_metrics: Dict):
+        """Use detected BPM stats to keep the BPM axis centered without altering the per-file zoom."""
+        hrv_summary = final_metrics.get("hrv_summary") or {}
+        avg_bpm = hrv_summary.get("avg_bpm")
+        smoothed_bpm = final_metrics.get("smoothed_bpm")
+        if avg_bpm is None and smoothed_bpm is not None and not smoothed_bpm.empty:
+            avg_bpm = float(smoothed_bpm.mean())
+        if avg_bpm is None:
+            avg_bpm = float(self.params.get("default_bpm_axis_center", self.bpm_axis_center))
+        self.bpm_axis_center = float(avg_bpm)
+
     def _configure_layout(self):
         """Sets up the plot layout, titles, and axes with custom x-axis tick labels."""
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
@@ -230,7 +258,15 @@ class Plotter:
         self.fig.update_yaxes(
             title_text="Signal Amplitude", secondary_y=False, range=[0, robust_upper_limit * amplitude_scale]
         )
-        self.fig.update_yaxes(title_text="BPM / HRV", secondary_y=True, range=[50, 200])
+        half_span = self.bpm_axis_span / 2.0
+        min_bpm = max(self.bpm_axis_center - half_span, 5)
+        max_bpm = self.bpm_axis_center + half_span
+        self.fig.update_yaxes(
+            title_text="BPM / HRV",
+            secondary_y=True,
+            range=[min_bpm, max_bpm],
+            autorange=False,
+        )
 
     def _add_line_traces(self, time_axis_dt: pd.Series, audio_envelope: np.ndarray, analysis_data: Dict):
         """Adds downsampled audio envelope and noise floor traces for performance."""
@@ -657,12 +693,43 @@ class Plotter:
         audio_src_escaped = urllib.parse.quote(audio_src)
         filtered_audio_src_escaped = urllib.parse.quote(filtered_audio_src) if filtered_audio_src else ""
 
-        # Prepare spectrogram data (optional)
-        spectrogram_src = ""
-        spectrogram_available = "false"
-        if getattr(self, "spectrogram_base64", None):
-            spectrogram_src = f"data:image/png;base64,{self.spectrogram_base64}"
-            spectrogram_available = "true"
+        # Prepare spectrogram data (optional, per audio source)
+        spectrogram_original_src = ""
+        spectrogram_filtered_src = ""
+        spectrogram_available_original = "false"
+        spectrogram_available_filtered = "false"
+
+        # Respect spectrogram-enabled flag when embedding/generating images.
+        spectrogram_enabled = getattr(self, "spectrogram_enabled", True)
+
+        if spectrogram_enabled:
+            # Original spectrogram (precomputed in plot_and_save if possible)
+            if getattr(self, "spectrogram_base64", None):
+                spectrogram_original_src = f"data:image/png;base64,{self.spectrogram_base64}"
+                spectrogram_available_original = "true"
+            else:
+                # Fallback: try to generate on demand from the copied audio in the output directory
+                try:
+                    if audio_src:
+                        orig_audio_path_for_spec = os.path.join(self.output_directory, audio_src)
+                        spec_b64 = self._generate_spectrogram_image(orig_audio_path_for_spec)
+                        if spec_b64:
+                            spectrogram_original_src = f"data:image/png;base64,{spec_b64}"
+                            spectrogram_available_original = "true"
+                except Exception as e:
+                    logging.warning(f"Failed to generate on-demand original spectrogram: {e}")
+
+            # Filtered spectrogram (if filtered debug audio exists)
+            if filtered_available:
+                try:
+                    spec_filtered_b64 = self._generate_spectrogram_image(filtered_debug_path)
+                    if spec_filtered_b64:
+                        spectrogram_filtered_src = f"data:image/png;base64,{spec_filtered_b64}"
+                        spectrogram_available_filtered = "true"
+                except Exception as e:
+                    logging.warning(f"Failed to generate filtered spectrogram: {e}")
+        else:
+            logging.info("Spectrogram generation disabled; no spectrogram images embedded in HTML.")
 
         audio_source_options = ['<option value="original">Original Audio</option>']
         if filtered_available:
@@ -996,7 +1063,7 @@ class Plotter:
         <!-- Chart container - takes up remaining space -->
         <div id="chart-container">
             <div id="spectrogram-container">
-                <img id="spectrogram-image" class="hidden" src="{spectrogram_src}" alt="Spectrogram" />
+                <img id="spectrogram-image" class="hidden" src="{spectrogram_original_src}" alt="Spectrogram" />
             </div>
             <div id="chart-playhead"></div>
             <div id="plotly-chart">
@@ -1025,7 +1092,14 @@ class Plotter:
         // Configuration
         const TOTAL_DURATION = {duration_sec};
         const EPOCH = new Date(0);
-        const SPECTROGRAM_AVAILABLE = {spectrogram_available};
+        const SPECTROGRAM_SOURCES = {{
+            original: "{spectrogram_original_src}",
+            filtered: "{spectrogram_filtered_src}"
+        }};
+        const SPECTROGRAM_AVAILABLE = {{
+            original: {spectrogram_available_original},
+            filtered: {spectrogram_available_filtered}
+        }};
         const AUDIO_SOURCES = {{
             original: "{audio_src_escaped}",
             filtered: "{filtered_audio_src_escaped}"
@@ -1090,6 +1164,19 @@ class Plotter:
             audio.load();
             logAudioSource();
             console.log("🔁 Switched audio to", AUDIO_LABELS[candidateKey] || candidateKey, src);
+            // If spectrogram is visible, update it to match the current audio source
+            if (isSpectrogramVisible) {{
+                if (SPECTROGRAM_AVAILABLE[currentAudioKey] && SPECTROGRAM_SOURCES[currentAudioKey]) {{
+                    updateSpectrogramSourceForCurrentAudio();
+                    updateSpectrogramPosition();
+                }} else {{
+                    // Hide spectrogram if not available for this source
+                    spectrogramImage.classList.add('hidden');
+                    spectrogramBtn.classList.remove('active');
+                    isSpectrogramVisible = false;
+                    console.warn("No spectrogram available for audio source:", currentAudioKey);
+                }}
+            }}
             if (resumePlayback && isPlaying) {{
                 audio.play().catch((e) => console.log("Audio play error:", e));
             }}
@@ -1238,16 +1325,24 @@ class Plotter:
             }}
         }}
         
+        function updateSpectrogramSourceForCurrentAudio() {{
+            const src = SPECTROGRAM_SOURCES[currentAudioKey];
+            if (src) {{
+                spectrogramImage.src = src;
+            }}
+        }}
+
         // Toggle spectrogram visibility
         function toggleSpectrogram() {{
-            if (!SPECTROGRAM_AVAILABLE) {{
-                alert('Spectrogram not available for this file.');
+            if (!SPECTROGRAM_AVAILABLE[currentAudioKey]) {{
+                alert('Spectrogram not available for this audio source.');
                 return;
             }}
             isSpectrogramVisible = !isSpectrogramVisible;
             spectrogramBtn.classList.toggle('active', isSpectrogramVisible);
             spectrogramImage.classList.toggle('hidden', !isSpectrogramVisible);
             if (isSpectrogramVisible) {{
+                updateSpectrogramSourceForCurrentAudio();
                 updateSpectrogramPosition();
             }}
         }}
@@ -1259,7 +1354,7 @@ class Plotter:
         
         // Update spectrogram position and scale based on current view
         function updateSpectrogramPosition() {{
-            if (!plotlyGraphDiv || !isSpectrogramVisible || !SPECTROGRAM_AVAILABLE || !xAxisRange) return;
+            if (!plotlyGraphDiv || !isSpectrogramVisible || !SPECTROGRAM_AVAILABLE[currentAudioKey] || !xAxisRange) return;
             
             const plotArea = plotlyGraphDiv._fullLayout;
             if (!plotArea) return;
@@ -1488,7 +1583,9 @@ class Plotter:
         
         // Initialize spectrogram controls based on availability
         function initSpectrogramControls() {{
-            if (!SPECTROGRAM_AVAILABLE) {{
+            const anySpectrogramAvailable =
+                SPECTROGRAM_AVAILABLE.original || SPECTROGRAM_AVAILABLE.filtered;
+            if (!anySpectrogramAvailable) {{
                 spectrogramBtn.style.opacity = '0.5';
                 spectrogramBtn.style.cursor = 'not-allowed';
                 spectrogramOpacity.disabled = true;

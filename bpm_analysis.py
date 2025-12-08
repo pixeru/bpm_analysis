@@ -1353,7 +1353,7 @@ def calculate_bpm_series(peaks: np.ndarray, sample_rate: int, params: Dict) -> T
     return smoothed_bpm, peak_times[1:][valid_diffs]
 
 
-def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.ndarray) -> List[Dict]:
+def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.ndarray, params: Dict) -> List[Dict]:
     """
     Detects trapezoid-shaped discontinuities in the average BPM series that are
     characteristic of a brief extra-beat artifact:
@@ -1389,13 +1389,14 @@ def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.
     df["ΔBPM"] = df["Average BPM"].diff()
     df["Rate"] = df["ΔBPM"] / df["Δt"]
 
-    # --- CONFIGURATION (mirrors detectTrapezoid.py) ---
-    RATE_THRESHOLD = 7.0          # BPM/s: physiologically impossible rate
-    MAX_EDGE_DURATION = 1.5       # Maximum time for rise/fall interval
-    MIN_PLATEAU_DURATION = 1.5    # Minimum plateau length (reduced for sloped cases)
-    MAX_PLATEAU_DURATION = 15.0   # Maximum plateau length
-    BASELINE_TOLERANCE = 5.0      # BPM tolerance for baseline return (increased)
-    MIN_JUMP = 6.0                # Minimum BPM jump to consider
+    # --- CONFIGURATION (now driven by params, defaults mirror detectTrapezoid.py) ---
+    RATE_THRESHOLD = params.get("trapezoid_rate_threshold", 7.0)                 # BPM/s
+    MAX_EDGE_DURATION = params.get("trapezoid_max_edge_duration_sec", 1.5)       # seconds
+    MIN_PLATEAU_DURATION = params.get("trapezoid_min_plateau_duration_sec", 1.5) # seconds
+    MAX_PLATEAU_DURATION = params.get("trapezoid_max_plateau_duration_sec", 15.0)# seconds
+    BASELINE_TOLERANCE = params.get("trapezoid_baseline_tolerance_bpm", 5.0)     # BPM
+    MIN_JUMP = params.get("trapezoid_min_jump_bpm", 6.0)                         # BPM
+    MIN_FALL_DELTA = params.get("trapezoid_min_fall_delta_bpm", 5.0)             # BPM
 
     # Step 1: Identify edge intervals (second point of each edge)
     df["is_rise"] = (df["Rate"] > RATE_THRESHOLD) & (df["Δt"] < MAX_EDGE_DURATION)
@@ -1465,6 +1466,13 @@ def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.
             if (t2 - t1) > MAX_EDGE_DURATION or (t4 - t3) > MAX_EDGE_DURATION:
                 continue
 
+            # Enforce a minimum BPM change across the fall edge itself.
+            # If the fall barely changes BPM, don't treat it as a trapezoid artifact.
+            fall_start_bpm = float(df.loc[fall_idx - 1, "Average BPM"])
+            fall_end_bpm = float(df.loc[fall_idx, "Average BPM"])
+            if abs(fall_start_bpm - fall_end_bpm) < MIN_FALL_DELTA:
+                continue
+
             # Calculate jump from baseline to plateau median
             plateau_median = float(plateau_df["Average BPM"].median())
             jump_size = plateau_median - baseline_before
@@ -1483,8 +1491,8 @@ def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.
                 "t_end_fall": t4,
                 "bpm_start_rise": float(df.loc[rise_idx - 1, "Average BPM"]),
                 "bpm_end_rise": float(df.loc[rise_idx, "Average BPM"]),
-                "bpm_start_fall": float(df.loc[fall_idx - 1, "Average BPM"]),
-                "bpm_end_fall": float(df.loc[fall_idx, "Average BPM"]),
+                "bpm_start_fall": fall_start_bpm,
+                "bpm_end_fall": fall_end_bpm,
                 "baseline_before": baseline_before,
                 "plateau_median": plateau_median,
                 "plateau_slope": plateau_slope,
@@ -1746,7 +1754,7 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     """Calculates all final BPM, HRV, and slope metrics for reporting."""
     metrics = {}
     metrics['smoothed_bpm'], metrics['bpm_times'] = calculate_bpm_series(final_peaks, sample_rate, params)
-    metrics['trapezoids'] = detect_trapezoid_discontinuities(metrics['smoothed_bpm'], metrics['bpm_times'])
+    metrics['trapezoids'] = detect_trapezoid_discontinuities(metrics['smoothed_bpm'], metrics['bpm_times'], params)
     metrics['major_inclines'] = find_major_hr_inclines(metrics['smoothed_bpm'])
     metrics['major_declines'] = find_major_hr_declines(metrics['smoothed_bpm'])
     metrics['hrr_stats'] = calculate_hrr(metrics['smoothed_bpm'])
