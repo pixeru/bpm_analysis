@@ -267,9 +267,33 @@ def preprocess_audio(
     if save_debug_file:
         base_name = os.path.basename(os.path.splitext(file_path)[0])
         debug_path = os.path.join(output_directory, f"{base_name}_filtered_debug.wav")
-        normalized_audio = np.int16(audio_filtered / np.max(np.abs(audio_filtered)) * 32767)
-        wavfile.write(debug_path, new_sample_rate, normalized_audio)
-        logging.info("Saved filtered audio WAV file as requested.")
+
+        # Resample to a browser‑friendly sample rate for HTML5 audio playback.
+        # Very low sample rates (e.g. 500 Hz) can cause some browsers to report
+        # "Audio format not supported", even though the WAV file is valid.
+        debug_sample_rate = 5000
+        try:
+            peak = float(np.max(np.abs(audio_filtered))) if audio_filtered.size else 0.0
+            if peak > 0:
+                norm = audio_filtered / peak
+            else:
+                norm = audio_filtered
+
+            # Upsample for playback while preserving duration
+            debug_audio = librosa.resample(
+                norm, orig_sr=new_sample_rate, target_sr=debug_sample_rate
+            )
+            normalized_audio = np.int16(
+                np.clip(debug_audio, -1.0, 1.0) * 32767
+            )
+            wavfile.write(debug_path, debug_sample_rate, normalized_audio)
+            logging.info(
+                "Saved filtered audio WAV debug file (%s, %d Hz, int16) for HTML playback.",
+                debug_path,
+                debug_sample_rate,
+            )
+        except Exception as e:
+            logging.error("Failed to write filtered debug WAV file %s: %s", debug_path, e)
     elif params["save_filtered_wav"] and not output_options.get("filtered_wav", True):
         logging.info("Skipping filtered audio WAV generation as requested.")
 
