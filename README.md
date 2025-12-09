@@ -48,3 +48,8 @@ pip install numpy pandas scipy plotly ttkbootstrap pydub librosa PyWavelets pyPC
 python main.py
 ```
 Tip: you can rename the file to main.pyw to avoid using cmd prompt. Just double click it to launch like a .exe file
+
+![Import BlenderAsj3vbrst4v](https://github.com/user-attachments/assets/20130a36-d990-43ba-9cb2-c4d4d248d069)
+![Place BlenderAsj3zdst4v](https://github.com/user-attachments/assets/f41d8e27-f525-4736-b67a-18de4e4b98e5)
+![Adjust BlenderAsj3zny4v](https://github.com/user-attachments/assets/5d033948-f5b8-485f-9ebe-e9b87a6ee94c)
+
