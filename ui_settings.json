@@ -1,14 +1,13 @@
 {
     "starting_bpm": "",
     "output_html": true,
-    "output_csv": false,
-    "output_summary": false,
-    "output_debug": false,
-    "output_settings": false,
-    "output_filtered_wav": false,
-    "output_bpm_text": false,
-    "output_spectrogram": false,
+    "output_csv": true,
+    "output_summary": true,
+    "output_debug": true,
+    "output_filtered_wav": true,
+    "output_bpm_text": true,
+    "output_spectrogram": true,
     "last_files": [
-        "C:/Users/WXP/Documents/GitHub/bpm_analysis/inputs/2medium/#69 \u30d0\u30af\u30d0\u30af\u5fc3\u97f3 BPM198 Female Exercise Heartbeat 198bpm [09-13-2024][fast].mp4"
+        "C:/Users/WXP/Documents/GitHub/bpm_analysis/inputs/2medium/168_test.wav"
     ]
 }

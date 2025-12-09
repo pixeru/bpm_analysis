@@ -1816,7 +1816,6 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
             'csv': True,
             'summary': True,
             'debug': True,
-            'settings': True,
             'filtered_wav': True,
             'bpm_text': False,
         }
@@ -1834,7 +1833,6 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     needs_reporter = any([
         output_options.get('summary', True),
         output_options.get('debug', True),
-        output_options.get('settings', True),
         output_options.get('bpm_text', False),
     ])
 
@@ -1851,11 +1849,6 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
         else:
             logging.info("Skipping debug log generation as requested.")
             
-        if output_options.get('settings', True):
-            reporter.save_analysis_settings(start_bpm_hint)
-        else:
-            logging.info("Skipping settings generation as requested.")
-
         if output_options.get('bpm_text', False):
             reporter.save_bpm_time_txt(final_metrics.get('smoothed_bpm'), final_metrics.get('bpm_times'))
         else:

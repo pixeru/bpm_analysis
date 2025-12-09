@@ -256,7 +256,10 @@ class Plotter:
         robust_upper_limit = np.quantile(self.fig.data[0].y, 0.95) if self.fig.data else 1
         amplitude_scale = self.params.get("plot_amplitude_scale_factor", 60.0)
         self.fig.update_yaxes(
-            title_text="Signal Amplitude", secondary_y=False, range=[0, robust_upper_limit * amplitude_scale]
+            title_text="Signal Amplitude",
+            secondary_y=False,
+            range=[0, robust_upper_limit * amplitude_scale],
+            showgrid=False,
         )
         half_span = self.bpm_axis_span / 2.0
         min_bpm = max(self.bpm_axis_center - half_span, 5)
@@ -816,6 +819,41 @@ class Plotter:
             background: #00d4ff;
             color: #111;
         }}
+
+        #grid-controls {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #aaa;
+        }}
+
+        #grid-controls .grid-label {{
+            font-size: 11px;
+            font-weight: 600;
+            color: #cfdcff;
+        }}
+
+        .grid-toggle-button {{
+            background: #2a2a3a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            padding: 3px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.15s;
+        }}
+
+        .grid-toggle-button:hover {{
+            background: #3a3a4a;
+            border-color: #00d4ff;
+        }}
+
+        .grid-toggle-button.active {{
+            background: #00d4ff;
+            color: #111;
+        }}
         
         #volume-control {{
             display: flex;
@@ -1050,6 +1088,11 @@ class Plotter:
                     </div>
                     {audio_source_select_html}
                 </div>
+                <div id="grid-controls">
+                    <span class="grid-label">Grid:</span>
+                    <button class="grid-toggle-button" data-grid-axis="yaxis" title="Toggle signal amplitude gridlines">Signal</button>
+                    <button class="grid-toggle-button active" data-grid-axis="yaxis2" title="Toggle BPM/HRV gridlines">BPM</button>
+                </div>
                 <span id="total-time">{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}</span>
                 <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
             </div>
@@ -1128,6 +1171,7 @@ class Plotter:
         const chartContainer = document.getElementById('chart-container');
         const audioFileNameEl = document.getElementById('audio-file-name');
         const audioSourceSelect = document.getElementById('audio-source-select');
+        const axisGridButtons = document.querySelectorAll('[data-grid-axis]');
         
         const DEFAULT_AUDIO_KEY = "original";
         let currentAudioKey = DEFAULT_AUDIO_KEY;
@@ -1347,6 +1391,83 @@ class Plotter:
             }}
         }}
         
+        const pendingAxisGridUpdates = {{}};
+
+        function getAxisShowGrid(axisKey) {{
+            if (!axisKey) {{
+                return true;
+            }}
+            if (Object.prototype.hasOwnProperty.call(pendingAxisGridUpdates, axisKey)) {{
+                return pendingAxisGridUpdates[axisKey];
+            }}
+            if (plotlyGraphDiv && plotlyGraphDiv._fullLayout) {{
+                const axisLayout = plotlyGraphDiv._fullLayout[axisKey];
+                if (axisLayout && typeof axisLayout.showgrid === 'boolean') {{
+                    return axisLayout.showgrid;
+                }}
+            }}
+            return true;
+        }}
+
+        function refreshAxisGridButtons() {{
+            if (!axisGridButtons || axisGridButtons.length === 0) {{
+                return;
+            }}
+            axisGridButtons.forEach((button) => {{
+                const axisKey = button.dataset.gridAxis;
+                const showGrid = getAxisShowGrid(axisKey);
+                button.classList.toggle('active', showGrid);
+            }});
+        }}
+
+        function applyAxisGridState(axisKey, showGrid) {{
+            if (!axisKey) {{
+                return;
+            }}
+            if (!plotlyGraphDiv) {{
+                pendingAxisGridUpdates[axisKey] = showGrid;
+                return;
+            }}
+            const layoutKey = axisKey + '.showgrid';
+            const updates = {{}};
+            updates[layoutKey] = showGrid;
+            Plotly.relayout(plotlyGraphDiv, updates).then(() => {{
+                refreshAxisGridButtons();
+            }});
+        }}
+
+        function toggleAxisGrid(event) {{
+            const button = event.currentTarget;
+            const axisKey = button && button.dataset ? button.dataset.gridAxis : null;
+            if (!axisKey) {{
+                return;
+            }}
+            const nextState = !getAxisShowGrid(axisKey);
+            button.classList.toggle('active', nextState);
+            applyAxisGridState(axisKey, nextState);
+        }}
+
+        function flushPendingAxisGridUpdates() {{
+            if (!plotlyGraphDiv) {{
+                return;
+            }}
+            const updates = {{}};
+            let hasUpdates = false;
+            for (const axisKey in pendingAxisGridUpdates) {{
+                if (!Object.prototype.hasOwnProperty.call(pendingAxisGridUpdates, axisKey)) {{
+                    continue;
+                }}
+                updates[axisKey + '.showgrid'] = pendingAxisGridUpdates[axisKey];
+                delete pendingAxisGridUpdates[axisKey];
+                hasUpdates = true;
+            }}
+            if (hasUpdates) {{
+                Plotly.relayout(plotlyGraphDiv, updates).then(() => {{
+                    refreshAxisGridButtons();
+                }});
+            }}
+        }}
+
         // Update spectrogram opacity
         function updateSpectrogramOpacity(value) {{
             spectrogramImage.style.opacity = value;
@@ -1412,6 +1533,10 @@ class Plotter:
         
         volumeSlider.addEventListener('input', (e) => {{
             audio.volume = parseFloat(e.target.value);
+        }});
+
+        axisGridButtons.forEach((button) => {{
+            button.addEventListener('click', toggleAxisGrid);
         }});
         
         // Timeline scrubber click/drag
@@ -1524,6 +1649,8 @@ class Plotter:
             const graphDivs = document.querySelectorAll('.plotly-graph-div');
             if (graphDivs.length > 0) {{
                 plotlyGraphDiv = graphDivs[0];
+                refreshAxisGridButtons();
+                flushPendingAxisGridUpdates();
                 
                 // Get initial axis range
                 function updateAxisRange() {{
@@ -1543,12 +1670,14 @@ class Plotter:
                     updateAxisRange();
                     updatePlayhead(audio.currentTime);
                     updateSpectrogramPosition();
+                    refreshAxisGridButtons();
                 }});
                 
                 // Also listen for plotly_afterplot for initial render
                 plotlyGraphDiv.on('plotly_afterplot', function() {{
                     updateAxisRange();
                     updateSpectrogramPosition();
+                    refreshAxisGridButtons();
                 }});
                 
                 // Update on window resize

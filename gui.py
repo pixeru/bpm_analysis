@@ -68,7 +68,6 @@ class BPMApp:
         self.output_csv = tk.BooleanVar(value=False)
         self.output_summary = tk.BooleanVar(value=False)
         self.output_debug = tk.BooleanVar(value=False)
-        self.output_settings = tk.BooleanVar(value=False)
         self.output_filtered_wav = tk.BooleanVar(value=False)
         self.output_bpm_text = tk.BooleanVar(value=False)
         # HTML spectrogram overlay can be slow to generate; expose as a separate toggle.
@@ -79,22 +78,20 @@ class BPMApp:
         output_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
 
         # Output file checkboxes
-        ttk.Checkbutton(output_frame, text="HTML Report", variable=self.output_html, 
+        ttk.Checkbutton(output_frame, text="Heart Rate Graph (HTML File)", variable=self.output_html, 
                        command=self._update_output_status).grid(row=0, column=0, sticky="w", padx=(0, 20))
         ttk.Checkbutton(output_frame, text="CSV Data", variable=self.output_csv, 
                        command=self._update_output_status).grid(row=0, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Summary Report", variable=self.output_summary, 
+        ttk.Checkbutton(output_frame, text="HTML Spectrogram", variable=self.output_spectrogram,
                        command=self._update_output_status).grid(row=1, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Debug Report", variable=self.output_debug, 
+        ttk.Checkbutton(output_frame, text="Summary Report", variable=self.output_summary, 
                        command=self._update_output_status).grid(row=1, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Analysis Settings", variable=self.output_settings, 
+        ttk.Checkbutton(output_frame, text="Debug Report", variable=self.output_debug, 
                        command=self._update_output_status).grid(row=2, column=0, sticky="w", padx=(0, 20))
         ttk.Checkbutton(output_frame, text="Filtered Audio WAV", variable=self.output_filtered_wav, 
                        command=self._update_output_status).grid(row=2, column=1, sticky="w", padx=(0, 20))
         ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
                        command=self._update_output_status).grid(row=3, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="HTML Spectrogram", variable=self.output_spectrogram,
-                       command=self._update_output_status).grid(row=3, column=1, sticky="w", padx=(0, 20))
 
         # Select All/None buttons
         btn_frame_output = ttk.Frame(output_frame)
@@ -117,7 +114,6 @@ class BPMApp:
         self.output_csv.trace('w', on_output_change)
         self.output_summary.trace('w', on_output_change)
         self.output_debug.trace('w', on_output_change)
-        self.output_settings.trace('w', on_output_change)
         self.output_filtered_wav.trace('w', on_output_change)
         self.output_bpm_text.trace('w', on_output_change)
         self.output_spectrogram.trace('w', on_output_change)
@@ -177,9 +173,8 @@ class BPMApp:
             # Save the selected files to settings
             self.save_ui_settings()
 
-            # If only one file is chosen, try to load its settings.
             if len(self.current_files) == 1:
-                self._load_settings_for_file(self.current_files[0])
+                self._update_status("Ready to analyze the selected file.")
             else:
                 # If multiple files are selected, clear the entry to avoid confusion.
                 # The user must enter a value to be used for the whole batch.
@@ -217,41 +212,11 @@ class BPMApp:
                 # Save the auto-detected files to settings
                 self.save_ui_settings()
 
-                # If only one file was auto-detected, try to load its settings
-                if len(self.current_files) == 1:
-                    self._load_settings_for_file(self.current_files[0])
-                else:
-                    # Otherwise, set a general status for batch processing
-                    self._update_status(f"Auto-loaded {len(self.current_files)} files from the current directory.")
+                self._update_status(f"Auto-loaded {len(self.current_files)} files from the current directory.")
 
         except Exception as e:
             # Fails silently if it can't read the directory
             pass
-
-    def _load_settings_for_file(self, file_path: str):
-        """Checks for and loads 'start_bpm_hint' from a corresponding JSON file."""
-        output_dir = os.path.join(os.getcwd(), "processed_files")
-        base_name, _ = os.path.splitext(os.path.basename(file_path))
-        settings_path = os.path.join(output_dir, f"{base_name}_Analysis_Settings.json")
-
-        self.bpm_entry.delete(0, tk.END)
-
-        if os.path.exists(settings_path):
-            try:
-                with open(settings_path, 'r', encoding='utf-8') as f:
-                    settings = json.load(f)
-
-                if settings.get('start_bpm_hint') is not None:
-                    bpm_value = settings['start_bpm_hint']
-                    self.bpm_entry.insert(0, str(bpm_value))
-                    self._update_status(f"Loaded BPM hint ({bpm_value}) from settings file.")
-                else:
-                    self._update_status(f"Found settings file, but no BPM hint inside.")
-            except Exception as e:
-                self._update_status(f"Error reading settings file for {os.path.basename(file_path)}.")
-                print(f"ERROR: Could not parse {settings_path}. Details: {e}")
-        else:
-            self._update_status(f"Ready to analyze. No previous settings file found.")
 
     def _update_status(self, message):
         """Safely update the status bar from any thread."""
@@ -269,7 +234,6 @@ class BPMApp:
                 'output_csv': self.output_csv.get(),
                 'output_summary': self.output_summary.get(),
                 'output_debug': self.output_debug.get(),
-                'output_settings': self.output_settings.get(),
                 'output_filtered_wav': self.output_filtered_wav.get(),
                 'output_bpm_text': self.output_bpm_text.get(),
                 'output_spectrogram': self.output_spectrogram.get(),
@@ -305,8 +269,6 @@ class BPMApp:
                 self.output_summary.set(settings['output_summary'])
             if 'output_debug' in settings:
                 self.output_debug.set(settings['output_debug'])
-            if 'output_settings' in settings:
-                self.output_settings.set(settings['output_settings'])
             if 'output_filtered_wav' in settings:
                 self.output_filtered_wav.set(settings['output_filtered_wav'])
             if 'output_bpm_text' in settings:
@@ -326,12 +288,7 @@ class BPMApp:
                     label_text = f"{len(self.current_files)} files loaded from previous session"
                     self.file_label.config(text=label_text)
                     self.analyze_btn.config(state=tk.NORMAL)
-                    
-                    # If only one file was loaded, try to load its settings
-                    if len(self.current_files) == 1:
-                        self._load_settings_for_file(self.current_files[0])
-                    else:
-                        self._update_status(f"Loaded {len(self.current_files)} files from previous session.")
+                    self._update_status(f"Loaded {len(self.current_files)} files from previous session.")
                 
         except Exception as e:
             # Silently fail - just use defaults
@@ -387,7 +344,6 @@ class BPMApp:
         self.output_csv.set(True)
         self.output_summary.set(True)
         self.output_debug.set(True)
-        self.output_settings.set(True)
         self.output_filtered_wav.set(True)
         self.output_bpm_text.set(True)
         self.output_spectrogram.set(True)
@@ -398,7 +354,6 @@ class BPMApp:
         self.output_csv.set(False)
         self.output_summary.set(False)
         self.output_debug.set(False)
-        self.output_settings.set(False)
         self.output_filtered_wav.set(False)
         self.output_bpm_text.set(False)
         self.output_spectrogram.set(False)
@@ -410,7 +365,6 @@ class BPMApp:
             'csv': self.output_csv.get(),
             'summary': self.output_summary.get(),
             'debug': self.output_debug.get(),
-            'settings': self.output_settings.get(),
             'filtered_wav': self.output_filtered_wav.get(),
             'bpm_text': self.output_bpm_text.get(),
             'spectrogram': self.output_spectrogram.get(),
@@ -460,6 +414,7 @@ class BPMApp:
             # Check for a global BPM value to override all individual settings.
             bpm_override_input = self.bpm_entry.get().strip()
             bpm_override_hint = float(bpm_override_input) if bpm_override_input else None
+            start_bpm_hint = bpm_override_hint
 
             output_dir = os.path.join(os.getcwd(), "processed_files")
             os.makedirs(output_dir, exist_ok=True)
@@ -473,27 +428,6 @@ class BPMApp:
                 try:
                     self.log_queue.put(UIMessage(UIMessageType.STATUS,
                                                  f"({i + 1}/{total_files}) Processing: {os.path.basename(file_path)}"))
-
-                    # --- START: Per-File Settings Logic ---
-                    # The BPM hint to be used for the current file.
-                    start_bpm_hint = None
-                    if bpm_override_hint is not None:
-                        # Use the global override if the user entered a value.
-                        start_bpm_hint = bpm_override_hint
-                    else:
-                        # Otherwise, try to load settings for this specific file.
-                        base_name_for_settings, _ = os.path.splitext(os.path.basename(file_path))
-                        settings_path = os.path.join(output_dir, f"{base_name_for_settings}_Analysis_Settings.json")
-                        if os.path.exists(settings_path):
-                            try:
-                                with open(settings_path, 'r', encoding='utf-8') as f:
-                                    settings = json.load(f)
-                                if settings.get('start_bpm_hint') is not None:
-                                    start_bpm_hint = float(settings['start_bpm_hint'])
-                            except Exception:
-                                # If file is corrupt or unreadable, just proceed without the hint.
-                                pass
-                    # --- END: Per-File Settings Logic ---
 
                     base_name, ext = os.path.splitext(file_path)
                     wav_path = os.path.join(output_dir, f"{os.path.basename(base_name)}.wav")

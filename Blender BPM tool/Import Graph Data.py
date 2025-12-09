@@ -1,5 +1,6 @@
 import bpy
 import csv
+import os
 
 # ============================================================================ #
 # CONFIGURATION & CORE FUNCTIONS
@@ -99,7 +100,9 @@ class BPM_OT_Import_Curve(bpy.types.Operator):
             self.report({'ERROR'}, "Failed to read CSV or no valid data")
             return {'CANCELLED'}
         
-        curve = create_curve_from_points(points, self.curve_name)
+        curve_name = os.path.splitext(os.path.basename(self.filepath))[0]
+        self.curve_name = curve_name
+        curve = create_curve_from_points(points, curve_name)
         
         if curve:
             # Try to select and frame the curve, but don't fail if context is wrong

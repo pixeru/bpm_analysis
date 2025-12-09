@@ -1,5 +1,4 @@
 import os
-import json
 import datetime
 import logging
 from typing import Dict, Optional
@@ -18,17 +17,6 @@ class ReportGenerator:
         self.output_directory = output_directory
         self.file_name_no_ext = os.path.splitext(file_name)[0]
         self.base_name = os.path.basename(self.file_name_no_ext)
-
-    def save_analysis_settings(self, start_bpm_hint: Optional[float]):
-        """Saves the user-configurable settings to a JSON file."""
-        settings_path = os.path.join(self.output_directory, f"{self.base_name}_Analysis_Settings.json")
-        settings_to_save = {"start_bpm_hint": start_bpm_hint}
-        try:
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(settings_to_save, f, indent=4)
-            logging.info(f"Analysis settings saved to {settings_path}")
-        except Exception as e:
-            logging.error(f"Could not save analysis settings file. Error: {e}")
 
     def save_analysis_summary(self, final_metrics: Dict):
         """Saves a comprehensive Markdown summary of the analysis results."""
