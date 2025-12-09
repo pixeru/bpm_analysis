@@ -68,6 +68,7 @@ check if you have Microsoft Visual C++ Redistributable Latest supported v14 (for
     - (Optional) Enter an estimated starting BPM. If left blank, the script will automatically estimate it.
     - Click **Analyze**. Analysis outputs will be saved automatically in the same folder as the script.
 
+<img width="2560" height="1247" alt="brave_ykQQWz6DQv" src="https://github.com/user-attachments/assets/b35ccc4a-dd20-49f6-a21d-64da8c746a92" />
 
 
 
