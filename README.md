@@ -2,6 +2,12 @@
 The Heartbeat BPM Analyzer is a desktop application that analyzes audio recordings of heart sounds to detect heartbeats and calculate the Beats Per Minute (BPM) over time. It is designed to work with various audio file formats and provides a visual representation of the analysis, with a focus on robust, non-blocking performance.
 ## Features
 - **GUI Interface:** A user-friendly graphical interface for easy file selection and analysis.
+<img width="802" height="639" alt="image" src="https://github.com/user-attachments/assets/d1325e51-4c0c-4eab-bb1a-b2fcc6c17227" />
+
+
+### [Heart Rate Graph](https://youtu.be/uzc9XESJmb8)
+[![Watch the video](https://img.youtube.com/vi/uzc9XESJmb8/maxresdefault.jpg)](https://youtu.be/uzc9XESJmb8)
+
 - **Multi-Format Audio Support:** Can process common audio files (e.g., WAV, MP3, M4A, MOV) by converting them to a standard format for analysis.
 - **Intelligent Preprocessing:** The audio processing pipeline filters the audio at its original sample rate _before_ downsampling to preserve maximum signal fidelity and prevent aliasing errors.
 - **Dynamic and Self-Correcting Beat Detection Algorithm:** Employs a sophisticated, stateful algorithm that maintains a "belief" about the heart rate and can now actively recover from periods of signal ambiguity.
@@ -62,5 +68,6 @@ check if you have Microsoft Visual C++ Redistributable Latest supported v14 (for
     - (Optional) Enter an estimated starting BPM. If left blank, the script will automatically estimate it.
     - Click **Analyze**. Analysis outputs will be saved automatically in the same folder as the script.
 
-<img width="802" height="639" alt="image" src="https://github.com/user-attachments/assets/d1325e51-4c0c-4eab-bb1a-b2fcc6c17227" />
-<iframe width="560" height="315" src="https://www.youtube.com/embed/uzc9XESJmb8?si=VuI4RJdgRSdgY2u5" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+
+
+
