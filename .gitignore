@@ -24,3 +24,11 @@ inputs
 *.mov
 *.webm
 *.wmv
+
+# Build artifacts
+dist/
+build/
+
+# Binary packages
+*.exe
+*.pkg
