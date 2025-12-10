@@ -9,3 +9,8 @@ pyPCG==0.0.4
 pyperclip==1.11.0
 scipy==1.16.3
 ttkbootstrap==1.19.2
+
+# Additional runtime dependencies used in the project
+matplotlib
+PyWavelets
+soxr
