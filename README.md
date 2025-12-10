@@ -1,3 +1,8 @@
+<p align="center">
+  <a href="README.md">English</a> |
+  <a href="README-JP.md">日本語</a>
+</p>
+
 # Heartbeat BPM Analyzer
 
 This tool is a heuristic based algorithm for phonocardiogram (PCG) Analysis.
