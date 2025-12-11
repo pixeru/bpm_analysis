@@ -322,6 +322,9 @@ class PeakClassifier:
         next_peak_idx = all_peaks[loop_idx + 1]
 
         # --- LOOKAHEAD: optionally skip a weak middle peak between a strong S1 and S2 ---
+        # Requires BOTH:
+        #   1) The "middle" peak is implausible as S2 (too weak and/or creates impossible S2→S1 interval), and
+        #   2) The alternative S1→S2′ interval (current → next_next) is itself rhythmically plausible.
         if self.params.get('enable_lookahead_skipping', True) and loop_idx + 2 < len(all_peaks):
             middle_peak_idx = next_peak_idx
             next_next_peak_idx = all_peaks[loop_idx + 2]
@@ -347,17 +350,23 @@ class PeakClassifier:
             #   [current_peak_idx] = S1, [middle_peak_idx] = Noise, [next_next_peak_idx] = S2
             # is more physiologically plausible than treating the middle peak as S2.
             bpm = self.state['long_term_bpm']
-            min_s1_s2_interval = (60.0 / bpm) * self.params.get('min_s1_s2_interval_rr_fraction', 0.35)
-            min_s1_s2_interval = max(min_s1_s2_interval, self.params.get('min_s1_s2_interval_sec', 0.15))
+            intervals = calculate_bpm_intervals(bpm, self.params)
+            min_s1_s2_interval = intervals["s1_s2_min"]
+            s1_s2_max_interval = intervals["s1_s2_max"]
 
             s2_to_next_s1_interval_sec = (next_next_peak_idx - middle_peak_idx) / self.sample_rate
+            alt_s1_s2_interval_sec = (next_next_peak_idx - current_peak_idx) / self.sample_rate
 
-            # Determine if middle is skippable based on BOTH interval AND intensity.
+            # Determine if middle is skippable based on BOTH intervals AND intensity.
             middle_is_weak = middle_prom < current_prom * noise_thresh
             interval_is_impossible = s2_to_next_s1_interval_sec < min_s1_s2_interval
             next_next_is_strong = next_next_prom > middle_prom
+            alt_interval_plausible = (
+                alt_s1_s2_interval_sec >= min_s1_s2_interval
+                and alt_s1_s2_interval_sec <= s1_s2_max_interval
+            )
 
-            if middle_is_weak and interval_is_impossible and next_next_is_strong:
+            if middle_is_weak and interval_is_impossible and next_next_is_strong and alt_interval_plausible:
                 # Try pairing current_peak_idx + next_next_peak_idx instead, treating the middle as noise.
                 is_paired_interval, reason_interval, prominence_context_interval = self._attempt_s1_s2_pairing(
                     current_peak_idx, next_next_peak_idx, pairing_ratio
@@ -373,7 +382,9 @@ class PeakClassifier:
                     lookahead_msg_interval = (
                         "LOOKAHEAD INTERVAL: Reinterpreted middle peak as noise because the implied "
                         f"S2→S1 interval {s2_to_next_s1_interval_sec:.3f}s is below the minimum "
-                        f"{min_s1_s2_interval:.3f}s for BPM {bpm:.0f}, and the middle peak is weak "
+                        f"{min_s1_s2_interval:.3f}s for BPM {bpm:.0f}, the alternative S1→S2′ interval "
+                        f"{alt_s1_s2_interval_sec:.3f}s is within [{min_s1_s2_interval:.3f}, "
+                        f"{s1_s2_max_interval:.3f}]s, and the middle peak is weak "
                         f"({middle_prom:.3f} < {noise_thresh:.2f} × S1 {current_prom:.3f}) while the "
                         f"next candidate is stronger ({next_next_prom:.3f} > {middle_prom:.3f})."
                     )
@@ -405,7 +416,9 @@ class PeakClassifier:
                                 "type": "lookahead",
                                 "text": (
                                     "Middle peak treated as noise due to impossible S2→S1 interval "
-                                    f"({s2_to_next_s1_interval_sec:.3f}s < {min_s1_s2_interval:.3f}s), "
+                                    f"({s2_to_next_s1_interval_sec:.3f}s < {min_s1_s2_interval:.3f}s), with a "
+                                    f"plausible alternative S1→S2′ interval ({alt_s1_s2_interval_sec:.3f}s "
+                                    f"within [{min_s1_s2_interval:.3f}, {s1_s2_max_interval:.3f}]s), "
                                     f"weak prominence ({middle_prom:.3f} < {noise_thresh:.2f} × S1 "
                                     f"{current_prom:.3f}), and a stronger following candidate "
                                     f"({next_next_prom:.3f} > {middle_prom:.3f})."
@@ -428,7 +441,11 @@ class PeakClassifier:
                     self.state['loop_idx'] += 3
                     return
 
-            if middle_prom < current_prom * noise_thresh and middle_prom < next_next_prom:
+            if (
+                middle_prom < current_prom * noise_thresh
+                and middle_prom < next_next_prom
+                and alt_interval_plausible
+            ):
                 # Try pairing current + next_next (skip the middle)
                 is_paired_skip, reason_skip, prominence_context_skip = self._attempt_s1_s2_pairing(
                     current_peak_idx, next_next_peak_idx, pairing_ratio
@@ -445,7 +462,9 @@ class PeakClassifier:
                         "LOOKAHEAD SUCCESS: Skipped intermediate weak peak "
                         f"(middle prominence {middle_prom:.3f} < {noise_thresh:.2f} × "
                         f"S1 prominence {current_prom:.3f} and next candidate prominence "
-                        f"{next_next_prom:.3f} > middle)"
+                        f"{next_next_prom:.3f} > middle) with plausible S1→S2′ interval "
+                        f"{alt_s1_s2_interval_sec:.3f}s within "
+                        f"[{min_s1_s2_interval:.3f}, {s1_s2_max_interval:.3f}]s"
                     )
 
                     prominence_section = self._build_prominence_section(prominence_context_skip)
@@ -553,6 +572,18 @@ class PeakClassifier:
         logging.info(f"Found {len(peaks)} raw peaks using dynamic height threshold.")
         return peaks
 
+    def _get_recent_s1_prominences(self) -> List[float]:
+        """Returns prominences of recent validated S1 peaks for reference baseline."""
+        recent_s1_types = [
+            self.state['beat_debug_info'].get(idx, {}).get("peak_type") 
+            for idx in self.state['candidate_beats'][-50:]  # Last 50 beats
+        ]
+        return [
+            calculate_peak_prominence(idx, self.audio_envelope, self.state['trough_indices'])
+            for idx, typ in zip(self.state['candidate_beats'][-50:], recent_s1_types)
+            if typ in (PeakType.S1_PAIRED.value, PeakType.LONE_S1_VALIDATED.value)
+        ]
+
     def _attempt_s1_s2_pairing(
         self, s1_candidate_idx: int, s2_candidate_idx: int, pairing_ratio: float
     ) -> Tuple[bool, str, Dict[str, Any]]:
@@ -561,10 +592,8 @@ class PeakClassifier:
         bpm = self.state['long_term_bpm']
 
         # Minimum S1-S2 as fraction of RR interval (adapts to current BPM)
-        min_s1_s2_interval = (60.0 / bpm) * self.params.get('min_s1_s2_interval_rr_fraction', 0.35)
-        
-        # Absolute minimum S1-S2 interval
-        min_s1_s2_interval = max(min_s1_s2_interval, self.params.get('min_s1_s2_interval_sec', 0.15))
+        intervals = calculate_bpm_intervals(bpm, self.params)
+        min_s1_s2_interval = intervals["s1_s2_min"]
         
         if interval_sec < min_s1_s2_interval:
             # Calculate implied BPM for debugging
@@ -609,7 +638,7 @@ class PeakClassifier:
             "s2": s2_details,
             "shared_s1_right_s2_left": shared_s1_right_s2_left,
         }
-
+        # --- Contractility model based on S1/S2 prominence ratio ---
         confidence, contractility_reason = adjust_confidence_with_contractility(
             base_confidence,
             s1_prominence,
@@ -618,6 +647,31 @@ class PeakClassifier:
             self.params,
         )
         reason += contractility_reason
+
+        # --- Absolute S1 prominence guardrail (shared with Lone S1 logic) ---
+        # Protect against tiny noise bumps being interpreted as a "high contractility" S1/S2 pair.
+        # We compare the current S1 prominence against a recent high-quality S1 baseline.
+        recent_prominences = self._get_recent_s1_prominences()
+        if len(recent_prominences) >= 5:
+            reference_prominence = np.percentile(recent_prominences, 80)  # Top 20% as adaptive reference
+            if reference_prominence > 0:
+                # Re‑use Lone S1 ratio setting for now to keep behavior consistent
+                min_ratio = self.params.get(
+                    "paired_s1_min_prominence_ratio",
+                    self.params.get("lone_s1_min_prominence_ratio", 0.4),
+                )
+                prominence_ratio = s1_prominence / (reference_prominence + 1e-9)
+
+                if prominence_ratio < min_ratio:
+                    # Linear penalty, mirroring Lone S1 behavior:
+                    #   at ratio == min_ratio -> no penalty
+                    #   at ratio  == 0       -> full veto
+                    penalty_factor = float(np.clip(prominence_ratio / (min_ratio + 1e-9), 0.0, 1.0))
+                    confidence *= penalty_factor
+                    reason += (
+                        f"\n- Absolute S1 Prominence Penalty: {s1_prominence:.3f} < {min_ratio:.1f}× reference "
+                        f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
+                    )
 
         # --- Other adjustments (stability, ratio history, etc.) ---
         confidence, other_reason = _apply_other_pairing_adjustments(
@@ -636,7 +690,7 @@ class PeakClassifier:
         )
         reason += other_reason
 
-        s1_s2_max_interval = min(self.params['s1_s2_interval_cap_sec'], (60.0 / self.state['long_term_bpm']) * self.params['s1_s2_interval_rr_fraction'])
+        s1_s2_max_interval = intervals["s1_s2_max"]
         
         # Apply interval penalty if the S1-S2 interval is too long
         if self.params.get("enable_interval_penalty", True) and interval_sec > s1_s2_max_interval:
@@ -762,46 +816,73 @@ class PeakClassifier:
 
     def _validate_lone_s1(self, current_peak_idx: int) -> Tuple[bool, List[str]]:
         """Performs checks to determine if a peak is a valid Lone S1."""
+        detail_lines = []
+        
+        # --- 1. Basic rhythm & amplitude calculation (existing logic) ---
         if not self.state['candidate_beats']:
             return True, ["Validated Lone S1: First beat (no prior rhythm to compare)."]
-
+        
         confidence, detail_lines = calculate_lone_s1_confidence(
             current_peak_idx, self.state['candidate_beats'][-1], self.state['long_term_bpm'],
             self.audio_envelope, self.state['dynamic_noise_floor'], self.sample_rate, self.params
         )
-
+        
+        # --- 2. NEW: Absolute prominence guardrail ---
+        # Track only high-quality S1s (avoid contaminating reference with noise)
+        recent_s1_types = [self.state['beat_debug_info'].get(idx, {}).get("peak_type") 
+                        for idx in self.state['candidate_beats'][-20:]]  # Last 20 beats
+        recent_prominences = [
+            calculate_peak_prominence(idx, self.audio_envelope, self.state['trough_indices'])
+            for idx, typ in zip(self.state['candidate_beats'][-20:], recent_s1_types)
+            if typ in (PeakType.S1_PAIRED.value, PeakType.LONE_S1_VALIDATED.value)
+        ]
+        
+        if len(recent_prominences) >= 5:  # Need minimum history
+            # Top 20% quartile as reference (robust to outliers)
+            reference_prominence = np.percentile(recent_prominences, 80)
+            current_prominence = calculate_peak_prominence(
+                current_peak_idx, self.audio_envelope, self.state['trough_indices']
+            )
+            
+            # Penalty if <40% of reference S1 prominence (adaptive threshold)
+            min_ratio = self.params.get('lone_s1_min_prominence_ratio', 0.4)
+            prominence_ratio = current_prominence / (reference_prominence + 1e-9)
+            
+            if prominence_ratio < min_ratio:
+                # Linear penalty: 0.5x → 0.5 penalty, 0.2x → 0.2 penalty, etc.
+                penalty_factor = np.clip(prominence_ratio / min_ratio, 0.0, 1.0)
+                confidence *= penalty_factor
+                
+                detail_lines.append(
+                    f"\nAbsolute Prominence Veto: {current_prominence:.3f} < {min_ratio:.1f}× reference "
+                    f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
+                )
+        
+        # --- 3. Forward check (existing logic) ---
         current_peak_all_peaks_idx = np.searchsorted(self.state['all_peaks'], current_peak_idx)
         if current_peak_all_peaks_idx < len(self.state['all_peaks']) - 1:
             next_raw_peak_idx = self.state['all_peaks'][current_peak_all_peaks_idx + 1]
             forward_interval_sec = (next_raw_peak_idx - current_peak_idx) / self.sample_rate
-            expected_rr_sec = 60.0 / self.state['long_term_bpm']
-            min_forward_interval = expected_rr_sec * self.params.get('lone_s1_forward_check_pct', 0.45)
-            # If the next peak is suspiciously close (<45% of expected RR)...
-            if forward_interval_sec < min_forward_interval:
-                # ...and current peak isn't MUCH stronger (1.69x), then it's probably S2, not S1
+            expected_rr_sec = calculate_bpm_intervals(self.state['long_term_bpm'], self.params)["rr_interval"]
+            
+            if forward_interval_sec < expected_rr_sec * 0.45:  # Too close
                 current_amp = self.audio_envelope[current_peak_idx]
                 next_amp = self.audio_envelope[next_raw_peak_idx]
-                strength_ratio = current_amp / (next_amp + 1e-9)
-                strength_threshold = 1.69
-                if not (current_amp > (next_amp * strength_threshold)):
-                    implied_bpm = 60.0 / forward_interval_sec if forward_interval_sec > 0 else float('inf')
-                    detail_lines.extend([
-                        "Forward check failed: next peak arrives too quickly for a true S1.",
-                        f"Interval {forward_interval_sec:.3f}s < {min_forward_interval:.3f}s (45% of expected RR) and strength ratio {strength_ratio:.2f}x < {strength_threshold:.2f}x.",
-                        f"This pattern suggests the current peak is S2; accepting it would imply ~{implied_bpm:.0f} BPM."
-                    ])
-                    penalty_factor = self.params.get('lone_s1_forward_penalty_factor', 0.35)
-                    previous_confidence = confidence
-                    confidence = max(0.0, confidence * penalty_factor)
+                
+                # If not MUCH stronger, it's likely S2, not S1
+                if current_amp < next_amp * 1.69:
                     detail_lines.append(
-                        f"Confidence penalized {penalty_factor:.2f}x -> {previous_confidence:.2f} to {confidence:.2f}.")
-
+                        f"\nForward check failed: next peak too close ({forward_interval_sec:.3f}s) and not strong enough"
+                    )
+                    confidence = 0.0  # Hard veto
+        
+        # --- 4. Final threshold check (existing) ---
         threshold = self.params.get("lone_s1_confidence_threshold", 0.6)
         if confidence < threshold:
-            detail_lines.append(f"Outcome: Rejected Lone S1 (score {confidence:.2f} < threshold {threshold:.2f})")
+            detail_lines.append(f"Outcome: Rejected Lone S1 (final score {confidence:.2f} < {threshold:.2f})")
             return False, detail_lines
-
-        detail_lines.append(f"Outcome: Validated Lone S1 (score {confidence:.2f} >= threshold {threshold:.2f})")
+        
+        detail_lines.append(f"Outcome: Validated Lone S1 (final score {confidence:.2f} >= {threshold:.2f})")
         return True, detail_lines
 
 
@@ -933,6 +1014,40 @@ def calculate_peak_prominence(peak_idx: int, audio_envelope: np.ndarray, trough_
     details = get_peak_prominence_details(peak_idx, audio_envelope, trough_indices)
     return details["prominence"]
 
+
+def calculate_bpm_intervals(bpm: float, params: Dict) -> Dict[str, float]:
+    """
+    Given a BPM value, computes key timing intervals (in seconds) implied by that rate.
+
+    Returns a dictionary with:
+      - 'rr_interval'     : full S1→S1 (R-R) interval
+      - 's1_s2_min'       : minimum plausible S1→S2 interval
+      - 's1_s2_nominal'   : nominal S1→S2 interval as a fraction of R-R
+      - 's1_s2_max'       : maximum plausible S1→S2 interval (capped)
+      - 's2_s1_nominal'   : nominal S2→S1 interval (R-R minus S1→S2 nominal)
+    """
+    # Guard against zero or negative BPM
+    bpm = float(max(bpm, 1e-6))
+    rr_interval = 60.0 / bpm
+
+    min_frac = params.get("min_s1_s2_interval_rr_fraction", 0.35)
+    nominal_frac = params.get("s1_s2_interval_rr_fraction", 0.5)
+    min_abs = params.get("min_s1_s2_interval_sec", 0.15)
+    cap_abs = params.get("s1_s2_interval_cap_sec", rr_interval * nominal_frac)
+
+    s1_s2_min = max(rr_interval * min_frac, min_abs)
+    s1_s2_nominal = rr_interval * nominal_frac
+    s1_s2_max = min(cap_abs, s1_s2_nominal)
+    s2_s1_nominal = max(0.0, rr_interval - s1_s2_nominal)
+
+    return {
+        "rr_interval": rr_interval,
+        "s1_s2_min": s1_s2_min,
+        "s1_s2_nominal": s1_s2_nominal,
+        "s1_s2_max": s1_s2_max,
+        "s2_s1_nominal": s2_s1_nominal,
+    }
+
 def adjust_confidence_with_contractility(
     base_confidence: float,
     s1_prominence: float,
@@ -1049,7 +1164,7 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
     human-readable detail lines explaining the calculation.
     """
     # --- 1. Calculate Rhythmic Fit Score ---
-    expected_rr_sec = 60.0 / long_term_bpm
+    expected_rr_sec = calculate_bpm_intervals(long_term_bpm, params)["rr_interval"]
     actual_rr_sec = (current_peak_idx - last_s1_idx) / sample_rate
     rhythm_deviation_pct = abs(actual_rr_sec - expected_rr_sec) / expected_rr_sec
 
