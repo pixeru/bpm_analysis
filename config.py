@@ -130,6 +130,12 @@ DEFAULT_PARAMS = {
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
     "plot_downsample_factor": 1,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
 
+    # --- 7.2. Long Plot Optimization ---
+    # When enabled, very long recordings can skip detailed debug traces in the HTML plot
+    # to keep file sizes manageable. Shorter recordings are always shown in full detail.
+    "optimize_long_plots": False,                # Whether to enable long-plot optimization.
+    "long_plot_duration_threshold_sec": 600.0,   # Duration threshold (seconds) to treat a file as "long" (default: 10 minutes).
+
     # --- 7.1. Trapezoid Artifact Detection ---
     # These control detection of brief, trapezoid-shaped BPM jumps that are often extra-beat artifacts.
     "trapezoid_rate_threshold": 7.0,            # BPM/s: physiologically implausible rate for rise/fall edges.

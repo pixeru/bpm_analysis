@@ -28,7 +28,7 @@ class BPMApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Heartbeat BPM Analyzer (Batch Mode)")
-        self.root.geometry("800x600")
+        self.root.geometry("800x660")
         self.style = ttkb.Style(theme='minty')
         self.current_files = []
         self.params = DEFAULT_PARAMS.copy()
@@ -63,6 +63,15 @@ class BPMApp:
         self.bpm_entry.bind('<KeyRelease>', lambda e: self.save_ui_settings())
         self.bpm_entry.bind('<FocusOut>', lambda e: self.save_ui_settings())
 
+        # Channel handling option
+        self.process_all_channels = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            param_frame,
+            text="Analyze each audio channel separately (stereo \u2192 CH1 & CH2 outputs)",
+            variable=self.process_all_channels,
+            command=self.save_ui_settings,
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+
         # Output file options
         self.output_html = tk.BooleanVar(value=True)
         self.output_png = tk.BooleanVar(value=False)
@@ -73,6 +82,10 @@ class BPMApp:
         self.output_bpm_text = tk.BooleanVar(value=False)
         # HTML spectrogram overlay can be slow to generate; expose as a separate toggle.
         self.output_spectrogram = tk.BooleanVar(value=True)
+        # Long-plot optimization (HTML debug traces)
+        self.optimize_long_plots = tk.BooleanVar(value=False)
+        # Output location option
+        self.output_to_input_dir = tk.BooleanVar(value=False)
 
         # Output files section
         output_frame = ttk.LabelFrame(main_frame, text="Output Files", padding="10")
@@ -96,9 +109,23 @@ class BPMApp:
         ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
                        command=self._update_output_status).grid(row=3, column=1, sticky="w", padx=(0, 20))
 
+        # Long-plot optimization option (does not change output type counts)
+        ttk.Checkbutton(
+            output_frame,
+            text="Optimize long HTML plots (>10 min): hide detailed debug traces to reduce file size",
+            variable=self.optimize_long_plots,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
+
+        # Output location option (does not change output type counts)
+        ttk.Checkbutton(
+            output_frame,
+            text="Save outputs next to input files (instead of 'processed_files')",
+            variable=self.output_to_input_dir,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
+
         # Select All/None buttons
         btn_frame_output = ttk.Frame(output_frame)
-        btn_frame_output.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+        btn_frame_output.grid(row=6, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(btn_frame_output, text="Select All", command=self.select_all_outputs, 
                   bootstyle=SECONDARY).grid(row=0, column=0, padx=(0, 5))
         ttk.Button(btn_frame_output, text="Select None", command=self.select_none_outputs, 
@@ -106,7 +133,7 @@ class BPMApp:
 
         # Output status label
         self.output_status_label = ttk.Label(output_frame, text="", font=("TkDefaultFont", 9))
-        self.output_status_label.grid(row=5, column=0, columnspan=2, pady=(5, 0))
+        self.output_status_label.grid(row=7, column=0, columnspan=2, pady=(5, 0))
         
         # Bind output option changes to update status and save settings
         def on_output_change(*args):
@@ -121,6 +148,8 @@ class BPMApp:
         self.output_filtered_wav.trace('w', on_output_change)
         self.output_bpm_text.trace('w', on_output_change)
         self.output_spectrogram.trace('w', on_output_change)
+        self.output_to_input_dir.trace('w', lambda *args: self.save_ui_settings())
+        self.optimize_long_plots.trace('w', lambda *args: self.save_ui_settings())
 
         # Action Buttons
         btn_frame = ttk.Frame(main_frame)
@@ -234,6 +263,7 @@ class BPMApp:
         try:
             settings = {
                 'starting_bpm': self.bpm_entry.get().strip(),
+                'process_all_channels': self.process_all_channels.get(),
                 'output_html': self.output_html.get(),
                 'output_png': self.output_png.get(),
                 'output_csv': self.output_csv.get(),
@@ -242,6 +272,8 @@ class BPMApp:
                 'output_filtered_wav': self.output_filtered_wav.get(),
                 'output_bpm_text': self.output_bpm_text.get(),
                 'output_spectrogram': self.output_spectrogram.get(),
+                'optimize_long_plots': self.optimize_long_plots.get(),
+                'output_to_input_dir': self.output_to_input_dir.get(),
                 'last_files': self.current_files if self.current_files else []
             }
             with open(self.settings_file, 'w', encoding='utf-8') as f:
@@ -266,6 +298,8 @@ class BPMApp:
                 self.bpm_entry.insert(0, settings['starting_bpm'])
             
             # Load output options
+            if 'process_all_channels' in settings:
+                self.process_all_channels.set(settings['process_all_channels'])
             if 'output_html' in settings:
                 self.output_html.set(settings['output_html'])
             if 'output_png' in settings:
@@ -282,6 +316,10 @@ class BPMApp:
                 self.output_bpm_text.set(settings['output_bpm_text'])
             if 'output_spectrogram' in settings:
                 self.output_spectrogram.set(settings['output_spectrogram'])
+            if 'optimize_long_plots' in settings:
+                self.optimize_long_plots.set(settings['optimize_long_plots'])
+            if 'output_to_input_dir' in settings:
+                self.output_to_input_dir.set(settings['output_to_input_dir'])
             
             # Load last used files (only if they still exist)
             if 'last_files' in settings and settings['last_files']:
@@ -418,7 +456,7 @@ class BPMApp:
     def _run_analysis_in_background(self):
         try:
             from bpm_analysis import analyze_wav_file
-            from audio_io import convert_to_wav
+            from audio_io import convert_to_wav, split_wav_to_mono_channels
             import shutil
 
             # Check for a global BPM value to override all individual settings.
@@ -426,8 +464,12 @@ class BPMApp:
             bpm_override_hint = float(bpm_override_input) if bpm_override_input else None
             start_bpm_hint = bpm_override_hint
 
-            output_dir = os.path.join(os.getcwd(), "processed_files")
-            os.makedirs(output_dir, exist_ok=True)
+            base_output_dir = os.path.join(os.getcwd(), "processed_files")
+            os.makedirs(base_output_dir, exist_ok=True)
+
+            # Read batch-wide options once
+            process_all_channels = self.process_all_channels.get()
+            optimize_long_plots = self.optimize_long_plots.get()
 
             total_files = len(self.current_files)
             files_processed = 0
@@ -439,24 +481,65 @@ class BPMApp:
                     self.log_queue.put(UIMessage(UIMessageType.STATUS,
                                                  f"({i + 1}/{total_files}) Processing: {os.path.basename(file_path)}"))
 
+                    # Decide where outputs for this file should go
+                    if self.output_to_input_dir.get():
+                        output_dir = os.path.dirname(file_path) or base_output_dir
+                    else:
+                        output_dir = base_output_dir
+
+                    os.makedirs(output_dir, exist_ok=True)
+
                     base_name, ext = os.path.splitext(file_path)
-                    wav_path = os.path.join(output_dir, f"{os.path.basename(base_name)}.wav")
 
                     if ext.lower() != '.wav':
+                        wav_path = os.path.join(output_dir, f"{os.path.basename(base_name)}.wav")
                         self.log_queue.put(UIMessage(UIMessageType.STATUS,
                                                      f"({i + 1}/{total_files}) Converting {os.path.basename(file_path)}..."))
                         if not convert_to_wav(file_path, wav_path):
                             raise Exception("File conversion failed.")
                     else:
-                        shutil.copy(file_path, wav_path)
+                        # If the output directory is the same as the input directory, reuse the original WAV
+                        input_dir = os.path.dirname(file_path)
+                        if os.path.abspath(output_dir) == os.path.abspath(input_dir):
+                            wav_path = file_path
+                        else:
+                            wav_path = os.path.join(output_dir, os.path.basename(file_path))
+                            shutil.copy(file_path, wav_path)
 
-                    self.log_queue.put(
-                        UIMessage(UIMessageType.STATUS, f"({i + 1}/{total_files}) Analyzing heartbeat..."))
+                    # Decide which WAV(s) to analyze: either the single mixed file, or
+                    # one per channel if requested.
+                    wav_files_to_analyze = [wav_path]
+                    if process_all_channels:
+                        wav_files_to_analyze = split_wav_to_mono_channels(wav_path, output_dir)
 
                     # Pass the file-specific start_bpm_hint and output options to the analysis function.
                     output_options = self.get_output_options()
-                    analyze_wav_file(wav_path, self.params, start_bpm_hint, original_file_path=file_path,
-                                     output_directory=output_dir, output_options=output_options)
+
+                    # Ensure plotting logic sees the long-plot optimization preference
+                    if optimize_long_plots:
+                        self.params["optimize_long_plots"] = True
+
+                    for ch_idx, wav_for_analysis in enumerate(wav_files_to_analyze, start=1):
+                        if len(wav_files_to_analyze) > 1:
+                            status_suffix = f" (CH{ch_idx})"
+                        else:
+                            status_suffix = ""
+
+                        self.log_queue.put(
+                            UIMessage(
+                                UIMessageType.STATUS,
+                                f"({i + 1}/{total_files}) Analyzing heartbeat{status_suffix}...",
+                            )
+                        )
+
+                        analyze_wav_file(
+                            wav_for_analysis,
+                            self.params,
+                            start_bpm_hint,
+                            original_file_path=wav_for_analysis,
+                            output_directory=output_dir,
+                            output_options=output_options,
+                        )
                     files_processed += 1
 
                 except Exception as e:

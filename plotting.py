@@ -140,6 +140,12 @@ class Plotter:
         self.time_axis_sec = np.arange(len(audio_envelope)) / self.sample_rate
         self.audio_duration_sec = self.time_axis_sec[-1] if len(self.time_axis_sec) > 0 else 0
         
+        # Long-plot optimization: optionally skip heavy debug traces for very long recordings.
+        optimize_long_plots = bool(self.params.get("optimize_long_plots", False))
+        long_threshold_sec = float(self.params.get("long_plot_duration_threshold_sec", 600.0))
+        # Only skip details if the recording is longer than the threshold; shorter files always show full detail.
+        self.skip_detailed_debug_traces = optimize_long_plots and self.audio_duration_sec > long_threshold_sec
+
         time_axis_dt = pd.to_datetime(
             [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in self.time_axis_sec]
         )
@@ -280,7 +286,20 @@ class Plotter:
             title_text="Time", tickvals=tickvals, ticktext=ticktext, hoverformat="%M:%S.%L"
         )
 
-        robust_upper_limit = np.quantile(self.fig.data[0].y, 0.95) if self.fig.data else 1
+        # Use the audio envelope trace, if present, to scale the amplitude axis.
+        robust_upper_limit = 1
+        if self.fig.data:
+            envelope_values = None
+            for trace in self.fig.data:
+                if getattr(trace, "name", "") == "Audio Envelope" and hasattr(trace, "y"):
+                    try:
+                        envelope_values = np.asarray(trace.y, dtype=float)
+                    except Exception:
+                        envelope_values = None
+                    break
+            if envelope_values is not None and envelope_values.size > 0:
+                robust_upper_limit = float(np.quantile(envelope_values, 0.95))
+
         amplitude_scale = self.params.get("plot_amplitude_scale_factor", 60.0)
         self.fig.update_yaxes(
             title_text="Signal Amplitude",
@@ -300,6 +319,9 @@ class Plotter:
 
     def _add_line_traces(self, time_axis_dt: pd.Series, audio_envelope: np.ndarray, analysis_data: Dict):
         """Adds downsampled audio envelope and noise floor traces for performance."""
+        if getattr(self, "skip_detailed_debug_traces", False):
+            logging.info("Skipping audio envelope and noise floor traces for long file (optimization enabled).")
+            return
         plot_time_axis_dt = time_axis_dt
         plot_envelope = audio_envelope
         plot_noise_floor = analysis_data.get("dynamic_noise_floor_series")
@@ -334,6 +356,9 @@ class Plotter:
 
     def _add_trough_markers(self, audio_envelope: np.ndarray, analysis_data: Dict):
         """Adds trough markers to the plot using original full-resolution data for accuracy."""
+        if getattr(self, "skip_detailed_debug_traces", False):
+            logging.info("Skipping trough markers for long file (optimization enabled).")
+            return
         trough_indices = analysis_data.get("trough_indices")
         if trough_indices is not None and trough_indices.size > 0:
             trough_times_dt = pd.to_datetime(
@@ -354,6 +379,9 @@ class Plotter:
 
     def _add_peak_traces(self, all_raw_peaks, debug_info, audio_envelope):
         """Adds S1, S2, and Noise peak markers to the plot with detailed hover info."""
+        if getattr(self, "skip_detailed_debug_traces", False):
+            logging.info("Skipping S1/S2/Noise peak markers for long file (optimization enabled).")
+            return
         s1_peaks = {"indices": [], "customdata": []}
         s2_peaks = {"indices": [], "customdata": []}
         noise_peaks = {"indices": [], "customdata": []}

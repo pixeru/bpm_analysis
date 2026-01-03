@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -147,12 +147,59 @@ def convert_to_wav(file_path: str, target_path: str) -> bool:
     logging.info(f"Converting {os.path.basename(file_path)} to WAV format...")
     try:
         sound = AudioSegment.from_file(file_path)
-        sound = sound.set_channels(1)
+        # Preserve original channel layout; downstream logic may choose to split channels.
         sound.export(target_path, format="wav")
         return True
     except Exception as e:
         logging.error(f"Could not convert file {file_path}. Error: {e}")
         return False
+
+
+def split_wav_to_mono_channels(file_path: str, output_directory: str) -> List[str]:
+    """
+    For a possibly multi-channel WAV file, export one mono WAV per channel.
+
+    Returns a list of file paths to the mono channel WAVs. If the input
+    is already mono or splitting fails, the original file_path is returned
+    as the only element.
+    """
+    if not AudioSegment:
+        logging.warning("Pydub not available; cannot split channels. Using original file only.")
+        return [file_path]
+
+    try:
+        sound = AudioSegment.from_file(file_path)
+    except Exception as e:
+        logging.warning("Failed to open WAV for channel splitting (%s): %s", file_path, e)
+        return [file_path]
+
+    if sound.channels <= 1:
+        return [file_path]
+
+    mono_segments = sound.split_to_mono()
+    base_name = os.path.basename(os.path.splitext(file_path)[0])
+
+    channel_paths: List[str] = []
+    for idx, seg in enumerate(mono_segments):
+        ch_idx = idx + 1
+        out_path = os.path.join(output_directory, f"{base_name}_ch{ch_idx}.wav")
+        try:
+            seg.export(out_path, format="wav")
+            channel_paths.append(out_path)
+        except Exception as e:
+            logging.warning("Failed to export channel %d for %s: %s", ch_idx, file_path, e)
+
+    # Fallback: if export failed for all channels, keep original file
+    if not channel_paths:
+        return [file_path]
+
+    logging.info(
+        "Split %s into %d mono channel file(s): %s",
+        os.path.basename(file_path),
+        len(channel_paths),
+        ", ".join(os.path.basename(p) for p in channel_paths),
+    )
+    return channel_paths
 
 
 def _apply_pypcg_denoising(audio_data: np.ndarray, sample_rate: int, params: Dict) -> np.ndarray:
@@ -239,7 +286,9 @@ def preprocess_audio(
 
     save_debug_file = params["save_filtered_wav"] and output_options.get("filtered_wav", True)
     target_sample_rate = 500
+
     try:
+        # Preserve historical behavior: simple mono mix of all channels.
         audio_downsampled, new_sample_rate = librosa.load(file_path, sr=target_sample_rate, mono=True)
     except Exception as e:
         logging.error("Librosa failed to load file: %s", e)
