@@ -1890,8 +1890,46 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     return metrics
 
 
+class _NoisyAlgorithmLogFilter(logging.Filter):
+    """
+    Filters out very chatty INFO-level messages that make benchmarking hard.
+    WARNING/ERROR always pass through.
+    """
+
+    # Substrings that identify "noisy" algorithm-detail logs.
+    _NOISY_SUBSTRINGS = (
+        "KICK-START:",
+        "CASCADE RESET:",
+        "Trapezoid #",
+        "LOOKAHEAD ",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+
+        return not any(s in msg for s in self._NOISY_SUBSTRINGS)
+
+
 def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str, output_options: Optional[Dict] = None):
     """Main analysis pipeline that orchestrates the refactored classes."""
+    # Honor optional verbose logging flag from params to control how noisy the console is.
+    # When disabled, we keep stage-level INFO logs but suppress very chatty algorithm-detail INFO logs.
+    verbose_logging = bool(params.get("verbose_console_logging", True))
+    root_logger = logging.getLogger()
+    active_filters = []
+
+    if not verbose_logging:
+        filt = _NoisyAlgorithmLogFilter()
+        for handler in root_logger.handlers:
+            handler.addFilter(filt)
+            active_filters.append((handler, filt))
+
     start_time = time.time()
     logging.info(f"--- Processing file: {os.path.basename(original_file_path)} ---")
 
@@ -1980,6 +2018,13 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
         logging.info("Skipping all report generation as requested.")
 
     duration = time.time() - start_time
-    logging.info(f"--- Analysis finished in {duration:.2f} seconds. ---")
-    
+    logging.info(f"--- Analysis stage finished in {duration:.2f} seconds (post-conversion). ---")
+
+    # Remove filters so this setting is scoped to the analysis call.
+    for handler, filt in active_filters:
+        try:
+            handler.removeFilter(filt)
+        except Exception:
+            pass
+
     return plotly_figure

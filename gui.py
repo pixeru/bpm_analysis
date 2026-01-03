@@ -7,6 +7,8 @@ import tkinter as tk
 import json
 import subprocess
 import platform
+import logging
+import time
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
@@ -71,6 +73,15 @@ class BPMApp:
             variable=self.process_all_channels,
             command=self.save_ui_settings,
         ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+
+        # Verbose console logging option
+        self.verbose_console_logging = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            param_frame,
+            text="Verbose console logging (detailed algorithm messages)",
+            variable=self.verbose_console_logging,
+            command=self.save_ui_settings,
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
 
         # Output file options
         self.output_html = tk.BooleanVar(value=True)
@@ -264,6 +275,7 @@ class BPMApp:
             settings = {
                 'starting_bpm': self.bpm_entry.get().strip(),
                 'process_all_channels': self.process_all_channels.get(),
+                'verbose_console_logging': self.verbose_console_logging.get(),
                 'output_html': self.output_html.get(),
                 'output_png': self.output_png.get(),
                 'output_csv': self.output_csv.get(),
@@ -300,6 +312,8 @@ class BPMApp:
             # Load output options
             if 'process_all_channels' in settings:
                 self.process_all_channels.set(settings['process_all_channels'])
+            if 'verbose_console_logging' in settings:
+                self.verbose_console_logging.set(settings['verbose_console_logging'])
             if 'output_html' in settings:
                 self.output_html.set(settings['output_html'])
             if 'output_png' in settings:
@@ -470,6 +484,7 @@ class BPMApp:
             # Read batch-wide options once
             process_all_channels = self.process_all_channels.get()
             optimize_long_plots = self.optimize_long_plots.get()
+            verbose_console_logging = self.verbose_console_logging.get()
 
             total_files = len(self.current_files)
             files_processed = 0
@@ -478,6 +493,8 @@ class BPMApp:
             # --- BATCH PROCESSING LOOP ---
             for i, file_path in enumerate(self.current_files):
                 try:
+                    file_start_time = time.time()
+
                     self.log_queue.put(UIMessage(UIMessageType.STATUS,
                                                  f"({i + 1}/{total_files}) Processing: {os.path.basename(file_path)}"))
 
@@ -518,6 +535,8 @@ class BPMApp:
                     # Ensure plotting logic sees the long-plot optimization preference
                     if optimize_long_plots:
                         self.params["optimize_long_plots"] = True
+                    # Ensure verbose logging preference is visible to the analysis pipeline
+                    self.params["verbose_console_logging"] = bool(verbose_console_logging)
 
                     for ch_idx, wav_for_analysis in enumerate(wav_files_to_analyze, start=1):
                         if len(wav_files_to_analyze) > 1:
@@ -541,6 +560,14 @@ class BPMApp:
                             output_options=output_options,
                         )
                     files_processed += 1
+
+                    # Log total wall-clock time for this original input file (including conversion, splitting, and analysis).
+                    duration = time.time() - file_start_time
+                    logging.info(
+                        "=== Total processing time for '%s': %.2f seconds (including conversion & analysis). ===",
+                        os.path.basename(file_path),
+                        duration,
+                    )
 
                 except Exception as e:
                     # Inner try-except block to handle errors for a single file
