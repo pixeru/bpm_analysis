@@ -486,12 +486,41 @@ class BPMApp:
             optimize_long_plots = self.optimize_long_plots.get()
             verbose_console_logging = self.verbose_console_logging.get()
 
-            total_files = len(self.current_files)
+            # Deduplicate inputs by base filename so we don't process both 'name.wav' and 'name.mp4'.
+            deduped_files = {}
+            # Prefer WAV when both a compressed file and a WAV with the same base name exist.
+            ext_preference = {
+                '.wav': 2,
+                '.flac': 1,
+                '.mp3': 1,
+                '.m4a': 1,
+                '.ogg': 1,
+                '.mp4': 1,
+                '.mkv': 1,
+                '.mov': 1,
+            }
+            for path in self.current_files:
+                base_name_only = os.path.splitext(os.path.basename(path))[0]
+                key = base_name_only.lower()
+                ext = os.path.splitext(path)[1].lower()
+                score = ext_preference.get(ext, 0)
+
+                if key not in deduped_files:
+                    deduped_files[key] = (score, path)
+                else:
+                    existing_score, _ = deduped_files[key]
+                    # Replace only if the new file type is preferred (e.g., WAV over others).
+                    if score > existing_score:
+                        deduped_files[key] = (score, path)
+
+            input_files = [entry[1] for entry in deduped_files.values()]
+
+            total_files = len(input_files)
             files_processed = 0
             errors = []
 
             # --- BATCH PROCESSING LOOP ---
-            for i, file_path in enumerate(self.current_files):
+            for i, file_path in enumerate(input_files):
                 try:
                     file_start_time = time.time()
 
@@ -507,13 +536,40 @@ class BPMApp:
                     os.makedirs(output_dir, exist_ok=True)
 
                     base_name, ext = os.path.splitext(file_path)
+                    ext_lower = ext.lower()
 
-                    if ext.lower() != '.wav':
-                        wav_path = os.path.join(output_dir, f"{os.path.basename(base_name)}.wav")
-                        self.log_queue.put(UIMessage(UIMessageType.STATUS,
-                                                     f"({i + 1}/{total_files}) Converting {os.path.basename(file_path)}..."))
-                        if not convert_to_wav(file_path, wav_path):
-                            raise Exception("File conversion failed.")
+                    if ext_lower != '.wav':
+                        base_name_only = os.path.basename(base_name)
+                        source_dir = os.path.dirname(file_path)
+                        same_dir_wav = os.path.join(source_dir, base_name_only + ".wav")
+                        output_dir_wav = os.path.join(output_dir, base_name_only + ".wav")
+
+                        if os.path.exists(same_dir_wav):
+                            # Reuse an existing WAV next to the input file, copying to output_dir if needed.
+                            if os.path.abspath(os.path.dirname(same_dir_wav)) == os.path.abspath(output_dir):
+                                wav_path = same_dir_wav
+                            else:
+                                wav_path = output_dir_wav
+                                shutil.copy(same_dir_wav, wav_path)
+                            logging.info(
+                                "Reusing existing WAV '%s' for '%s' instead of converting.",
+                                os.path.basename(same_dir_wav),
+                                os.path.basename(file_path),
+                            )
+                        elif os.path.exists(output_dir_wav):
+                            # Reuse an existing WAV already in the output directory.
+                            wav_path = output_dir_wav
+                            logging.info(
+                                "Reusing existing WAV '%s' in output directory for '%s' instead of converting.",
+                                os.path.basename(output_dir_wav),
+                                os.path.basename(file_path),
+                            )
+                        else:
+                            wav_path = output_dir_wav
+                            self.log_queue.put(UIMessage(UIMessageType.STATUS,
+                                                         f"({i + 1}/{total_files}) Converting {os.path.basename(file_path)}..."))
+                            if not convert_to_wav(file_path, wav_path):
+                                raise Exception("File conversion failed.")
                     else:
                         # If the output directory is the same as the input directory, reuse the original WAV
                         input_dir = os.path.dirname(file_path)
