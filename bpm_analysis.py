@@ -1928,21 +1928,29 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     if output_options is None:
         output_options = {
             'html': True,
+            'png': False,
             'csv': True,
             'summary': True,
             'debug': True,
             'filtered_wav': True,
             'bpm_text': False,
+            'spectrogram': True,
         }
 
     plotly_figure = None
     
-    # Generate HTML plot if requested
-    if output_options.get('html', True):
+    # Generate plot outputs if requested (HTML/PNG/CSV share the same figure generation)
+    needs_plot_outputs = any([
+        output_options.get('html', True),
+        output_options.get('png', False),
+        output_options.get('csv', True),
+    ])
+
+    if needs_plot_outputs:
         plotter = Plotter(original_file_path, params, sample_rate, output_directory, source_audio_path=wav_file_path)
         plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics, output_options)
     else:
-        logging.info("Skipping HTML plot generation as requested.")
+        logging.info("Skipping all plot outputs (HTML/PNG/CSV) as requested.")
 
     # Generate other outputs if requested
     needs_reporter = any([

@@ -5,6 +5,9 @@ from PyInstaller.utils.hooks import collect_data_files
 # Collect Plotly data files including validators
 plotly_datas = collect_data_files("plotly")
 
+# Kaleido is used by Plotly to export static images (e.g., PNG).
+kaleido_datas = collect_data_files("kaleido")
+
 # Collect ttkbootstrap themes and other package data so the themed UI renders correctly
 ttk_datas = collect_data_files("ttkbootstrap")
 
@@ -17,7 +20,7 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=plotly_datas + ttk_datas + extra_datas,
+    datas=plotly_datas + kaleido_datas + ttk_datas + extra_datas,
     hiddenimports=[
         # Core third‑party libs used across the project
         "ttkbootstrap",
@@ -28,6 +31,9 @@ a = Analysis(
         "plotly.validators",
         "plotly.graph_objects",
         "plotly.express",
+        "kaleido",
+        "kaleido.scopes",
+        "kaleido.scopes.plotly",
         "pydub",
         "librosa",
         "matplotlib",

@@ -1,13 +1,19 @@
 {
     "starting_bpm": "",
     "output_html": true,
-    "output_csv": true,
-    "output_summary": true,
-    "output_debug": true,
-    "output_filtered_wav": true,
-    "output_bpm_text": true,
-    "output_spectrogram": true,
+    "output_png": true,
+    "output_csv": false,
+    "output_summary": false,
+    "output_debug": false,
+    "output_filtered_wav": false,
+    "output_bpm_text": false,
+    "output_spectrogram": false,
     "last_files": [
-        "C:/Users/WXP/Documents/GitHub/bpm_analysis/inputs/2medium/168_test.wav"
+        "C:/Users/WXP/Documents/Private Obsidian/Twitter/\u3042\u3084\u3081@\u5fc3\u81d3\ud83e\udec0 (@ayamehtbt)/\u3010Heartbeat Sales\u3011/\u3010Heartbeat Sales\u3011 Paid/17/gigafile-0106-82be13c1de28cc0c7d22169223bca558/2025-12-31_20\uff1a40\uff1a13_video.mp4",
+        "C:/Users/WXP/Documents/Private Obsidian/Twitter/\u3042\u3084\u3081@\u5fc3\u81d3\ud83e\udec0 (@ayamehtbt)/\u3010Heartbeat Sales\u3011/\u3010Heartbeat Sales\u3011 Paid/17/gigafile-0106-82be13c1de28cc0c7d22169223bca558/IMG_5387.mov",
+        "C:/Users/WXP/Documents/Private Obsidian/Twitter/\u3042\u3084\u3081@\u5fc3\u81d3\ud83e\udec0 (@ayamehtbt)/\u3010Heartbeat Sales\u3011/\u3010Heartbeat Sales\u3011 Paid/17/gigafile-0106-82be13c1de28cc0c7d22169223bca558/IMG_8015_2_compressed_2025_12_31_143819.mp4",
+        "C:/Users/WXP/Documents/Private Obsidian/Twitter/\u3042\u3084\u3081@\u5fc3\u81d3\ud83e\udec0 (@ayamehtbt)/\u3010Heartbeat Sales\u3011/\u3010Heartbeat Sales\u3011 Paid/17/gigafile-0106-82be13c1de28cc0c7d22169223bca558/IMG_8018_1_compressed_2025_12_31_143804.mp4",
+        "C:/Users/WXP/Documents/Private Obsidian/Twitter/\u3042\u3084\u3081@\u5fc3\u81d3\ud83e\udec0 (@ayamehtbt)/\u3010Heartbeat Sales\u3011/\u3010Heartbeat Sales\u3011 Paid/17/gigafile-0106-82be13c1de28cc0c7d22169223bca558/IMG_8019_0_compressed_2025_12_31_143744.mp4",
+        "C:/Users/WXP/Documents/Private Obsidian/Twitter/\u3042\u3084\u3081@\u5fc3\u81d3\ud83e\udec0 (@ayamehtbt)/\u3010Heartbeat Sales\u3011/\u3010Heartbeat Sales\u3011 Paid/17/gigafile-0106-82be13c1de28cc0c7d22169223bca558/video-processed.mov"
     ]
 }

@@ -169,35 +169,62 @@ class Plotter:
 
         base_name = os.path.basename(os.path.splitext(self.file_name)[0])
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
+        output_png_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.png")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
         plot_config = {"scrollZoom": True, "toImageButtonOptions": {"filename": plot_title, "format": "png", "scale": 2}}
 
-        # Determine whether spectrogram generation is enabled (can be disabled via GUI/output options).
-        self.spectrogram_enabled = True
-        if output_options is not None:
-            self.spectrogram_enabled = output_options.get("spectrogram", True)
+        html_requested = True if output_options is None else output_options.get("html", True)
+        png_requested = False if output_options is None else output_options.get("png", False)
 
-        # Generate spectrogram image for optional background overlay (original audio only).
-        # Filtered spectrograms are generated later in `_generate_custom_html` if needed.
-        if self.spectrogram_enabled:
-            try:
-                self.spectrogram_base64 = self._generate_spectrogram_image(
-                    self.audio_source_path or self.file_name
-                )
-            except Exception as e:
-                logging.warning(f"Failed to generate original spectrogram: {e}")
+        if html_requested:
+            # Determine whether spectrogram generation is enabled (can be disabled via GUI/output options).
+            self.spectrogram_enabled = True
+            if output_options is not None:
+                self.spectrogram_enabled = output_options.get("spectrogram", True)
+
+            # Generate spectrogram image for optional background overlay (original audio only).
+            # Filtered spectrograms are generated later in `_generate_custom_html` if needed.
+            if self.spectrogram_enabled:
+                try:
+                    self.spectrogram_base64 = self._generate_spectrogram_image(
+                        self.audio_source_path or self.file_name
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to generate original spectrogram: {e}")
+            else:
+                logging.info("Skipping original spectrogram generation as requested (spectrogram output disabled).")
+
+            # Generate the base Plotly HTML
+            plotly_html = self.fig.to_html(config=plot_config, full_html=False, include_plotlyjs='cdn')
+
+            # Generate custom HTML with audio player and playhead
+            custom_html = self._generate_custom_html(plotly_html, plot_title, base_name)
+
+            with open(output_html_path, 'w', encoding='utf-8') as f:
+                f.write(custom_html)
+            logging.info(f"Interactive plot with audio player saved to {output_html_path}")
         else:
-            logging.info("Skipping original spectrogram generation as requested (spectrogram output disabled).")
+            logging.info("Skipping HTML plot generation as requested.")
 
-        # Generate the base Plotly HTML
-        plotly_html = self.fig.to_html(config=plot_config, full_html=False, include_plotlyjs='cdn')
-        
-        # Generate custom HTML with audio player and playhead
-        custom_html = self._generate_custom_html(plotly_html, plot_title, base_name)
-        
-        with open(output_html_path, 'w', encoding='utf-8') as f:
-            f.write(custom_html)
-        logging.info(f"Interactive plot with audio player saved to {output_html_path}")
+        if png_requested:
+            # Use a large default canvas so the graph itself is comfortably sized in the PNG.
+            opts = output_options or {}
+            png_scale = int(opts.get("png_scale", 2) or 2)
+            png_width = int(opts.get("png_width") or 2100)
+            png_height = int(opts.get("png_height") or 1200)
+
+            try:
+                # Note: Kaleido must be installed for write_image() to work.
+                write_kwargs = {
+                    "format": "png",
+                    "scale": png_scale,
+                    "width": png_width,
+                    "height": png_height,
+                }
+                self.fig.write_image(output_png_path, **write_kwargs)
+                logging.info(f"Plot PNG exported to {output_png_path}")
+            except Exception as e:
+                logging.warning(f"Failed to export Plot PNG (requires kaleido): {e}")
 
         if output_options is None or output_options.get("csv", True):
             smoothed_bpm = final_metrics.get("smoothed_bpm")

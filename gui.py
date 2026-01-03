@@ -65,6 +65,7 @@ class BPMApp:
 
         # Output file options
         self.output_html = tk.BooleanVar(value=True)
+        self.output_png = tk.BooleanVar(value=False)
         self.output_csv = tk.BooleanVar(value=False)
         self.output_summary = tk.BooleanVar(value=False)
         self.output_debug = tk.BooleanVar(value=False)
@@ -80,18 +81,20 @@ class BPMApp:
         # Output file checkboxes
         ttk.Checkbutton(output_frame, text="Heart Rate Graph (HTML File)", variable=self.output_html, 
                        command=self._update_output_status).grid(row=0, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="CSV Data", variable=self.output_csv, 
+        ttk.Checkbutton(output_frame, text="Plot PNG (auto-export)", variable=self.output_png,
                        command=self._update_output_status).grid(row=0, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="HTML Spectrogram", variable=self.output_spectrogram,
+        ttk.Checkbutton(output_frame, text="CSV Data", variable=self.output_csv,
                        command=self._update_output_status).grid(row=1, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Summary Report", variable=self.output_summary, 
+        ttk.Checkbutton(output_frame, text="HTML Spectrogram", variable=self.output_spectrogram,
                        command=self._update_output_status).grid(row=1, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Debug Report", variable=self.output_debug, 
+        ttk.Checkbutton(output_frame, text="Summary Report", variable=self.output_summary,
                        command=self._update_output_status).grid(row=2, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Filtered Audio WAV", variable=self.output_filtered_wav, 
+        ttk.Checkbutton(output_frame, text="Debug Report", variable=self.output_debug,
                        command=self._update_output_status).grid(row=2, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
+        ttk.Checkbutton(output_frame, text="Filtered Audio WAV", variable=self.output_filtered_wav,
                        command=self._update_output_status).grid(row=3, column=0, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
+                       command=self._update_output_status).grid(row=3, column=1, sticky="w", padx=(0, 20))
 
         # Select All/None buttons
         btn_frame_output = ttk.Frame(output_frame)
@@ -111,6 +114,7 @@ class BPMApp:
             self.save_ui_settings()
         
         self.output_html.trace('w', on_output_change)
+        self.output_png.trace('w', on_output_change)
         self.output_csv.trace('w', on_output_change)
         self.output_summary.trace('w', on_output_change)
         self.output_debug.trace('w', on_output_change)
@@ -231,6 +235,7 @@ class BPMApp:
             settings = {
                 'starting_bpm': self.bpm_entry.get().strip(),
                 'output_html': self.output_html.get(),
+                'output_png': self.output_png.get(),
                 'output_csv': self.output_csv.get(),
                 'output_summary': self.output_summary.get(),
                 'output_debug': self.output_debug.get(),
@@ -263,6 +268,8 @@ class BPMApp:
             # Load output options
             if 'output_html' in settings:
                 self.output_html.set(settings['output_html'])
+            if 'output_png' in settings:
+                self.output_png.set(settings['output_png'])
             if 'output_csv' in settings:
                 self.output_csv.set(settings['output_csv'])
             if 'output_summary' in settings:
@@ -341,6 +348,7 @@ class BPMApp:
     def select_all_outputs(self):
         """Select all output file options."""
         self.output_html.set(True)
+        self.output_png.set(True)
         self.output_csv.set(True)
         self.output_summary.set(True)
         self.output_debug.set(True)
@@ -351,6 +359,7 @@ class BPMApp:
     def select_none_outputs(self):
         """Deselect all output file options."""
         self.output_html.set(False)
+        self.output_png.set(False)
         self.output_csv.set(False)
         self.output_summary.set(False)
         self.output_debug.set(False)
@@ -362,6 +371,7 @@ class BPMApp:
         """Get the current output file selection as a dictionary."""
         return {
             'html': self.output_html.get(),
+            'png': self.output_png.get(),
             'csv': self.output_csv.get(),
             'summary': self.output_summary.get(),
             'debug': self.output_debug.get(),
