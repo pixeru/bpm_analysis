@@ -33,6 +33,8 @@ def _detect_and_remove_stationary_hum(
     The detection is intentionally conservative so that most recordings (without a
     clear hum) are left untouched.
 
+    The reason I implemented this is to remove low frequency vibration noise, IFYKYK...
+    
     Returns
     -------
     filtered_audio : np.ndarray
@@ -285,7 +287,7 @@ def preprocess_audio(
         }
 
     save_debug_file = params["save_filtered_wav"] and output_options.get("filtered_wav", True)
-    target_sample_rate = 500
+    target_sample_rate = 500 # I had to use a lower sample rate for optimization reasons
 
     try:
         # Preserve historical behavior: simple mono mix of all channels.
@@ -310,7 +312,7 @@ def preprocess_audio(
     if high >= 1.0:
         raise ValueError(f"Cannot create a {highcut}Hz filter. The sample rate of {new_sample_rate}Hz is too low.")
 
-    b, a = butter(2, [low, high], btype="band")
+    b, a = butter(2, [low, high], btype="band") # I've only tested this with a 2nd order filter. It's unclear if higher order filters are better.
     audio_filtered = filtfilt(b, a, audio_downsampled)
 
     if save_debug_file:
@@ -320,7 +322,7 @@ def preprocess_audio(
         # Resample to a browser‑friendly sample rate for HTML5 audio playback.
         # Very low sample rates (e.g. 500 Hz) can cause some browsers to report
         # "Audio format not supported", even though the WAV file is valid.
-        # Increased to 10k to avoid Empty filters detected in mel frequency basis warnings.
+        # Increased debug_sample_rate to 10k to avoid Empty filters detected in mel frequency basis warnings.
         debug_sample_rate = 10000
         try:
             peak = float(np.max(np.abs(audio_filtered))) if audio_filtered.size else 0.0

@@ -1,4 +1,12 @@
 # config.py
+# I manually tuned the parameters in this file to result in the fewest errors across my input data
+# It's important to note that as my codebase evolves and I implement more efficient/better methods. many of these "bandaid fixes"
+# will be outdated and the parameter tuning will not need to be so specific. 
+# some of these params are too specific which indicates that the code is not as robust as it could be.
+# although I have tried to avoid it, adjusting some of the params to reduce errors for one input file may cause another input file to have more errors.
+# It feels like I have to balance the params to "fine tune" the code, which feels bad?
+# but this may also be unavoidable due to the nature of the data. 
+
 
 DEFAULT_PARAMS = {
     # =================================================================================
@@ -8,18 +16,18 @@ DEFAULT_PARAMS = {
     "downsample_factor": 300,     # Factor to reduce sample rate. Higher = faster processing, less detail.
     "save_filtered_wav": True,    # If True, saves a .wav file of the filtered audio for debugging.
 
-    # pyPCG denoising
+    # pyPCG denoising, I never managed to get this to work well, so I'm not using it for now. I should probably remove this
     'denoising_method': None,  # None, 'wavelet_auto', 'emd_savgol' emd_savgol is more agressive
     'wt_family': 'db8',
     'wt_level': 7,
     'emd_window': 40,
     'emd_poly': 2,
-    'wavelet_threshold': None,  # None for auto, or float (0.0-1.0)
+    'wavelet_threshold': None,            # None for auto, or float (0.0-1.0)
     "enable_hum_removal": True,           # Detect and notch narrow low-frequency hums if present
     "hum_psd_window_sec": 4.0,            # PSD window length (seconds) for hum detection
     "hum_min_freq_hz": 40.0,              # Min frequency of narrow-band hum to consider
     "hum_max_freq_hz": 100.0,             # Max frequency of narrow-band hum to consider
-    "hum_min_prominence_db": 8.0,        # Minimum prominence (dB) above local median to trigger notch
+    "hum_min_prominence_db": 8.0,         # Minimum prominence (dB) above local median to trigger notch
     "hum_min_prominence_over_second_db": 3.0,  # Gap over next peak before trusting detection
     "hum_notch_q": 35.0,                  # Q factor, Higher = narrower notch (try 35-40 for sharp hums)
 
@@ -27,17 +35,17 @@ DEFAULT_PARAMS = {
     # 2. Signal Feature Detection
     # Governs the initial identification of peaks and troughs in the audio envelope.
     # =================================================================================
-    "min_peak_distance_sec": 0.1,       # I Adjusted This✔ Minimum time allowed between any two raw peaks.
+    "min_peak_distance_sec": 0.1,        # I Adjusted This✔ Minimum time allowed between any two raw peaks.
     "peak_prominence_quantile": 0.05,    # I Adjusted This✔ How much a spike must stand out to be considered a 'peak'.
-    "trough_prominence_quantile": 0.1,  # How much a dip must stand out to be considered a 'trough'.
+    "trough_prominence_quantile": 0.1,   # How much a dip must stand out to be considered a 'trough'.
 
     # =================================================================================
     # 3. Noise Estimation & Rejection
     # Rules for calculating the dynamic noise floor and vetoing noisy peaks.
     # =================================================================================
     # --- 3.1. Dynamic Noise Floor ---
-    "noise_floor_quantile": 0.20,       # Quantile of troughs used to calculate the noise floor. (0.2 = 20th percentile).
-    "noise_window_sec": 4,             # I Adjusted This✔ Rolling window in seconds. smaller means more sensitive to noise.
+    "noise_floor_quantile": 0.20,        # Quantile of troughs used to calculate the noise floor. (0.2 = 20th percentile).
+    "noise_window_sec": 4,               # I Adjusted This✔ Rolling window in seconds. smaller means more sensitive to noise.
     "trough_rejection_multiplier": 10.0, # I Adjusted This✔ A trough N-times higher than the draft noise floor is rejected.
 
     # --- 3.2. Peak Noise Vetoing ---
@@ -52,19 +60,19 @@ DEFAULT_PARAMS = {
     # =================================================================================
     # --- 4.1. Core Pairing Rules ---
     "pairing_confidence_threshold": 0.50, # Confidence score required to classify two peaks as an S1-S2 pair.
-    "s1_s2_interval_cap_sec": 0.4,      # The absolute maximum time (seconds) allowed between S1 and S2.
-    "s1_s2_interval_rr_fraction": 0.7,  # The S1-S2 interval cannot be longer than this fraction of the R-R interval.
+    "s1_s2_interval_cap_sec": 0.4,        # The absolute maximum time (seconds) allowed between S1 and S2.
+    "s1_s2_interval_rr_fraction": 0.7,    # The S1-S2 interval cannot be longer than this fraction of the R-R interval.
     'min_s1_s2_interval_sec': 0.10,           # Absolute minimum (100ms)
     'min_s1_s2_interval_rr_fraction': 0.23,   # Or 20% of total RR interval
     'noise_prominence_threshold': 0.35,   # Peaks below this ratio are "suspect noise" 
     'enable_lookahead_skipping': True,    # Enable/disable lookahead skipping
 
     # --- 4.2. Amplitude-Based Confidence Model ---
-    "deviation_smoothing_factor": 0.05, # Smoothing applied to the peak-to-peak amplitude deviation series.
+    "deviation_smoothing_factor": 0.05,   # Smoothing applied to the peak-to-peak amplitude deviation series.
 
     # --- 4.3. Physiology-Based Confidence Adjustment ---
     "stability_history_window": 20,         # Number of recent beats used to determine rhythm stability.
-    "stability_confidence_floor": 0.7,     # I Adjusted This✔ At 0% pairing success, confidence is multiplied by this.
+    "stability_confidence_floor": 0.7,      # I Adjusted This✔ At 0% pairing success, confidence is multiplied by this.
     "stability_confidence_ceiling": 1.3,    # I Adjusted This✔ At 100% pairing success, confidence is multiplied by this (e.g., a 10% boost).
     "recovery_phase_stability_floor": 0.90,  # Disable stability penalty during recovery (0% pairing → factor = 1.0)
     "s1_s2_boost_ratio": 1.2,               # S1 strength must be > (S2 strength * this value) to get a confidence boost.

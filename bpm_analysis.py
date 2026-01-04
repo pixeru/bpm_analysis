@@ -245,7 +245,11 @@ class PeakClassifier:
         return self._finalize_results()
 
     def _kickstart_check(self):
-        """Specialized recovery function to kick-start the algorithm if it gets stuck."""
+        """
+        Specialized recovery function to kick-start the algorithm if it gets stuck.
+        This is a "bandaid" fix to help the algorithm recover from pairing failures. but ideally we would have a more robust solution.
+        If I manage to get the algorithm good enough, this feature should never activate...
+        """
         # Calculate recent rhythm stability as a ratio
         history_window = self.params.get("stability_history_window", 20)
         if len(self.state['candidate_beats']) < history_window:
@@ -649,7 +653,7 @@ class PeakClassifier:
         reason += contractility_reason
 
         # --- Absolute S1 prominence guardrail (shared with Lone S1 logic) ---
-        # Protect against tiny noise bumps being interpreted as a "high contractility" S1/S2 pair.
+        # Protect against tiny noise bumps being interpreted as heartbeats, a "high contractility" S1/S2 pair.
         # We compare the current S1 prominence against a recent high-quality S1 baseline.
         recent_prominences = self._get_recent_s1_prominences()
         if len(recent_prominences) >= 5:
@@ -658,7 +662,7 @@ class PeakClassifier:
                 # Re‑use Lone S1 ratio setting for now to keep behavior consistent
                 min_ratio = self.params.get(
                     "paired_s1_min_prominence_ratio",
-                    self.params.get("lone_s1_min_prominence_ratio", 0.4),
+                    self.params.get("lone_s1_min_prominence_ratio", 0.4), # 0.4 is a value that seems to work well, but it's a magic number
                 )
                 prominence_ratio = s1_prominence / (reference_prominence + 1e-9)
 
@@ -870,7 +874,7 @@ class PeakClassifier:
                 next_amp = self.audio_envelope[next_raw_peak_idx]
                 
                 # If not MUCH stronger, it's likely S2, not S1
-                if current_amp < next_amp * 1.69:
+                if current_amp < next_amp * 1.69: # 1.69 is a random number I tuned, a better implementation would avoid the need for this magic number
                     detail_lines.append(
                         f"\nForward check failed: next peak too close ({forward_interval_sec:.3f}s) and not strong enough"
                     )
@@ -1065,6 +1069,10 @@ def adjust_confidence_with_contractility(
     reason = ""
 
     # --- 1. Contractility Model: Expected S2/S1 ratio as a function of BPM ---
+    # reminder to add comments to explain how the contractility model's logic was derrived from observing the data.
+    # I should probably not document the logic here since it's a long explination that's better left to the documentation
+    # but a surface level explanation would be helpful.
+
     expected_max_ratio = np.interp(
         bpm,
         [params["contractility_bpm_low"], params["contractility_bpm_high"]],
@@ -1470,13 +1478,16 @@ def calculate_bpm_series(peaks: np.ndarray, sample_rate: int, params: Dict) -> T
 
 def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.ndarray, params: Dict) -> List[Dict]:
     """
+    The human eye can easily identify errors in the BPM/time graph so I implemented this fucntion to allow 
+    the script to identify them automatically.
     Detects trapezoid-shaped discontinuities in the average BPM series that are
     characteristic of a brief extra-beat artifact:
       - A very fast rise
       - A sustained (possibly slightly sloped) plateau
       - A very fast fall that returns to baseline
 
-    This is an in-memory adaptation of the example logic in detectTrapezoid.py.
+    I plan on pairing this with other logic to detect PVCs or issues with the algorithm's labeling but I haven't implemented it yet.
+
     It assumes `smoothed_bpm` contains the average BPM values and `bpm_times_sec`
     contains the corresponding time stamps in seconds.
     """

@@ -1,80 +1,141 @@
-## Heartbeat BPM Analyzer: Code Documentation
-This document provides a comprehensive explanation of the heartbeat analysis script. The script is designed to process audio recordings of heartbeats, track Beats Per Minute (BPM) over time, and provide detailed physiological insights, particularly accounting for changes during exercise and recovery.
+
+### Long-Term BPM vs Instantaneous BPM
+**Problem:** A single misidentified beat could catastrophically shrink s1_s2_max_interval, causing all subsequent beats to be misclassified.
+
+**Solution:** Maintain two BPM values:
+- `long_term_bpm`: Slowly adapting belief (0.05 learning rate) that stabilizes the S1-S2 window
+- `instant_bpm`: Raw calculation from last interval, used only to update the belief
+
+**Why this works:** Allows the algorithm to self-correct. If instant BPM spikes to 240 but long-term is 120, we know we double-counted S2 and can trigger corrective logic.
+
+**Code:** `update_long_term_bpm()`, `PeakClassifier.state['long_term_bpm']`
+
+### Dynamic S1-S2 Pairing Window
+**Problem:** At 90 BPM, true S1-S1 interval is 0.67s. But if s1_s2_max_interval is 0.33s, then at 170 BPM (true interval 0.35s), the algorithm merges separate beats.
+
+**Solution:** `s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)` where expected_rr comes from long_term_bpm, not last interval.
+
+**Physiological basis:** S1-S2 interval is ~35-50% of total R-R interval and adapts with heart rate.
+
+### Kick-Start Recovery Mechanism
+**Problem:** During recovery, S2 disappears. The algorithm enters a "Lone S1 only" mode and can't exit even when S2 reappears.
+
+**Solution:** Scan last 4 beats. If pattern is S1→Noise repeated 3+ times, temporarily boost pairing ratio to 0.60.
+
+**Why this works:** S2 re-emerges as faint peaks that fail normal confidence thresholds. Kick-start gives them a chance to anchor the rhythm again.
+
+**Code:** `_kickstart_check()`, `kickstart_override_ratio`
+
+### Contractility-Based Amplitude Expectations
+**Problem:** At low BPM, S2 can be louder than S1 due to breathing or stethoscope position. At high BPM, S1 dominates. Static rules fail.
+
+**Solution:** Use long_term_bpm as proxy for contractility:
+- Low BPM (&lt;120): Allow S2 up to 1.6x S1 amplitude
+- High BPM (&gt;140): Expect S2 ≤1.2x S1
+- Transition zone: Linear interpolation
+
+**Physiological basis:** Sympathetic tone increases both HR and contractility. Higher contractility → louder S1 relative to S2.
+
+**Code:** `adjust_confidence_with_contractility()`, `s2_s1_ratio_low_bpm`, `s2_s1_ratio_high_bpm`
+
+### Recovery Phase Awareness
+**Problem:** After exercise, BPM drops but contractile force remains elevated (S1 still loud). Algorithm incorrectly applies low-BPM amplitude rules.
+
+**Solution:** Track peak BPM time. For 120 seconds after peak, use forgiving stability floor (0.90 vs 0.85).
+
+**Code:** `_apply_other_pairing_adjustments()`, `recovery_phase_stability_floor`
+
+### Lookahead Skipping
+**Problem:** S2 can ride on the tail of S1, creating three peaks where there should be two (S1-Middle-S2). The middle is noise.
+
+**Solution:** When middle peak is weak AND creates impossible S2→S1 interval, skip it and pair current + next_next.
+
+**Logic chain:** 
+1. Check middle prominence &lt; 0.35x S1
+2. Check S2→S1 interval would be &lt; min_s1_s2_interval
+3. Verify alternative S1→S2' interval is plausible
+
+**Code:** `_process_peak_pair()` lookahead section
+
+### Trapezoid Artifact Detection
+**Problem:** A single noise peak causes S1/S2 swap, then another noise swap flips them back. BPM graph shows characteristic "notch."
+
+**Solution:** Post-processing pass identifies trapezoid shapes in smoothed BPM:
+- Fast rise (&gt;7 BPM/s)
+- Sustained plateau (1.5-15s)
+- Fast fall returning to baseline
+
+**Why this works:** Real HR changes are exponential curves, not trapezoids. Trapezoids indicate misclassification, not physiology.
+
+**Code:** `detect_trapezoid_discontinuities()`
 
 ---
-### ## 1. Centralized Configuration (`DEFAULT_PARAMS`)
-All major logic in the script is controlled by a centralized dictionary called `DEFAULT_PARAMS`. This approach allows for easy tuning and experimentation without altering the core code.
 
-| Section                         | Purpose                                                                                       | Key Parameters                                                                                     |
-| ------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **1. General & Preprocessing**  | Controls initial audio loading and filtering.                                                 | `downsample_factor`, `bandpass_freqs`                                                              |
-| **2. Signal Feature Detection** | Governs the raw identification of peaks and troughs.                                          | `min_peak_distance_sec`, `peak_prominence_quantile`                                                |
-| **3. Noise Estimation**         | Defines rules for calculating a dynamic noise baseline and rejecting noisy peaks.             | `noise_floor_quantile`, `noise_window_sec`, `trough_veto_multiplier`                               |
-| **4. S1/S2 Pairing Engine**     | The core logic for identifying S1​-S2​ pairs using timing, physiology, and rhythm stability.  | `pairing_confidence_threshold`, `s1_s2_interval_cap_sec`, parameters for the "Contractility Model" |
-| **5. Rhythm Plausibility**      | Rules for the algorithm's long-term BPM "belief" and beat-to-beat timing validation.          | `long_term_bpm_learning_rate`, `rr_interval_max_decrease_pct`                                      |
-| **6. Post-Processing**          | Final analysis pass to identify and fix rhythmic discontinuities based on the overall rhythm. | `enable_correction_pass`, `rr_correction_threshold_pct`                                            |
-| **7. Output & Reporting**       | Controls for final calculations (HRV) and the generation of plots and reports.                | `output_smoothing_window_sec`, `hrv_window_size_beats`                                             |
+## Parameter Tuning Rationale
 
+### Noise Floor Parameters
+- `trough_rejection_multiplier=4.0`: Reject troughs &gt;4x draft floor. Calibrated to keep physiological troughs while rejecting movement artifacts.
+- `noise_window_sec=4`: Rolling window for noise floor. Long enough to smooth out temporary noise, short enough to track gradual changes in background noise.
+
+### Confidence Thresholds
+- `pairing_confidence_threshold=0.55`: Empirically determined. Lower values increase false pairs; higher values miss faint S2s.
+- `lone_s1_confidence_threshold=0.50`: Must be strong enough to avoid noise, but lenient enough to catch valid single beats when S2 is absent.
+
+### Lookahead Parameters
+- `noise_prominence_threshold=0.35`: Middle peak must be &lt;35% of S1 prominence to be considered skippable. Prevents skipping valid S2s.
+- `enable_lookahead_skipping=True`: Master switch because lookahead is aggressive. Can be disabled for clean recordings.
 
 ---
-### ## 2. The Analysis Pipeline
-The script processes the audio file in a multi-stage pipeline, where each stage refines the data for the next. This is orchestrated by the `analyze_wav_file` function.
-#### Stage 1: Preprocessing and Dynamic Noise Floor Calculation
-This initial stage prepares the audio for analysis and addresses the problem of inconsistent recording volume.
-- **Function:** `preprocess_audio()`
-- **Purpose:** To convert the raw audio into a clean, analyzable signal envelope.
-- **Logic:**
-    1. **Convert to WAV:** If the input is not a `.wav` file, it's converted to a single-channel (mono) WAV file using the `pydub` library.
-    2. **Bandpass Filter:** The signal is filtered to keep only the frequencies relevant to heart sounds (typically 20-150 Hz), removing low-frequency hum and high-frequency noise.
-    3. **Envelope Generation:** The absolute value of the filtered signal is taken, and a rolling average is applied to create a smooth "envelope" that represents the intensity of the heart sounds over time.
-- **Function:** `_calculate_dynamic_noise_floor()`
-- **Purpose:** To establish a dynamic baseline for noise, which adapts to changes in background noise (like breathing or stethoscope movement) but ignores a temporary spike in noise.
-- **Logic:**
-    1. **Find All Troughs:** It first identifies all local minima (troughs) in the audio envelope.
-    2. **Create a Draft Floor:** It calculates a preliminary, rolling quantile of these troughs.
-    3. **Sanitize Troughs:** It re-evaluates the troughs. Any trough that is too high above the _draft_ noise floor is rejected as being part of a temporary noise event, not the true background noise.
-    4. **Calculate Final Floor:** A new, more accurate noise floor is calculated using only the sanitized, legitimate troughs. This final floor represents the true, shifting background noise of the recording.
-#### Stage 2: The Main Analysis Pass & Peak Classification
-This is the core of the script where peaks are classified as S1​, S2​, or Noise.
-- **Function:** `find_heartbeat_peaks()`
-- **Purpose:** To intelligently classify all detected peaks based on a combination of timing, amplitude relationships, and physiological models.
-- **Key Implemented Logic:**
-    1. **Raw Peak Detection:** All potential peaks standing above the dynamic noise floor are identified using `_find_raw_peaks`.
-    2. **Stateful Classification Loop:** The script iterates through the peaks one by one, making decisions based on the context of the beats it has already classified.
-    3. **Long-Term BPM Belief:** The script maintains a `long_term_bpm` variable, which acts as its "memory" or "belief" about the heart rate. This value is updated slowly with a learning rate (`long_term_bpm_learning_rate`) and has a built-in "speed limiter" (`max_bpm_change_per_beat`) to prevent single erroneous beats from derailing the analysis.
-    4. **The "Contractility" Model:** This is the most critical component for adapting to exercise. It dynamically changes its expectations of the S1​/S2​ amplitude relationship based on the `long_term_bpm`.
-        - **Blended Confidence Curve (`calculate_blended_confidence`):** The confidence score for a potential pair is calculated using a dynamic curve. At **low BPMs**, the curve rewards pairs where S1​ and S2​ have similar amplitudes. At **high BPMs**, it rewards pairs where S1​ is significantly louder than S2​.
-        - **Stability & Ratio Adjustments (`_adjust_confidence_with_stability_and_ratio`):**
-            - **Stability Pre-Adjustment:** The confidence is first adjusted based on the recent success rate of pairing. In a stable rhythm (many successful pairs), the script becomes more confident. In an unstable rhythm, it becomes more cautious.
-            - **Dynamic Boost/Penalty:** A final adjustment is made based on the S1​/S2​ strength ratio. It compares the actual ratio to an _expected_ ratio that changes with BPM. For example, at high BPM, it strongly expects S1​ > S2​ and will penalize a pair that doesn't fit this model.
-    5. **Noise Vetoing Rules:** Before a peak is even considered for pairing, it's checked against several noise rules:
-        - `should_veto_by_lookahead()`: A small peak is rejected if the _next_ peak is significantly larger, assuming the small peak is just noise preceding a real beat.
-        - `calculate_surrounding_trough_noise()`: A peak is marked as noisy if the troughs on either side of it are too high above the dynamic noise floor.
-    6. **Lone S1​ Validation (`_validate_lone_s1`):** If a peak cannot be paired, it undergoes a series of checks before it can be classified as a "Lone S1​". It must be rhythmically plausible, have a reasonable amplitude compared to the previous S1​, and not be too close to the next raw peak (which would imply a sudden, unrealistic BPM spike).
-#### Stage 3: Post-Processing Correction Passes
-After the initial classification, the script runs correction passes that use the "big picture" context to find and fix errors.
-- **Function:** `correct_peaks_by_rhythm()`
-- **Purpose:** A simple, non-iterative cleanup pass to resolve obvious rhythmic conflicts.
-- **Logic:** It calculates the median R-R interval for the entire recording. It then iterates through the S1 peaks and if it finds two that are too close together (e.g., closer than 40% of the median interval), it discards the one with the lower amplitude.
-- **Function:** `_run_iterative_correction_pass()`
-- **Purpose:** A more advanced, iterative pass to find and fix rhythmic discontinuities (the "notches" in the BPM graph caused by a missed or extra beat).
-- **Logic:** This function runs in a loop until no more corrections are made:
-    1. **Find Discontinuities:** It identifies two types of problems based on the stable R-R interval:
-        - **Gaps:** An interval that is too long (e.g., > 1.7x the median), suggesting a missed beat.
-        - **Conflicts:** An interval that is too short (e.g., < 0.4x the median), suggesting an extra, invalid beat.
-    2. **Fix Gaps:** When a long gap is found, the script searches for any peaks within that gap that were previously labeled as `Noise`. It re-evaluates them under less strict conditions to see if one could be a valid beat that was missed.
-    3. **Fix Conflicts:** When a short interval is found between two S1s, it re-evaluates if the second one could plausibly be the S2​ of the first.
-    4. **Margin:** This logic is intelligently applied only to the middle of the recording, leaving the first and last few beats untouched to avoid errors at the edges where context is limited.
-#### Stage 4: Final Metrics and Output Generation
-Once the final, corrected list of S1​ peaks is established, the script calculates high-level metrics and generates reports.
-- **HRV Calculation (`calculate_windowed_hrv`):**
-    - It calculates **RMSSD** (Root Mean Square of Successive Differences) and **SDNN** (Standard Deviation of N-N intervals) in a sliding window.
-    - Crucially, it calculates **`rmssdc`**, which is the RMSSD corrected for the mean R-R interval in that window. This provides a more comparable measure of HRV across different heart rates, as HRV naturally decreases when BPM increases.
-- **Slope Analysis (`find_major_hr_inclines`, `find_peak_recovery_rate`, etc.):**
-    - These functions analyze the final smoothed BPM curve to identify periods of significant, sustained heart rate increase (exertion) and decrease (recovery).
-    - They also find the single steepest slope of exertion and recovery over a fixed window (e.g., 20 seconds), providing metrics on the heart's responsiveness.
-- **Output Files:**
-    1. **Interactive Plot (`..._bpm_plot.html`):** A Plotly graph showing the audio envelope, noise floor, all peak classifications (S1​, S2​, Noise), the final BPM curve, and HRV metrics. Hovering over any peak provides detailed debug information about why it was classified that way.
-    2. **Analysis Summary (`..._Analysis_Summary.md`):** A clean, readable Markdown report with overall statistics (Avg/Min/Max BPM, HRR, average HRV) and tables detailing the steepest exertion/recovery periods.
-    3. **Debug Log (`..._Debug_Log.md`):** A highly detailed, chronological log of every single peak and trough detected, along with the state of the algorithm (e.g., noise floor, BPM belief, deviation) at that exact moment.
+
+## Known Limitations & Edge Cases
+
+### Cold Start Problem
+**Issue:** First 4 seconds often misclassified because long_term_bpm hasn't stabilized.
+
+**Workaround:** Provide `start_bpm_hint` when possible. The `_kickstart_check` helps but isn't perfect.
+
+**Future:** Could add a "burn-in" pre-pass that analyzes first 10 seconds at higher sensitivity.
+
+### S1/S2 Swapping During Breathing
+**Issue:** During inhalation, S1-S2 amplitude difference decreases. Can cause temporary S2→S1 misclassification, especially if timing aligns poorly.
+
+**Current mitigation:** Contractility model helps but doesn't fully solve it. The `penalty_waiver` logic for ideal deviation range catches some cases.
+
+**Future idea:** Track a rolling history of S1-S2 deviation. If deviation suddenly drops without BPM increase, suspect breathing inversion rather than true contractility change.
+
+### Missing S2 in High BPM
+**Issue:** Above ~180 BPM, S2 may be physically absent from waveform due to temporal merging with next S1.
+
+**Current solution:** Algorithm gracefully degrades to Lone S1 mode when pairing fails consistently.
+
+**Future:** Could add a "S2 dropout detection" that disables pairing entirely when consecutive Lone S1s exceed threshold at high BPM.
+
+---
+
+## Optimizations:
+60% of the script's runtime is conversion time, which is fundamentally unavoidable because it's dominated by FFmpeg decoding the compressed MP4 audio stream
+Attempting to optimize the remaining 40% of our script's runtime seems kinda silly in comparison...
+**Decode time dominates because:**
+- MP4 audio is compressed with complex psychoacoustic models (AAC=O(n²) decode)
+- 18 minutes of 44.1kHz stereo AAC = ~120 MB → ~1.9 GB PCM
+- FFmpeg must decode every frame sequentially
+
+---
+
+## Future Roadmap
+
+### High-Priority
+- [ ] Replace kick-start with more robust "rhythm re-acquisition" model
+- [ ] Add breathing detection to improve low-BPM amplitude handling
+- [ ] Implement adaptive threshold for `trough_rejection_multiplier` based on signal variance
+
+### Medium-Priority
+- [ ] Export intermediate data (peak classifications, confidence scores) for debugging
+- [ ] Add "aggressiveness" preset that bundles related parameters
+- [ ] Parallelize batch processing (currently uses simple threading loop)
+
+### Low-Priority / Ideas
+- [ ] Try machine learning for peak classification (need labeled dataset)
+- [ ] Implement spectral fingerprinting for S1/S2 distinction
+- [ ] Add phase-rectified signal averaging for noise reduction
 
