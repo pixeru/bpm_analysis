@@ -6,6 +6,7 @@ import datetime
 import logging
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 from enum import Enum
 
@@ -175,6 +176,61 @@ except ImportError:
     logging.warning("Pydub library not found. Install with 'pip install pydub'.")
     AudioSegment = None
 
+@dataclass
+class AnalysisState:
+    """
+    Holds all mutable state used by the peak classification loop.
+
+    Attributes:
+        dynamic_noise_floor: Rolling estimate of the background noise floor at each sample,
+            derived from sanitized audio troughs. Used to threshold peaks and compute
+            peak “strength” relative to the local noise environment.
+        trough_indices: Indices of sanitized troughs in the audio envelope. These anchor
+            prominence calculations by defining the key cols around each peak.
+        all_peaks: Indices of all raw peaks above the dynamic height threshold before
+            any S1/S2/Noise classification or correction passes.
+        smoothed_dev_series: Time‑indexed series of normalized peak‑to‑peak amplitude
+            deviations, smoothed over time. This captures rhythm stability and is used
+            as context when reasoning about sudden changes in the waveform.
+        long_term_bpm: Slowly adapting belief about the underlying heart rate, updated
+            by `update_long_term_bpm()`. This is the BPM value the algorithm trusts when
+            computing expected S1‑S2 and R‑R intervals.
+        analysis_data: Bag of analysis artifacts that downstream plotting/reporting
+            relies on (e.g., `dynamic_noise_floor_series`, `trough_indices`,
+            `deviation_series`, `beat_debug_info`, `long_term_bpm_series`).
+        candidate_beats: Sample indices of peaks that have been accepted as S1 heartbeats
+            (either paired S1 or validated Lone S1) during the main loop.
+        beat_debug_info: Mapping from raw peak index to a structured debug record
+            explaining how that peak was classified. This powers the debug log and
+            interactive plot tooltips.
+        long_term_bpm_history: Sequence of `(time_sec, bpm)` tuples capturing how the
+            long‑term BPM belief evolved over the recording.
+        sorted_troughs: Sorted list of trough indices mirroring `trough_indices`,
+            kept in list form for fast neighbor lookups and iteration.
+        consecutive_rr_rejections: Count of consecutive Lone S1 rhythm rejections, used
+            to trigger the “cascade reset” safety mechanism when the rhythm model fails.
+        loop_idx: Current index into `all_peaks` for the main classification loop. This
+            is the loop counter that drives progression through raw peaks.
+        pairing_ratio_override: Optional override for the recent pairing stability ratio
+            set by the kick‑start recovery logic when the algorithm gets stuck in
+            “Lone S1 only” mode.
+    """
+
+    dynamic_noise_floor: pd.Series
+    trough_indices: np.ndarray
+    all_peaks: np.ndarray
+    smoothed_dev_series: pd.Series
+    long_term_bpm: float
+    analysis_data: Dict[str, Any] = field(default_factory=dict)
+    candidate_beats: List[int] = field(default_factory=list)
+    beat_debug_info: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    long_term_bpm_history: List[Tuple[float, float]] = field(default_factory=list)
+    sorted_troughs: List[int] = field(default_factory=list)
+    consecutive_rr_rejections: int = 0
+    loop_idx: int = 0
+    pairing_ratio_override: Optional[float] = None
+
+
 # --- Core Classes for Analysis Pipeline ---
 class PeakClassifier:
     """
@@ -197,43 +253,50 @@ class PeakClassifier:
             start_bpm_hint, precomputed_noise_floor, precomputed_troughs
         )
 
-    def _initialize_state(self, start_bpm_hint, precomputed_noise_floor, precomputed_troughs) -> Dict:
+    def _initialize_state(self, start_bpm_hint, precomputed_noise_floor, precomputed_troughs) -> AnalysisState:
         """Pre-calculates all necessary data and initializes the state for the peak finding loop."""
-        state = {'analysis_data': {}}
-        state['dynamic_noise_floor'], state['trough_indices'] = precomputed_noise_floor, precomputed_troughs
-        state['all_peaks'] = self._find_raw_peaks(state['dynamic_noise_floor'].values)
-        state['analysis_data']['dynamic_noise_floor_series'] = state['dynamic_noise_floor']
-        state['analysis_data']['trough_indices'] = state['trough_indices']
+        analysis_data: Dict[str, Any] = {}
+        dynamic_noise_floor, trough_indices = precomputed_noise_floor, precomputed_troughs
+        all_peaks = self._find_raw_peaks(dynamic_noise_floor.values)
 
-        noise_floor_at_peaks = state['dynamic_noise_floor'].reindex(state['all_peaks'], method='nearest').values
-        peak_strengths = self.audio_envelope[state['all_peaks']] - noise_floor_at_peaks
+        analysis_data["dynamic_noise_floor_series"] = dynamic_noise_floor
+        analysis_data["trough_indices"] = trough_indices
+
+        noise_floor_at_peaks = dynamic_noise_floor.reindex(all_peaks, method='nearest').values
+        peak_strengths = self.audio_envelope[all_peaks] - noise_floor_at_peaks
         peak_strengths[peak_strengths < 0] = 0
-        normalized_deviations = np.abs(np.diff(peak_strengths)) / (np.maximum(peak_strengths[:-1], peak_strengths[1:]) + 1e-9)
-        deviation_times = (state['all_peaks'][:-1] + state['all_peaks'][1:]) / 2 / self.sample_rate
+        normalized_deviations = np.abs(np.diff(peak_strengths)) / (
+            np.maximum(peak_strengths[:-1], peak_strengths[1:]) + 1e-9
+        )
+        deviation_times = (all_peaks[:-1] + all_peaks[1:]) / 2 / self.sample_rate
         deviation_series = pd.Series(normalized_deviations, index=deviation_times)
         smoothing_window = max(5, int(len(deviation_series) * self.params['deviation_smoothing_factor']))
-        state['smoothed_dev_series'] = deviation_series.rolling(window=smoothing_window, min_periods=1, center=True).mean()
-        state['analysis_data']['deviation_series'] = state['smoothed_dev_series']
+        smoothed_dev_series = deviation_series.rolling(
+            window=smoothing_window, min_periods=1, center=True
+        ).mean()
+        analysis_data["deviation_series"] = smoothed_dev_series
 
-        state['long_term_bpm'] = float(start_bpm_hint) if start_bpm_hint else 80.0
-        state['candidate_beats'] = []
-        state['beat_debug_info'] = {}
-        state['long_term_bpm_history'] = []
-        state['sorted_troughs'] = sorted(state['trough_indices'])
-        state['consecutive_rr_rejections'] = 0
-        state['loop_idx'] = 0
+        long_term_bpm = float(start_bpm_hint) if start_bpm_hint else 80.0
 
-        return state
+        return AnalysisState(
+            dynamic_noise_floor=dynamic_noise_floor,
+            trough_indices=trough_indices,
+            all_peaks=all_peaks,
+            smoothed_dev_series=smoothed_dev_series,
+            long_term_bpm=long_term_bpm,
+            analysis_data=analysis_data,
+            sorted_troughs=sorted(trough_indices),
+        )
 
     def classify_peaks(self) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """Main classification loop to iterate through all raw peaks."""
-        if len(self.state['all_peaks']) < 2:
-            return self.state['all_peaks'], self.state['all_peaks'], {"beat_debug_info": {}}
+        if len(self.state.all_peaks) < 2:
+            return self.state.all_peaks, self.state.all_peaks, {"beat_debug_info": {}}
 
-        while self.state['loop_idx'] < len(self.state['all_peaks']):
+        while self.state.loop_idx < len(self.state.all_peaks):
             self._kickstart_check()
-            current_peak_idx = self.state['all_peaks'][self.state['loop_idx']]
-            is_last_peak = self.state['loop_idx'] >= len(self.state['all_peaks']) - 1
+            current_peak_idx = self.state.all_peaks[self.state.loop_idx]
+            is_last_peak = self.state.loop_idx >= len(self.state.all_peaks) - 1
 
             if is_last_peak:
                 self._handle_last_peak(current_peak_idx)
@@ -252,13 +315,13 @@ class PeakClassifier:
         """
         # Calculate recent rhythm stability as a ratio
         history_window = self.params.get("stability_history_window", 20)
-        if len(self.state['candidate_beats']) < history_window:
+        if len(self.state.candidate_beats) < history_window:
             pairing_ratio = 0.5
         else:
-            recent_beats = self.state['candidate_beats'][-history_window:]
+            recent_beats = self.state.candidate_beats[-history_window:]
             paired_count = sum(
                 1 for beat_idx in recent_beats
-                if _is_s1_paired_debug(self.state['beat_debug_info'].get(beat_idx))
+                if _is_s1_paired_debug(self.state.beat_debug_info.get(beat_idx))
             )
             pairing_ratio = paired_count / history_window
             
@@ -266,13 +329,13 @@ class PeakClassifier:
             return
 
         history = 4  # Hardcoded history beats
-        if len(self.state['candidate_beats']) < history:
+        if len(self.state.candidate_beats) < history:
             return
 
         min_s1s = 3  # Hardcoded min S1 candidates
         recent_lone_s1s = [
-            idx for idx in self.state['candidate_beats'][-history:]
-            if _is_lone_s1_debug(self.state['beat_debug_info'].get(idx))
+            idx for idx in self.state.candidate_beats[-history:]
+            if _is_lone_s1_debug(self.state.beat_debug_info.get(idx))
         ]
         if len(recent_lone_s1s) < min_s1s:
             return
@@ -280,44 +343,44 @@ class PeakClassifier:
         min_matches = 3  # Hardcoded min matches
         matches = 0
         for s1_idx in recent_lone_s1s:
-            current_raw_idx = np.searchsorted(self.state['all_peaks'], s1_idx)
-            if current_raw_idx < len(self.state['all_peaks']) - 1:
-                next_raw_peak_idx = self.state['all_peaks'][current_raw_idx + 1]
-                if _is_noise_debug(self.state['beat_debug_info'].get(next_raw_peak_idx)):
+            current_raw_idx = np.searchsorted(self.state.all_peaks, s1_idx)
+            if current_raw_idx < len(self.state.all_peaks) - 1:
+                next_raw_peak_idx = self.state.all_peaks[current_raw_idx + 1]
+                if _is_noise_debug(self.state.beat_debug_info.get(next_raw_peak_idx)):
                     matches += 1
 
         if matches >= min_matches:
             override_ratio = self.params.get("kickstart_override_ratio", 0.6)
             logging.info(f"KICK-START: Found {matches}/{len(recent_lone_s1s)} S1->Noise patterns. Overriding pairing ratio to {override_ratio}.")
             # This is a temporary state change, so we don't store the override ratio in self.state
-            self.state['pairing_ratio_override'] = override_ratio
+            self.state.pairing_ratio_override = override_ratio
 
     def _handle_last_peak(self, peak_idx: int):
         """Classify the final peak in the sequence."""
-        self.state['candidate_beats'].append(peak_idx)
-        self.state['beat_debug_info'][peak_idx] = {
+        self.state.candidate_beats.append(peak_idx)
+        self.state.beat_debug_info[peak_idx] = {
             "peak_type": PeakType.LONE_S1_LAST.value,
             "sections": []
         }
-        self.state['loop_idx'] += 1
+        self.state.loop_idx += 1
 
     def _calculate_pairing_ratio(self) -> float:
         """Calculate recent rhythm stability ratio."""
         history_window = self.params.get("stability_history_window", 20)
-        if len(self.state['candidate_beats']) < history_window:
+        if len(self.state.candidate_beats) < history_window:
             return 0.5
         
-        recent_beats = self.state['candidate_beats'][-history_window:]
+        recent_beats = self.state.candidate_beats[-history_window:]
         paired_count = sum(
             1 for beat_idx in recent_beats 
-            if _is_s1_paired_debug(self.state['beat_debug_info'].get(beat_idx))
+            if _is_s1_paired_debug(self.state.beat_debug_info.get(beat_idx))
         )
         return paired_count / history_window
 
     def _process_peak_pair(self, current_peak_idx: int):
         """Processes a pair of peaks to determine if they are S1-S2."""
-        all_peaks = self.state['all_peaks']
-        loop_idx = self.state['loop_idx']
+        all_peaks = self.state.all_peaks
+        loop_idx = self.state.loop_idx
 
         # Calculate recent rhythm stability as a ratio
         pairing_ratio = self._calculate_pairing_ratio()
@@ -335,13 +398,13 @@ class PeakClassifier:
 
             # Heuristic: treat the middle peak as noise if its prominence is much weaker than the S1 candidate
             current_prom = calculate_peak_prominence(
-                current_peak_idx, self.audio_envelope, self.state['trough_indices']
+                current_peak_idx, self.audio_envelope, self.state.trough_indices
             )
             middle_prom = calculate_peak_prominence(
-                middle_peak_idx, self.audio_envelope, self.state['trough_indices']
+                middle_peak_idx, self.audio_envelope, self.state.trough_indices
             )
             next_next_prom = calculate_peak_prominence(
-                next_next_peak_idx, self.audio_envelope, self.state['trough_indices']
+                next_next_peak_idx, self.audio_envelope, self.state.trough_indices
             )
             noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
 
@@ -353,7 +416,7 @@ class PeakClassifier:
             # shorter than the existing minimum S1-S2 interval constraint, then
             #   [current_peak_idx] = S1, [middle_peak_idx] = Noise, [next_next_peak_idx] = S2
             # is more physiologically plausible than treating the middle peak as S2.
-            bpm = self.state['long_term_bpm']
+            bpm = self.state.long_term_bpm
             intervals = calculate_bpm_intervals(bpm, self.params)
             min_s1_s2_interval = intervals["s1_s2_min"]
             s1_s2_max_interval = intervals["s1_s2_max"]
@@ -406,14 +469,14 @@ class PeakClassifier:
                         prominence_section_interval,
                     ]
 
-                    self.state['candidate_beats'].append(current_peak_idx)
-                    self.state['beat_debug_info'][current_peak_idx] = {
+                    self.state.candidate_beats.append(current_peak_idx)
+                    self.state.beat_debug_info[current_peak_idx] = {
                         "peak_type": PeakType.S1_PAIRED.value,
                         "sections": s1_sections_interval,
                     }
 
-                    original_middle_debug_interval = self.state['beat_debug_info'].get(middle_peak_idx)
-                    self.state['beat_debug_info'][middle_peak_idx] = {
+                    original_middle_debug_interval = self.state.beat_debug_info.get(middle_peak_idx)
+                    self.state.beat_debug_info[middle_peak_idx] = {
                         "peak_type": PeakType.NOISE.value,
                         "sections": [
                             {
@@ -435,14 +498,14 @@ class PeakClassifier:
                         ],
                     }
 
-                    self.state['beat_debug_info'][next_next_peak_idx] = {
+                    self.state.beat_debug_info[next_next_peak_idx] = {
                         "peak_type": PeakType.S2_PAIRED.value,
                         "sections": s2_sections_interval,
                     }
 
-                    self.state['consecutive_rr_rejections'] = 0
+                    self.state.consecutive_rr_rejections = 0
                     # Skip the S1, middle noise, and S2 peaks
-                    self.state['loop_idx'] += 3
+                    self.state.loop_idx += 3
                     return
 
             if (
@@ -484,14 +547,14 @@ class PeakClassifier:
                         prominence_section,
                     ]
 
-                    self.state['candidate_beats'].append(current_peak_idx)
-                    self.state['beat_debug_info'][current_peak_idx] = {
+                    self.state.candidate_beats.append(current_peak_idx)
+                    self.state.beat_debug_info[current_peak_idx] = {
                         "peak_type": PeakType.S1_PAIRED.value,
                         "sections": s1_sections,
                     }
 
-                    original_middle_debug = self.state['beat_debug_info'].get(middle_peak_idx)
-                    self.state['beat_debug_info'][middle_peak_idx] = {
+                    original_middle_debug = self.state.beat_debug_info.get(middle_peak_idx)
+                    self.state.beat_debug_info[middle_peak_idx] = {
                         "peak_type": PeakType.NOISE.value,
                         "sections": [
                             {
@@ -510,14 +573,14 @@ class PeakClassifier:
                         ],
                     }
 
-                    self.state['beat_debug_info'][next_next_peak_idx] = {
+                    self.state.beat_debug_info[next_next_peak_idx] = {
                         "peak_type": PeakType.S2_PAIRED.value,
                         "sections": s2_sections,
                     }
 
-                    self.state['consecutive_rr_rejections'] = 0
+                    self.state.consecutive_rr_rejections = 0
                     # Skip the S1, middle noise, and S2 peaks
-                    self.state['loop_idx'] += 3
+                    self.state.loop_idx += 3
                     return
 
         # --- Standard pairing attempt ---
@@ -526,7 +589,7 @@ class PeakClassifier:
         )
 
         if is_paired:
-            self.state['candidate_beats'].append(current_peak_idx)
+            self.state.candidate_beats.append(current_peak_idx)
             pairing_lines = [
                 line.strip().lstrip('- ')
                 for line in reason.strip().split("\n")
@@ -534,39 +597,39 @@ class PeakClassifier:
             ]
             sections = [{"type": "pairing", "lines": pairing_lines, "success": True}]
             sections.append(self._build_prominence_section(prominence_context))
-            self.state['beat_debug_info'][current_peak_idx] = {
+            self.state.beat_debug_info[current_peak_idx] = {
                 "peak_type": PeakType.S1_PAIRED.value,
                 "sections": sections,
             }
-            self.state['beat_debug_info'][next_peak_idx] = {
+            self.state.beat_debug_info[next_peak_idx] = {
                 "peak_type": PeakType.S2_PAIRED.value,
                 "sections": sections,
             }
-            self.state['consecutive_rr_rejections'] = 0
-            self.state['loop_idx'] += 2
+            self.state.consecutive_rr_rejections = 0
+            self.state.loop_idx += 2
         else:
             self._classify_lone_peak(current_peak_idx, reason)
-            self.state['loop_idx'] += 1
+            self.state.loop_idx += 1
 
     def _update_long_term_bpm(self):
         """Updates the long-term BPM belief after each decision."""
-        if len(self.state['candidate_beats']) > 1:
-            new_rr = (self.state['candidate_beats'][-1] - self.state['candidate_beats'][-2]) / self.sample_rate
+        if len(self.state.candidate_beats) > 1:
+            new_rr = (self.state.candidate_beats[-1] - self.state.candidate_beats[-2]) / self.sample_rate
             if new_rr > 0:
-                self.state['long_term_bpm'] = update_long_term_bpm(new_rr, self.state['long_term_bpm'], self.params)
+                self.state.long_term_bpm = update_long_term_bpm(new_rr, self.state.long_term_bpm, self.params)
 
-        if self.state['candidate_beats']:
-            time_sec = self.state['candidate_beats'][-1] / self.sample_rate
-            self.state['long_term_bpm_history'].append((time_sec, self.state['long_term_bpm']))
+        if self.state.candidate_beats:
+            time_sec = self.state.candidate_beats[-1] / self.sample_rate
+            self.state.long_term_bpm_history.append((time_sec, self.state.long_term_bpm))
 
     def _finalize_results(self) -> Tuple[np.ndarray, np.ndarray, Dict]:
         """Finalizes and returns the analysis results."""
-        final_peaks = np.array(sorted(list(dict.fromkeys(self.state['candidate_beats']))))
-        self.state['analysis_data']["beat_debug_info"] = self.state['beat_debug_info']
-        if self.state['long_term_bpm_history']:
-            lt_bpm_times, lt_bpm_values = zip(*self.state['long_term_bpm_history'])
-            self.state['analysis_data']["long_term_bpm_series"] = pd.Series(lt_bpm_values, index=lt_bpm_times)
-        return final_peaks, self.state['all_peaks'], self.state['analysis_data']
+        final_peaks = np.array(sorted(list(dict.fromkeys(self.state.candidate_beats))))
+        self.state.analysis_data["beat_debug_info"] = self.state.beat_debug_info
+        if self.state.long_term_bpm_history:
+            lt_bpm_times, lt_bpm_values = zip(*self.state.long_term_bpm_history)
+            self.state.analysis_data["long_term_bpm_series"] = pd.Series(lt_bpm_values, index=lt_bpm_times)
+        return final_peaks, self.state.all_peaks, self.state.analysis_data
 
     def _find_raw_peaks(self, height_threshold: np.ndarray) -> np.ndarray:
         """Finds all potential peaks above the given height threshold."""
@@ -579,12 +642,12 @@ class PeakClassifier:
     def _get_recent_s1_prominences(self) -> List[float]:
         """Returns prominences of recent validated S1 peaks for reference baseline."""
         recent_s1_types = [
-            self.state['beat_debug_info'].get(idx, {}).get("peak_type") 
-            for idx in self.state['candidate_beats'][-50:]  # Last 50 beats
+            self.state.beat_debug_info.get(idx, {}).get("peak_type") 
+            for idx in self.state.candidate_beats[-50:]  # Last 50 beats
         ]
         return [
-            calculate_peak_prominence(idx, self.audio_envelope, self.state['trough_indices'])
-            for idx, typ in zip(self.state['candidate_beats'][-50:], recent_s1_types)
+            calculate_peak_prominence(idx, self.audio_envelope, self.state.trough_indices)
+            for idx, typ in zip(self.state.candidate_beats[-50:], recent_s1_types)
             if typ in (PeakType.S1_PAIRED.value, PeakType.LONE_S1_VALIDATED.value)
         ]
 
@@ -593,7 +656,7 @@ class PeakClassifier:
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """Calculates the confidence score for pairing two candidate peaks."""
         interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
-        bpm = self.state['long_term_bpm']
+        bpm = self.state.long_term_bpm
 
         # Minimum S1-S2 as fraction of RR interval (adapts to current BPM)
         intervals = calculate_bpm_intervals(bpm, self.params)
@@ -620,13 +683,13 @@ class PeakClassifier:
         s1_details = get_peak_prominence_details(
             s1_candidate_idx,
             self.audio_envelope,
-            self.state['trough_indices'],
+            self.state.trough_indices,
             sample_rate=self.sample_rate,
         )
         s2_details = get_peak_prominence_details(
             s2_candidate_idx,
             self.audio_envelope,
-            self.state['trough_indices'],
+            self.state.trough_indices,
             sample_rate=self.sample_rate,
         )
         s1_prominence = s1_details["prominence"]
@@ -683,14 +746,14 @@ class PeakClassifier:
             s1_candidate_idx,
             s2_candidate_idx,
             self.audio_envelope,
-            self.state['dynamic_noise_floor'],
+            self.state.dynamic_noise_floor,
             bpm,
             pairing_ratio,
             self.params,
             self.sample_rate,
             self.peak_bpm_time_sec,
             self.recovery_end_time_sec,
-            len(self.state['candidate_beats']),
+            len(self.state.candidate_beats),
         )
         reason += other_reason
 
@@ -722,14 +785,14 @@ class PeakClassifier:
         # Guardrail: only trust this check if the "next S1" peak is strong enough to be
         # a plausible beat; otherwise it may just be noise and should not veto the pair.
         forward_look_penalty = 0.0
-        if self.state['loop_idx'] + 2 < len(self.state['all_peaks']):
-            next_next_peak_idx = self.state['all_peaks'][self.state['loop_idx'] + 2]
+        if self.state.loop_idx + 2 < len(self.state.all_peaks):
+            next_next_peak_idx = self.state.all_peaks[self.state.loop_idx + 2]
 
             # Use prominence for robust amplitude comparison
             next_s1_details = get_peak_prominence_details(
                 next_next_peak_idx,
                 self.audio_envelope,
-                self.state['trough_indices'],
+                self.state.trough_indices,
                 sample_rate=self.sample_rate,
             )
             next_s1_prominence = next_s1_details["prominence"]
@@ -780,37 +843,37 @@ class PeakClassifier:
         ]
 
         if is_valid:
-            self.state['candidate_beats'].append(peak_idx)
+            self.state.candidate_beats.append(peak_idx)
             # For a validated S1, the "rejection_detail" is just the success reason.
-            self.state['beat_debug_info'][peak_idx] = {
+            self.state.beat_debug_info[peak_idx] = {
                 "peak_type": PeakType.LONE_S1_VALIDATED.value,
                 "sections": [
                     {"type": "pairing", "lines": pairing_lines, "success": False},
                     {"type": "lone_s1", "lines": lone_s1_lines, "validated": True},
                 ],
             }
-            self.state['consecutive_rr_rejections'] = 0
+            self.state.consecutive_rr_rejections = 0
         else:
             is_rhythm_rejection = any("Rhythm Fit" in ln for ln in lone_s1_lines)
             if is_rhythm_rejection:
-                self.state['consecutive_rr_rejections'] += 1
+                self.state.consecutive_rr_rejections += 1
             else:
-                self.state['consecutive_rr_rejections'] = 0
+                self.state.consecutive_rr_rejections = 0
 
-            if self.state['consecutive_rr_rejections'] >= self.params.get("cascade_reset_trigger_count", 3):
+            if self.state.consecutive_rr_rejections >= self.params.get("cascade_reset_trigger_count", 3):
                 logging.info(
                     f"CASCADE RESET: Forcing peak at {peak_idx / self.sample_rate:.2f}s as Lone S1 due to repeated rhythmic failures.")
-                self.state['candidate_beats'].append(peak_idx)
-                self.state['beat_debug_info'][peak_idx] = {
+                self.state.candidate_beats.append(peak_idx)
+                self.state.beat_debug_info[peak_idx] = {
                     "peak_type": PeakType.LONE_S1_CASCADE.value,
                     "sections": [
                         {"type": "pairing", "lines": pairing_lines, "success": False},
                         {"type": "lone_s1", "lines": lone_s1_lines, "validated": False},
                     ],
                 }
-                self.state['consecutive_rr_rejections'] = 0
+                self.state.consecutive_rr_rejections = 0
             else:
-                self.state['beat_debug_info'][peak_idx] = {
+                self.state.beat_debug_info[peak_idx] = {
                     "peak_type": PeakType.NOISE.value,
                     "sections": [
                         {"type": "pairing", "lines": pairing_lines, "success": False},
@@ -823,21 +886,21 @@ class PeakClassifier:
         detail_lines = []
         
         # --- 1. Basic rhythm & amplitude calculation (existing logic) ---
-        if not self.state['candidate_beats']:
+        if not self.state.candidate_beats:
             return True, ["Validated Lone S1: First beat (no prior rhythm to compare)."]
         
         confidence, detail_lines = calculate_lone_s1_confidence(
-            current_peak_idx, self.state['candidate_beats'][-1], self.state['long_term_bpm'],
-            self.audio_envelope, self.state['dynamic_noise_floor'], self.sample_rate, self.params
+            current_peak_idx, self.state.candidate_beats[-1], self.state.long_term_bpm,
+            self.audio_envelope, self.state.dynamic_noise_floor, self.sample_rate, self.params
         )
         
-        # --- 2. NEW: Absolute prominence guardrail ---
+        # --- 2. Absolute prominence guardrail ---
         # Track only high-quality S1s (avoid contaminating reference with noise)
-        recent_s1_types = [self.state['beat_debug_info'].get(idx, {}).get("peak_type") 
-                        for idx in self.state['candidate_beats'][-20:]]  # Last 20 beats
+        recent_s1_types = [self.state.beat_debug_info.get(idx, {}).get("peak_type") 
+                        for idx in self.state.candidate_beats[-20:]]  # Last 20 beats
         recent_prominences = [
-            calculate_peak_prominence(idx, self.audio_envelope, self.state['trough_indices'])
-            for idx, typ in zip(self.state['candidate_beats'][-20:], recent_s1_types)
+            calculate_peak_prominence(idx, self.audio_envelope, self.state.trough_indices)
+            for idx, typ in zip(self.state.candidate_beats[-20:], recent_s1_types)
             if typ in (PeakType.S1_PAIRED.value, PeakType.LONE_S1_VALIDATED.value)
         ]
         
@@ -845,7 +908,7 @@ class PeakClassifier:
             # Top 20% quartile as reference (robust to outliers)
             reference_prominence = np.percentile(recent_prominences, 80)
             current_prominence = calculate_peak_prominence(
-                current_peak_idx, self.audio_envelope, self.state['trough_indices']
+                current_peak_idx, self.audio_envelope, self.state.trough_indices
             )
             
             # Penalty if <40% of reference S1 prominence (adaptive threshold)
@@ -863,11 +926,11 @@ class PeakClassifier:
                 )
         
         # --- 3. Forward check (existing logic) ---
-        current_peak_all_peaks_idx = np.searchsorted(self.state['all_peaks'], current_peak_idx)
-        if current_peak_all_peaks_idx < len(self.state['all_peaks']) - 1:
-            next_raw_peak_idx = self.state['all_peaks'][current_peak_all_peaks_idx + 1]
+        current_peak_all_peaks_idx = np.searchsorted(self.state.all_peaks, current_peak_idx)
+        if current_peak_all_peaks_idx < len(self.state.all_peaks) - 1:
+            next_raw_peak_idx = self.state.all_peaks[current_peak_all_peaks_idx + 1]
             forward_interval_sec = (next_raw_peak_idx - current_peak_idx) / self.sample_rate
-            expected_rr_sec = calculate_bpm_intervals(self.state['long_term_bpm'], self.params)["rr_interval"]
+            expected_rr_sec = calculate_bpm_intervals(self.state.long_term_bpm, self.params)["rr_interval"]
             
             if forward_interval_sec < expected_rr_sec * 0.45:  # Too close
                 current_amp = self.audio_envelope[current_peak_idx]
@@ -1478,7 +1541,7 @@ def calculate_bpm_series(peaks: np.ndarray, sample_rate: int, params: Dict) -> T
 
 def detect_trapezoid_discontinuities(smoothed_bpm: pd.Series, bpm_times_sec: np.ndarray, params: Dict) -> List[Dict]:
     """
-    The human eye can easily identify errors in the BPM/time graph so I implemented this fucntion to allow 
+    The human eye can easily identify errors in the BPM/time graph so I implemented this function to allow 
     the script to identify them automatically.
     Detects trapezoid-shaped discontinuities in the average BPM series that are
     characteristic of a brief extra-beat artifact:
