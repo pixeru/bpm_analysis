@@ -231,6 +231,413 @@ class AnalysisState:
     pairing_ratio_override: Optional[float] = None
 
 
+class PairingEngine:
+    """
+    Scores candidate S1–S2 pairs and returns a pairing decision plus debug context.
+
+    This class is intentionally stateless with respect to the main analysis loop:
+    it never mutates `AnalysisState` and instead relies on the caller (`PeakClassifier`)
+    to own all state updates. This keeps the confidence model self‑contained and
+    easier to reason about in isolation.
+    """
+
+    def __init__(
+        self,
+        audio_envelope: np.ndarray,
+        sample_rate: int,
+        params: Dict,
+        peak_bpm_time_sec: Optional[float],
+        recovery_end_time_sec: Optional[float],
+    ) -> None:
+        self.audio_envelope = audio_envelope
+        self.sample_rate = sample_rate
+        self.params = params
+        self.peak_bpm_time_sec = peak_bpm_time_sec
+        self.recovery_end_time_sec = recovery_end_time_sec
+
+    def attempt_pair(
+        self,
+        state: AnalysisState,
+        s1_candidate_idx: int,
+        s2_candidate_idx: int,
+        pairing_ratio: float,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Calculates the confidence score for pairing two candidate peaks.
+
+        Returns:
+            (is_paired, reason, prominence_context)
+        where:
+            - is_paired: True if the final confidence exceeds the configured threshold
+            - reason: multi‑line human‑readable explanation of the decision
+            - prominence_context: raw prominence details for S1/S2 used by debug tools
+        """
+        interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
+        bpm = state.long_term_bpm
+
+        # Minimum S1-S2 as fraction of RR interval (adapts to current BPM)
+        intervals = calculate_bpm_intervals(bpm, self.params)
+        min_s1_s2_interval = intervals["s1_s2_min"]
+
+        if interval_sec < min_s1_s2_interval:
+            # Calculate implied BPM for debugging
+            # Assuming S2-S1 is at least as long as S1-S2 (conservative estimate)
+            implied_total_cycle = interval_sec * 2.0  # S1-S2 + S2-S1
+            implied_bpm = 60.0 / implied_total_cycle if implied_total_cycle > 0 else float('inf')
+
+            debug_msg = (
+                f"Impossible: S1-S2 interval {interval_sec:.3f}s < min {min_s1_s2_interval:.3f}s "
+                f"(implies {implied_bpm:.0f} BPM vs assumed {bpm:.0f} BPM)"
+            )
+            return False, debug_msg, {}
+
+        # --- Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
+        base_confidence = 0.60
+        reason = f"Base Conf: {base_confidence:.2f}"
+
+        # --- Contractility / prominence-based adjustment (S1 vs S2) ---
+        s1_details = get_peak_prominence_details(
+            s1_candidate_idx,
+            self.audio_envelope,
+            state.trough_indices,
+            sample_rate=self.sample_rate,
+        )
+        s2_details = get_peak_prominence_details(
+            s2_candidate_idx,
+            self.audio_envelope,
+            state.trough_indices,
+            sample_rate=self.sample_rate,
+        )
+        s1_prominence = s1_details["prominence"]
+        s2_prominence = s2_details["prominence"]
+
+        shared_s1_right_s2_left = (
+            s1_details.get("right_trough_idx") is not None
+            and s2_details.get("left_trough_idx") is not None
+            and s1_details["right_trough_idx"] == s2_details["left_trough_idx"]
+        )
+        prominence_context = {
+            "s1": s1_details,
+            "s2": s2_details,
+            "shared_s1_right_s2_left": shared_s1_right_s2_left,
+        }
+
+        # --- Contractility model based on S1/S2 prominence ratio ---
+        confidence, contractility_reason = adjust_confidence_with_contractility(
+            base_confidence,
+            s1_prominence,
+            s2_prominence,
+            bpm,
+            self.params,
+        )
+        reason += contractility_reason
+
+        # --- Absolute S1 prominence guardrail (shared with Lone S1 logic) ---
+        # Protect against tiny noise bumps being interpreted as heartbeats, a "high contractility" S1/S2 pair.
+        # We compare the current S1 prominence against a recent high-quality S1 baseline.
+        recent_prominences = _get_recent_s1_prominences_for_state(
+            state, self.audio_envelope, state.trough_indices
+        )
+        if len(recent_prominences) >= 5:
+            reference_prominence = np.percentile(recent_prominences, 80)  # Top 20% as adaptive reference
+            if reference_prominence > 0:
+                # Re‑use Lone S1 ratio setting for now to keep behavior consistent
+                min_ratio = self.params.get(
+                    "paired_s1_min_prominence_ratio",
+                    self.params.get("lone_s1_min_prominence_ratio", 0.4),  # Tuned magic number, see docs.
+                )
+                prominence_ratio = s1_prominence / (reference_prominence + 1e-9)
+
+                if prominence_ratio < min_ratio:
+                    # Linear penalty, mirroring Lone S1 behavior:
+                    #   at ratio == min_ratio -> no penalty
+                    #   at ratio  == 0       -> full veto
+                    penalty_factor = float(np.clip(prominence_ratio / (min_ratio + 1e-9), 0.0, 1.0))
+                    confidence *= penalty_factor
+                    reason += (
+                        f"\n- Absolute S1 Prominence Penalty: {s1_prominence:.3f} < {min_ratio:.1f}× reference "
+                        f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
+                    )
+
+        # --- Other adjustments (stability, ratio history, etc.) ---
+        confidence, other_reason = _apply_other_pairing_adjustments(
+            confidence,
+            s1_candidate_idx,
+            s2_candidate_idx,
+            self.audio_envelope,
+            state.dynamic_noise_floor,
+            bpm,
+            pairing_ratio,
+            self.params,
+            self.sample_rate,
+            self.peak_bpm_time_sec,
+            self.recovery_end_time_sec,
+            len(state.candidate_beats),
+        )
+        reason += other_reason
+
+        s1_s2_max_interval = intervals["s1_s2_max"]
+
+        # Apply interval penalty if the S1-S2 interval is too long
+        if self.params.get("enable_interval_penalty", True) and interval_sec > s1_s2_max_interval:
+            start_factor = self.params.get("interval_penalty_start_factor", 1.0)
+            full_factor = self.params.get("interval_penalty_full_factor", 1.4)
+            max_penalty = self.params.get("interval_max_penalty", 0.75)
+
+            penalty_zone_start = s1_s2_max_interval * start_factor
+            penalty_zone_end = s1_s2_max_interval * full_factor
+
+            if interval_sec > penalty_zone_start:
+                exceedance_scale = (interval_sec - penalty_zone_start) / (penalty_zone_end - penalty_zone_start + 1e-9)
+                exceedance_scale = np.clip(exceedance_scale, 0, 1)
+                penalty_amount = exceedance_scale * max_penalty
+                confidence = max(0, confidence - penalty_amount)
+                interval_reason = (
+                    f"\n- Interval penalty by {penalty_amount:.2f} "
+                    f"(Interval {interval_sec:.3f}s > Max {s1_s2_max_interval:.3f}s)"
+                )
+            else:
+                interval_reason = ""
+        else:
+            interval_reason = ""
+        reason += interval_reason
+
+        # --- Forward-Looking Contextual Penalty ---
+        # If pairing S1-S2 causes the next S2→S1 transition to be implausible, penalize it.
+        # Guardrail: only trust this check if the "next S1" peak is strong enough to be
+        # a plausible beat; otherwise it may just be noise and should not veto the pair.
+        forward_look_penalty = 0.0
+        if state.loop_idx + 2 < len(state.all_peaks):
+            next_next_peak_idx = state.all_peaks[state.loop_idx + 2]
+
+            # Use prominence for robust amplitude comparison
+            next_s1_details = get_peak_prominence_details(
+                next_next_peak_idx,
+                self.audio_envelope,
+                state.trough_indices,
+                sample_rate=self.sample_rate,
+            )
+            next_s1_prominence = next_s1_details["prominence"]
+
+            # Only apply if we have valid data
+            if s2_prominence > 1e-9 and next_s1_prominence > 1e-9:
+                noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
+
+                # Guardrail: Skip penalty if the "next S1" is too weak to be a credible beat.
+                # This prevents noise from vetoing a valid S1-S2 pair.
+                if next_s1_prominence < s2_prominence * noise_thresh:
+                    # Next peak is likely noise; skip forward-look penalty entirely.
+                    pass
+                else:
+                    # Next peak is strong enough to evaluate; apply penalty if needed.
+                    drop_ratio = next_s1_prominence / (s2_prominence + 1e-9)
+
+                    # If the following peak is substantially weaker, it suggests s2_candidate
+                    # is actually a strong S1, making this S1-S2 pairing incorrect
+                    threshold = self.params.get('forward_look_drop_threshold', 0.4)
+                    if drop_ratio < threshold:
+                        # Scale penalty by severity of the drop
+                        severity = (threshold - drop_ratio) / threshold
+                        max_pen = self.params.get('forward_look_max_penalty', 0.3)
+                        forward_look_penalty = severity * max_pen
+
+                        confidence = max(0.0, confidence - forward_look_penalty)
+                        reason += (
+                            f"\n- Penalized by Forward-Look {forward_look_penalty:.2f} "
+                            f"(S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x)"
+                        )
+
+        is_paired = confidence >= self.params['pairing_confidence_threshold']
+        reason += (
+            f"\n- Final Score: {confidence:.2f} vs Threshold "
+            f"{self.params['pairing_confidence_threshold']:.2f} -> "
+            f"{'Paired' if is_paired else 'Not Paired'}"
+        )
+        return is_paired, reason, prominence_context
+
+
+class LookaheadSkipper:
+    """
+    Encapsulates the "skip weak middle peak" logic used before standard pairing.
+
+    This component proposes an alternative S1→S2′ interpretation when a middle peak
+    is likely noise. It never mutates `AnalysisState`; instead it returns a structured
+    decision and lets the caller update state and debug records.
+    """
+
+    def __init__(
+        self,
+        audio_envelope: np.ndarray,
+        sample_rate: int,
+        params: Dict,
+        pairing_engine: PairingEngine,
+    ) -> None:
+        self.audio_envelope = audio_envelope
+        self.sample_rate = sample_rate
+        self.params = params
+        self.pairing_engine = pairing_engine
+
+    def maybe_skip(
+        self,
+        state: AnalysisState,
+        loop_idx: int,
+        pairing_ratio: float,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Returns a decision dict if lookahead wants to reinterpret a middle peak as noise.
+
+        The returned dict contains:
+            - s1_idx, middle_idx, s2_idx: indices of the three peaks
+            - reason: full pairing reason string
+            - prominence_context: raw prominence context for debug tooltips
+            - lookahead_msg: human‑readable summary of *why* the middle was skipped
+            - middle_noise_msg: explanation attached to the middle peak marked as Noise
+
+        If no lookahead skip is appropriate, returns None.
+        """
+        if not self.params.get('enable_lookahead_skipping', True):
+            return None
+
+        all_peaks = state.all_peaks
+        if loop_idx + 2 >= len(all_peaks):
+            return None
+
+        current_peak_idx = all_peaks[loop_idx]
+        next_peak_idx = all_peaks[loop_idx + 1]
+        middle_peak_idx = next_peak_idx
+        next_next_peak_idx = all_peaks[loop_idx + 2]
+
+        # Heuristic: treat the middle peak as noise if its prominence is much weaker than the S1 candidate
+        current_prom = calculate_peak_prominence(
+            current_peak_idx, self.audio_envelope, state.trough_indices
+        )
+        middle_prom = calculate_peak_prominence(
+            middle_peak_idx, self.audio_envelope, state.trough_indices
+        )
+        next_next_prom = calculate_peak_prominence(
+            next_next_peak_idx, self.audio_envelope, state.trough_indices
+        )
+        noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
+
+        bpm = state.long_term_bpm
+        intervals = calculate_bpm_intervals(bpm, self.params)
+        min_s1_s2_interval = intervals["s1_s2_min"]
+        s1_s2_max_interval = intervals["s1_s2_max"]
+
+        s2_to_next_s1_interval_sec = (next_next_peak_idx - middle_peak_idx) / self.sample_rate
+        alt_s1_s2_interval_sec = (next_next_peak_idx - current_peak_idx) / self.sample_rate
+
+        # Determine if middle is skippable based on BOTH intervals AND intensity.
+        middle_is_weak = middle_prom < current_prom * noise_thresh
+        interval_is_impossible = s2_to_next_s1_interval_sec < min_s1_s2_interval
+        next_next_is_strong = next_next_prom > middle_prom
+        alt_interval_plausible = (
+            alt_s1_s2_interval_sec >= min_s1_s2_interval
+            and alt_s1_s2_interval_sec <= s1_s2_max_interval
+        )
+
+        # --- Mode 1: interval-aware reinterpretation (impossible S2→S1 interval) ---
+        if middle_is_weak and interval_is_impossible and next_next_is_strong and alt_interval_plausible:
+            is_paired_interval, reason_interval, prominence_context_interval = self.pairing_engine.attempt_pair(
+                state, current_peak_idx, next_next_peak_idx, pairing_ratio
+            )
+
+            if is_paired_interval:
+                lookahead_msg_interval = (
+                    "LOOKAHEAD INTERVAL: Reinterpreted middle peak as noise because the implied "
+                    f"S2→S1 interval {s2_to_next_s1_interval_sec:.3f}s is below the minimum "
+                    f"{min_s1_s2_interval:.3f}s for BPM {bpm:.0f}, the alternative S1→S2′ interval "
+                    f"{alt_s1_s2_interval_sec:.3f}s is within [{min_s1_s2_interval:.3f}, "
+                    f"{s1_s2_max_interval:.3f}]s, and the middle peak is weak "
+                    f"({middle_prom:.3f} < {noise_thresh:.2f} × S1 {current_prom:.3f}) while the "
+                    f"next candidate is stronger ({next_next_prom:.3f} > {middle_prom:.3f})."
+                )
+                middle_noise_msg_interval = (
+                    "Middle peak treated as noise due to impossible S2→S1 interval "
+                    f"({s2_to_next_s1_interval_sec:.3f}s < {min_s1_s2_interval:.3f}s), with a "
+                    f"plausible alternative S1→S2′ interval ({alt_s1_s2_interval_sec:.3f}s "
+                    f"within [{min_s1_s2_interval:.3f}, {s1_s2_max_interval:.3f}]s), "
+                    f"weak prominence ({middle_prom:.3f} < {noise_thresh:.2f} × S1 "
+                    f"{current_prom:.3f}), and a stronger following candidate "
+                    f"({next_next_prom:.3f} > {middle_prom:.3f})."
+                )
+
+                return {
+                    "s1_idx": current_peak_idx,
+                    "middle_idx": middle_peak_idx,
+                    "s2_idx": next_next_peak_idx,
+                    "reason": reason_interval,
+                    "prominence_context": prominence_context_interval,
+                    "lookahead_msg": lookahead_msg_interval,
+                    "middle_noise_msg": middle_noise_msg_interval,
+                }
+
+        # --- Mode 2: simpler prominence‑based reinterpretation ---
+        if (
+            middle_prom < current_prom * noise_thresh
+            and middle_prom < next_next_prom
+            and alt_interval_plausible
+        ):
+            is_paired_skip, reason_skip, prominence_context_skip = self.pairing_engine.attempt_pair(
+                state, current_peak_idx, next_next_peak_idx, pairing_ratio
+            )
+
+            if is_paired_skip:
+                lookahead_msg = (
+                    "LOOKAHEAD SUCCESS: Skipped intermediate weak peak "
+                    f"(middle prominence {middle_prom:.3f} < {noise_thresh:.2f} × "
+                    f"S1 prominence {current_prom:.3f} and next candidate prominence "
+                    f"{next_next_prom:.3f} > middle) with plausible S1→S2′ interval "
+                    f"{alt_s1_s2_interval_sec:.3f}s within "
+                    f"[{min_s1_s2_interval:.3f}, {s1_s2_max_interval:.3f}]s"
+                )
+                middle_noise_msg = (
+                    "Middle peak treated as noise due to weak prominence "
+                    f"({middle_prom:.3f} < {noise_thresh:.2f} × "
+                    f"S1 prominence {current_prom:.3f}) and the following "
+                    f"candidate is stronger (next prominence {next_next_prom:.3f})."
+                )
+
+                return {
+                    "s1_idx": current_peak_idx,
+                    "middle_idx": middle_peak_idx,
+                    "s2_idx": next_next_peak_idx,
+                    "reason": reason_skip,
+                    "prominence_context": prominence_context_skip,
+                    "lookahead_msg": lookahead_msg,
+                    "middle_noise_msg": middle_noise_msg,
+                }
+
+        return None
+
+
+def _build_prominence_section(prominence_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Wraps prominence context in a debug section structure for tooltips/logs."""
+    return {"type": "prominence", "details": prominence_context}
+
+
+def _get_recent_s1_prominences_for_state(
+    state: AnalysisState,
+    audio_envelope: np.ndarray,
+    trough_indices: np.ndarray,
+) -> List[float]:
+    """
+    Helper to compute recent validated S1 prominences from an AnalysisState instance.
+
+    Kept outside of PeakClassifier so it can be reused by PairingEngine without
+    giving it write access to classifier internals.
+    """
+    recent_s1_types = [
+        state.beat_debug_info.get(idx, {}).get("peak_type")
+        for idx in state.candidate_beats[-50:]
+    ]
+    return [
+        calculate_peak_prominence(idx, audio_envelope, trough_indices)
+        for idx, typ in zip(state.candidate_beats[-50:], recent_s1_types)
+        if typ in (PeakType.S1_PAIRED.value, PeakType.LONE_S1_VALIDATED.value)
+    ]
+
+
 # --- Core Classes for Analysis Pipeline ---
 class PeakClassifier:
     """
@@ -248,6 +655,14 @@ class PeakClassifier:
         self.params = params
         self.peak_bpm_time_sec = peak_bpm_time_sec
         self.recovery_end_time_sec = recovery_end_time_sec
+
+        # Helper components that encapsulate specific decision logic.
+        self.pairing_engine = PairingEngine(
+            audio_envelope, sample_rate, params, peak_bpm_time_sec, recovery_end_time_sec
+        )
+        self.lookahead_skipper = LookaheadSkipper(
+            audio_envelope, sample_rate, params, self.pairing_engine
+        )
 
         self.state = self._initialize_state(
             start_bpm_hint, precomputed_noise_floor, precomputed_troughs
@@ -389,203 +804,69 @@ class PeakClassifier:
         next_peak_idx = all_peaks[loop_idx + 1]
 
         # --- LOOKAHEAD: optionally skip a weak middle peak between a strong S1 and S2 ---
-        # Requires BOTH:
-        #   1) The "middle" peak is implausible as S2 (too weak and/or creates impossible S2→S1 interval), and
-        #   2) The alternative S1→S2′ interval (current → next_next) is itself rhythmically plausible.
-        if self.params.get('enable_lookahead_skipping', True) and loop_idx + 2 < len(all_peaks):
-            middle_peak_idx = next_peak_idx
-            next_next_peak_idx = all_peaks[loop_idx + 2]
+        decision = self.lookahead_skipper.maybe_skip(self.state, loop_idx, pairing_ratio)
+        if decision is not None:
+            s1_idx = decision["s1_idx"]
+            middle_idx = decision["middle_idx"]
+            s2_idx = decision["s2_idx"]
+            reason = decision["reason"]
+            prominence_context = decision["prominence_context"]
+            lookahead_msg = decision["lookahead_msg"]
+            middle_noise_msg = decision["middle_noise_msg"]
 
-            # Heuristic: treat the middle peak as noise if its prominence is much weaker than the S1 candidate
-            current_prom = calculate_peak_prominence(
-                current_peak_idx, self.audio_envelope, self.state.trough_indices
-            )
-            middle_prom = calculate_peak_prominence(
-                middle_peak_idx, self.audio_envelope, self.state.trough_indices
-            )
-            next_next_prom = calculate_peak_prominence(
-                next_next_peak_idx, self.audio_envelope, self.state.trough_indices
-            )
-            noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
+            pairing_lines = [
+                line.strip().lstrip('- ')
+                for line in reason.strip().split("\n")
+                if line.strip()
+            ]
 
-            # --- Interval-aware forward look ---
-            # In addition to prominence, also check whether accepting the middle peak as S2
-            # would force an impossible S2→S1 interval to the following peak.
-            #
-            # If the interval from middle_peak_idx (as S2) to next_next_peak_idx (as S1) is
-            # shorter than the existing minimum S1-S2 interval constraint, then
-            #   [current_peak_idx] = S1, [middle_peak_idx] = Noise, [next_next_peak_idx] = S2
-            # is more physiologically plausible than treating the middle peak as S2.
-            bpm = self.state.long_term_bpm
-            intervals = calculate_bpm_intervals(bpm, self.params)
-            min_s1_s2_interval = intervals["s1_s2_min"]
-            s1_s2_max_interval = intervals["s1_s2_max"]
+            prominence_section = _build_prominence_section(prominence_context)
 
-            s2_to_next_s1_interval_sec = (next_next_peak_idx - middle_peak_idx) / self.sample_rate
-            alt_s1_s2_interval_sec = (next_next_peak_idx - current_peak_idx) / self.sample_rate
+            s1_sections = [
+                {"type": "lookahead", "text": lookahead_msg},
+                {"type": "pairing", "lines": pairing_lines, "success": True},
+                prominence_section,
+            ]
+            s2_sections = [
+                {"type": "lookahead", "text": lookahead_msg},
+                {"type": "pairing", "lines": pairing_lines, "success": True},
+                prominence_section,
+            ]
 
-            # Determine if middle is skippable based on BOTH intervals AND intensity.
-            middle_is_weak = middle_prom < current_prom * noise_thresh
-            interval_is_impossible = s2_to_next_s1_interval_sec < min_s1_s2_interval
-            next_next_is_strong = next_next_prom > middle_prom
-            alt_interval_plausible = (
-                alt_s1_s2_interval_sec >= min_s1_s2_interval
-                and alt_s1_s2_interval_sec <= s1_s2_max_interval
-            )
+            self.state.candidate_beats.append(s1_idx)
+            self.state.beat_debug_info[s1_idx] = {
+                "peak_type": PeakType.S1_PAIRED.value,
+                "sections": s1_sections,
+            }
 
-            if middle_is_weak and interval_is_impossible and next_next_is_strong and alt_interval_plausible:
-                # Try pairing current_peak_idx + next_next_peak_idx instead, treating the middle as noise.
-                is_paired_interval, reason_interval, prominence_context_interval = self._attempt_s1_s2_pairing(
-                    current_peak_idx, next_next_peak_idx, pairing_ratio
-                )
+            original_middle_debug = self.state.beat_debug_info.get(middle_idx)
+            self.state.beat_debug_info[middle_idx] = {
+                "peak_type": PeakType.NOISE.value,
+                "sections": [
+                    {
+                        "type": "lookahead",
+                        "text": middle_noise_msg,
+                    },
+                    {
+                        "type": "original",
+                        "original_debug": original_middle_debug,
+                    },
+                ],
+            }
 
-                if is_paired_interval:
-                    pairing_lines_interval = [
-                        line.strip().lstrip('- ')
-                        for line in reason_interval.strip().split("\n")
-                        if line.strip()
-                    ]
+            self.state.beat_debug_info[s2_idx] = {
+                "peak_type": PeakType.S2_PAIRED.value,
+                "sections": s2_sections,
+            }
 
-                    lookahead_msg_interval = (
-                        "LOOKAHEAD INTERVAL: Reinterpreted middle peak as noise because the implied "
-                        f"S2→S1 interval {s2_to_next_s1_interval_sec:.3f}s is below the minimum "
-                        f"{min_s1_s2_interval:.3f}s for BPM {bpm:.0f}, the alternative S1→S2′ interval "
-                        f"{alt_s1_s2_interval_sec:.3f}s is within [{min_s1_s2_interval:.3f}, "
-                        f"{s1_s2_max_interval:.3f}]s, and the middle peak is weak "
-                        f"({middle_prom:.3f} < {noise_thresh:.2f} × S1 {current_prom:.3f}) while the "
-                        f"next candidate is stronger ({next_next_prom:.3f} > {middle_prom:.3f})."
-                    )
-
-                    prominence_section_interval = self._build_prominence_section(prominence_context_interval)
-
-                    s1_sections_interval = [
-                        {"type": "lookahead", "text": lookahead_msg_interval},
-                        {"type": "pairing", "lines": pairing_lines_interval, "success": True},
-                        prominence_section_interval,
-                    ]
-                    s2_sections_interval = [
-                        {"type": "lookahead", "text": lookahead_msg_interval},
-                        {"type": "pairing", "lines": pairing_lines_interval, "success": True},
-                        prominence_section_interval,
-                    ]
-
-                    self.state.candidate_beats.append(current_peak_idx)
-                    self.state.beat_debug_info[current_peak_idx] = {
-                        "peak_type": PeakType.S1_PAIRED.value,
-                        "sections": s1_sections_interval,
-                    }
-
-                    original_middle_debug_interval = self.state.beat_debug_info.get(middle_peak_idx)
-                    self.state.beat_debug_info[middle_peak_idx] = {
-                        "peak_type": PeakType.NOISE.value,
-                        "sections": [
-                            {
-                                "type": "lookahead",
-                                "text": (
-                                    "Middle peak treated as noise due to impossible S2→S1 interval "
-                                    f"({s2_to_next_s1_interval_sec:.3f}s < {min_s1_s2_interval:.3f}s), with a "
-                                    f"plausible alternative S1→S2′ interval ({alt_s1_s2_interval_sec:.3f}s "
-                                    f"within [{min_s1_s2_interval:.3f}, {s1_s2_max_interval:.3f}]s), "
-                                    f"weak prominence ({middle_prom:.3f} < {noise_thresh:.2f} × S1 "
-                                    f"{current_prom:.3f}), and a stronger following candidate "
-                                    f"({next_next_prom:.3f} > {middle_prom:.3f})."
-                                ),
-                            },
-                            {
-                                "type": "original",
-                                "original_debug": original_middle_debug_interval,
-                            },
-                        ],
-                    }
-
-                    self.state.beat_debug_info[next_next_peak_idx] = {
-                        "peak_type": PeakType.S2_PAIRED.value,
-                        "sections": s2_sections_interval,
-                    }
-
-                    self.state.consecutive_rr_rejections = 0
-                    # Skip the S1, middle noise, and S2 peaks
-                    self.state.loop_idx += 3
-                    return
-
-            if (
-                middle_prom < current_prom * noise_thresh
-                and middle_prom < next_next_prom
-                and alt_interval_plausible
-            ):
-                # Try pairing current + next_next (skip the middle)
-                is_paired_skip, reason_skip, prominence_context_skip = self._attempt_s1_s2_pairing(
-                    current_peak_idx, next_next_peak_idx, pairing_ratio
-                )
-
-                if is_paired_skip:
-                    # Build a shared pairing section from the skip reason
-                    pairing_lines = [
-                        line.strip().lstrip('- ')
-                        for line in reason_skip.strip().split("\n")
-                        if line.strip()
-                    ]
-                    lookahead_msg = (
-                        "LOOKAHEAD SUCCESS: Skipped intermediate weak peak "
-                        f"(middle prominence {middle_prom:.3f} < {noise_thresh:.2f} × "
-                        f"S1 prominence {current_prom:.3f} and next candidate prominence "
-                        f"{next_next_prom:.3f} > middle) with plausible S1→S2′ interval "
-                        f"{alt_s1_s2_interval_sec:.3f}s within "
-                        f"[{min_s1_s2_interval:.3f}, {s1_s2_max_interval:.3f}]s"
-                    )
-
-                    prominence_section = self._build_prominence_section(prominence_context_skip)
-
-                    s1_sections = [
-                        {"type": "lookahead", "text": lookahead_msg},
-                        {"type": "pairing", "lines": pairing_lines, "success": True},
-                        prominence_section,
-                    ]
-                    s2_sections = [
-                        {"type": "lookahead", "text": lookahead_msg},
-                        {"type": "pairing", "lines": pairing_lines, "success": True},
-                        prominence_section,
-                    ]
-
-                    self.state.candidate_beats.append(current_peak_idx)
-                    self.state.beat_debug_info[current_peak_idx] = {
-                        "peak_type": PeakType.S1_PAIRED.value,
-                        "sections": s1_sections,
-                    }
-
-                    original_middle_debug = self.state.beat_debug_info.get(middle_peak_idx)
-                    self.state.beat_debug_info[middle_peak_idx] = {
-                        "peak_type": PeakType.NOISE.value,
-                        "sections": [
-                            {
-                                "type": "lookahead",
-                                "text": (
-                                    "Middle peak treated as noise due to weak prominence "
-                                    f"({middle_prom:.3f} < {noise_thresh:.2f} × "
-                                    f"S1 prominence {current_prom:.3f}) and the following "
-                                    f"candidate is stronger (next prominence {next_next_prom:.3f})."
-                                ),
-                            },
-                            {
-                                "type": "original",
-                                "original_debug": original_middle_debug,
-                            },
-                        ],
-                    }
-
-                    self.state.beat_debug_info[next_next_peak_idx] = {
-                        "peak_type": PeakType.S2_PAIRED.value,
-                        "sections": s2_sections,
-                    }
-
-                    self.state.consecutive_rr_rejections = 0
-                    # Skip the S1, middle noise, and S2 peaks
-                    self.state.loop_idx += 3
-                    return
+            self.state.consecutive_rr_rejections = 0
+            # Skip the S1, middle noise, and S2 peaks
+            self.state.loop_idx += 3
+            return
 
         # --- Standard pairing attempt ---
-        is_paired, reason, prominence_context = self._attempt_s1_s2_pairing(
-            current_peak_idx, next_peak_idx, pairing_ratio
+        is_paired, reason, prominence_context = self.pairing_engine.attempt_pair(
+            self.state, current_peak_idx, next_peak_idx, pairing_ratio
         )
 
         if is_paired:
@@ -596,7 +877,7 @@ class PeakClassifier:
                 if line.strip()
             ]
             sections = [{"type": "pairing", "lines": pairing_lines, "success": True}]
-            sections.append(self._build_prominence_section(prominence_context))
+            sections.append(_build_prominence_section(prominence_context))
             self.state.beat_debug_info[current_peak_idx] = {
                 "peak_type": PeakType.S1_PAIRED.value,
                 "sections": sections,
@@ -638,200 +919,6 @@ class PeakClassifier:
         peaks, _ = find_peaks(self.audio_envelope, height=height_threshold, prominence=prominence_thresh, distance=min_peak_dist_samples)
         logging.info(f"Found {len(peaks)} raw peaks using dynamic height threshold.")
         return peaks
-
-    def _get_recent_s1_prominences(self) -> List[float]:
-        """Returns prominences of recent validated S1 peaks for reference baseline."""
-        recent_s1_types = [
-            self.state.beat_debug_info.get(idx, {}).get("peak_type") 
-            for idx in self.state.candidate_beats[-50:]  # Last 50 beats
-        ]
-        return [
-            calculate_peak_prominence(idx, self.audio_envelope, self.state.trough_indices)
-            for idx, typ in zip(self.state.candidate_beats[-50:], recent_s1_types)
-            if typ in (PeakType.S1_PAIRED.value, PeakType.LONE_S1_VALIDATED.value)
-        ]
-
-    def _attempt_s1_s2_pairing(
-        self, s1_candidate_idx: int, s2_candidate_idx: int, pairing_ratio: float
-    ) -> Tuple[bool, str, Dict[str, Any]]:
-        """Calculates the confidence score for pairing two candidate peaks."""
-        interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
-        bpm = self.state.long_term_bpm
-
-        # Minimum S1-S2 as fraction of RR interval (adapts to current BPM)
-        intervals = calculate_bpm_intervals(bpm, self.params)
-        min_s1_s2_interval = intervals["s1_s2_min"]
-        
-        if interval_sec < min_s1_s2_interval:
-            # Calculate implied BPM for debugging
-            # Assuming S2-S1 is at least as long as S1-S2 (conservative estimate)
-            implied_total_cycle = interval_sec * 2.0  # S1-S2 + S2-S1
-            implied_bpm = 60.0 / implied_total_cycle if implied_total_cycle > 0 else float('inf')
-            
-            debug_msg = (
-                f"Impossible: S1-S2 interval {interval_sec:.3f}s < min {min_s1_s2_interval:.3f}s "
-                f"(implies {implied_bpm:.0f} BPM vs assumed {bpm:.0f} BPM)"
-            )
-            return False, debug_msg, {}
-
-        # --- Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
-        base_confidence = 0.60
-
-        reason = f"Base Conf: {base_confidence:.2f}"
-
-        # --- Contractility / prominence-based adjustment (S1 vs S2) ---
-        s1_details = get_peak_prominence_details(
-            s1_candidate_idx,
-            self.audio_envelope,
-            self.state.trough_indices,
-            sample_rate=self.sample_rate,
-        )
-        s2_details = get_peak_prominence_details(
-            s2_candidate_idx,
-            self.audio_envelope,
-            self.state.trough_indices,
-            sample_rate=self.sample_rate,
-        )
-        s1_prominence = s1_details["prominence"]
-        s2_prominence = s2_details["prominence"]
-
-        shared_s1_right_s2_left = (
-            s1_details.get("right_trough_idx") is not None
-            and s2_details.get("left_trough_idx") is not None
-            and s1_details["right_trough_idx"] == s2_details["left_trough_idx"]
-        )
-        prominence_context = {
-            "s1": s1_details,
-            "s2": s2_details,
-            "shared_s1_right_s2_left": shared_s1_right_s2_left,
-        }
-        # --- Contractility model based on S1/S2 prominence ratio ---
-        confidence, contractility_reason = adjust_confidence_with_contractility(
-            base_confidence,
-            s1_prominence,
-            s2_prominence,
-            bpm,
-            self.params,
-        )
-        reason += contractility_reason
-
-        # --- Absolute S1 prominence guardrail (shared with Lone S1 logic) ---
-        # Protect against tiny noise bumps being interpreted as heartbeats, a "high contractility" S1/S2 pair.
-        # We compare the current S1 prominence against a recent high-quality S1 baseline.
-        recent_prominences = self._get_recent_s1_prominences()
-        if len(recent_prominences) >= 5:
-            reference_prominence = np.percentile(recent_prominences, 80)  # Top 20% as adaptive reference
-            if reference_prominence > 0:
-                # Re‑use Lone S1 ratio setting for now to keep behavior consistent
-                min_ratio = self.params.get(
-                    "paired_s1_min_prominence_ratio",
-                    self.params.get("lone_s1_min_prominence_ratio", 0.4), # 0.4 is a value that seems to work well, but it's a magic number
-                )
-                prominence_ratio = s1_prominence / (reference_prominence + 1e-9)
-
-                if prominence_ratio < min_ratio:
-                    # Linear penalty, mirroring Lone S1 behavior:
-                    #   at ratio == min_ratio -> no penalty
-                    #   at ratio  == 0       -> full veto
-                    penalty_factor = float(np.clip(prominence_ratio / (min_ratio + 1e-9), 0.0, 1.0))
-                    confidence *= penalty_factor
-                    reason += (
-                        f"\n- Absolute S1 Prominence Penalty: {s1_prominence:.3f} < {min_ratio:.1f}× reference "
-                        f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
-                    )
-
-        # --- Other adjustments (stability, ratio history, etc.) ---
-        confidence, other_reason = _apply_other_pairing_adjustments(
-            confidence,
-            s1_candidate_idx,
-            s2_candidate_idx,
-            self.audio_envelope,
-            self.state.dynamic_noise_floor,
-            bpm,
-            pairing_ratio,
-            self.params,
-            self.sample_rate,
-            self.peak_bpm_time_sec,
-            self.recovery_end_time_sec,
-            len(self.state.candidate_beats),
-        )
-        reason += other_reason
-
-        s1_s2_max_interval = intervals["s1_s2_max"]
-        
-        # Apply interval penalty if the S1-S2 interval is too long
-        if self.params.get("enable_interval_penalty", True) and interval_sec > s1_s2_max_interval:
-            start_factor = self.params.get("interval_penalty_start_factor", 1.0)
-            full_factor = self.params.get("interval_penalty_full_factor", 1.4)
-            max_penalty = self.params.get("interval_max_penalty", 0.75)
-            
-            penalty_zone_start = s1_s2_max_interval * start_factor
-            penalty_zone_end = s1_s2_max_interval * full_factor
-            
-            if interval_sec > penalty_zone_start:
-                exceedance_scale = (interval_sec - penalty_zone_start) / (penalty_zone_end - penalty_zone_start + 1e-9)
-                exceedance_scale = np.clip(exceedance_scale, 0, 1)
-                penalty_amount = exceedance_scale * max_penalty
-                confidence = max(0, confidence - penalty_amount)
-                interval_reason = f"\n- Interval penalty by {penalty_amount:.2f} (Interval {interval_sec:.3f}s > Max {s1_s2_max_interval:.3f}s)"
-            else:
-                interval_reason = ""
-        else:
-            interval_reason = ""
-        reason += interval_reason
-
-        # --- Forward-Looking Contextual Penalty ---
-        # If pairing S1-S2 causes the next S2→S1 transition to be implausable, penalize it.
-        # Guardrail: only trust this check if the "next S1" peak is strong enough to be
-        # a plausible beat; otherwise it may just be noise and should not veto the pair.
-        forward_look_penalty = 0.0
-        if self.state.loop_idx + 2 < len(self.state.all_peaks):
-            next_next_peak_idx = self.state.all_peaks[self.state.loop_idx + 2]
-
-            # Use prominence for robust amplitude comparison
-            next_s1_details = get_peak_prominence_details(
-                next_next_peak_idx,
-                self.audio_envelope,
-                self.state.trough_indices,
-                sample_rate=self.sample_rate,
-            )
-            next_s1_prominence = next_s1_details["prominence"]
-
-            # Only apply if we have valid data
-            if s2_prominence > 1e-9 and next_s1_prominence > 1e-9:
-                noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
-
-                # Guardrail: Skip penalty if the "next S1" is too weak to be a credible beat.
-                # This prevents noise from vetoing a valid S1-S2 pair.
-                if next_s1_prominence < s2_prominence * noise_thresh:
-                    # Next peak is likely noise; skip forward-look penalty entirely.
-                    pass
-                else:
-                    # Next peak is strong enough to evaluate; apply penalty if needed.
-                    drop_ratio = next_s1_prominence / (s2_prominence + 1e-9)
-
-                    # If the following peak is substantially weaker, it suggests s2_candidate
-                    # is actually a strong S1, making this S1-S2 pairing incorrect
-                    threshold = self.params.get('forward_look_drop_threshold', 0.4)
-                    if drop_ratio < threshold:
-                        # Scale penalty by severity of the drop
-                        severity = (threshold - drop_ratio) / threshold
-                        max_pen = self.params.get('forward_look_max_penalty', 0.3)
-                        forward_look_penalty = severity * max_pen
-
-                        confidence = max(0.0, confidence - forward_look_penalty)
-                        reason += (
-                            f"\n- Penalized by Forward-Look {forward_look_penalty:.2f} "
-                            f"(S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x)"
-                        )
-
-        is_paired = confidence >= self.params['pairing_confidence_threshold']
-        reason += f"\n- Final Score: {confidence:.2f} vs Threshold {self.params['pairing_confidence_threshold']:.2f} -> {'Paired' if is_paired else 'Not Paired'}"
-        return is_paired, reason, prominence_context
-
-    def _build_prominence_section(self, prominence_context: Dict[str, Any]) -> Dict[str, Any]:
-        """Encapsulates the prominence context into a debug section."""
-        return {"type": "prominence", "details": prominence_context}
 
     def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
         """Validates if an unpaired peak is a Lone S1 or Noise."""
