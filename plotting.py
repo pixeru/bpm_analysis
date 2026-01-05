@@ -5,7 +5,7 @@ import csv
 import base64
 import shutil
 import io
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -19,8 +19,6 @@ import matplotlib
 matplotlib.use("Agg")  # Use non-interactive backend for spectrogram generation
 import matplotlib.pyplot as plt
 
-from bpm_analysis import _get_peak_type_from_debug, format_debug_entry, PeakType
-
 
 class Plotter:
     """Handles the creation and generation of the final analysis plot."""
@@ -32,6 +30,9 @@ class Plotter:
         sample_rate: int,
         output_directory: str,
         source_audio_path: Optional[str] = None,
+        peak_type_helper: Optional[Callable[[Any], str]] = None,
+        format_debug_entry_func: Optional[Callable[[Dict], List[str]]] = None,
+        peak_type_cls: Optional[Any] = None,
     ):
         self.file_name = file_name
         self.params = params
@@ -44,6 +45,13 @@ class Plotter:
         self.spectrogram_base64: Optional[str] = None
         self.bpm_axis_center: float = float(params.get("default_bpm_axis_center", 125))
         self.bpm_axis_span: float = float(params.get("bpm_axis_span", 150))
+
+        # Debug formatting helpers are injected from the analysis module to avoid
+        # importing bpm_analysis here (which would create a circular dependency).
+        # If they are not provided, we fall back to no-op implementations.
+        self._get_peak_type_from_debug: Callable[[Any], str] = peak_type_helper or (lambda entry: "")
+        self._format_debug_entry: Callable[[Dict], List[str]] = format_debug_entry_func or (lambda entry: [])
+        self._PeakType = peak_type_cls
 
     def _generate_spectrogram_image(self, audio_path: str) -> Optional[str]:
         """
@@ -391,13 +399,13 @@ class Plotter:
         for peak_idx, debug_value in debug_info.items():
             hover_text_parts = []
 
-            peak_type = _get_peak_type_from_debug(debug_value) or "Unknown Peak"
+            peak_type = self._get_peak_type_from_debug(debug_value) or "Unknown Peak"
             hover_text_parts.append(f"<b>Type:</b> {peak_type}")
             hover_text_parts.append(f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s")
             hover_text_parts.append(f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}")
             hover_text_parts.append("---")
 
-            formatted_lines = format_debug_entry(debug_value)
+            formatted_lines = self._format_debug_entry(debug_value)
             if formatted_lines:
                 sub_text = "<br>".join(l.replace("\t", "&nbsp;&nbsp;&nbsp;&nbsp;") for l in formatted_lines)
                 hover_text_parts.append(sub_text)
@@ -405,10 +413,10 @@ class Plotter:
             full_hover_text = "<br>".join(hover_text_parts)
             classified_indices.add(peak_idx)
 
-            if PeakType.is_s1(peak_type):
+            if self._PeakType is not None and self._PeakType.is_s1(peak_type):
                 s1_peaks["indices"].append(peak_idx)
                 s1_peaks["customdata"].append(full_hover_text)
-            elif PeakType.is_s2(peak_type):
+            elif self._PeakType is not None and self._PeakType.is_s2(peak_type):
                 s2_peaks["indices"].append(peak_idx)
                 s2_peaks["customdata"].append(full_hover_text)
             else:

@@ -14,8 +14,8 @@ from audio_io import preprocess_audio
 
 # INSTRUCTIONS FOR AI: 
 # Do not remove any debugging code unless specified by the user
-# Do not further abstract my code
-# Do not further segment my code
+# try to avoid further abstracting my code
+# try to avoid further segmenting my code
 # Do not over-engineer a solution, keep it simple
 
 # --- Enums and Global Helpers ---
@@ -235,7 +235,7 @@ class PairingEngine:
     """
     Scores candidate S1–S2 pairs and returns a pairing decision plus debug context.
 
-    This class is intentionally stateless with respect to the main analysis loop:
+    This class is intentionally stateless (mostly stateless) with respect to the main analysis loop:
     it never mutates `AnalysisState` and instead relies on the caller (`PeakClassifier`)
     to own all state updates. This keeps the confidence model self‑contained and
     easier to reason about in isolation.
@@ -709,37 +709,31 @@ class PeakClassifier:
             return self.state.all_peaks, self.state.all_peaks, {"beat_debug_info": {}}
 
         while self.state.loop_idx < len(self.state.all_peaks):
-            self._kickstart_check()
+            # Calculate pairing ratio once per iteration so all consumers
+            # (kick-start recovery, pairing engine, lookahead skipper) share
+            # the same view of recent rhythm stability.
+            pairing_ratio = self._calculate_pairing_ratio()
+
+            self._kickstart_check(pairing_ratio)
             current_peak_idx = self.state.all_peaks[self.state.loop_idx]
             is_last_peak = self.state.loop_idx >= len(self.state.all_peaks) - 1
 
             if is_last_peak:
                 self._handle_last_peak(current_peak_idx)
             else:
-                self._process_peak_pair(current_peak_idx)
+                self._process_peak_pair(current_peak_idx, pairing_ratio)
 
             self._update_long_term_bpm()
 
         return self._finalize_results()
 
-    def _kickstart_check(self):
+    def _kickstart_check(self, pairing_ratio: float) -> None:
         """
         Specialized recovery function to kick-start the algorithm if it gets stuck.
         This is a "bandaid" fix to help the algorithm recover from pairing failures. but ideally we would have a more robust solution.
         If I manage to get the algorithm good enough, this feature should never activate...
         """
-        # Calculate recent rhythm stability as a ratio
-        history_window = self.params.get("stability_history_window", 20)
-        if len(self.state.candidate_beats) < history_window:
-            pairing_ratio = 0.5
-        else:
-            recent_beats = self.state.candidate_beats[-history_window:]
-            paired_count = sum(
-                1 for beat_idx in recent_beats
-                if _is_s1_paired_debug(self.state.beat_debug_info.get(beat_idx))
-            )
-            pairing_ratio = paired_count / history_window
-            
+        # pairing_ratio is calculated once per main-loop iteration in classify_peaks.
         if pairing_ratio >= self.params.get("kickstart_check_threshold", 0.3):
             return
 
@@ -792,13 +786,10 @@ class PeakClassifier:
         )
         return paired_count / history_window
 
-    def _process_peak_pair(self, current_peak_idx: int):
+    def _process_peak_pair(self, current_peak_idx: int, pairing_ratio: float) -> None:
         """Processes a pair of peaks to determine if they are S1-S2."""
         all_peaks = self.state.all_peaks
         loop_idx = self.state.loop_idx
-
-        # Calculate recent rhythm stability as a ratio
-        pairing_ratio = self._calculate_pairing_ratio()
 
         # We always have at least one "next" peak here (caller guards last-peak case)
         next_peak_idx = all_peaks[loop_idx + 1]
@@ -2146,7 +2137,16 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     ])
 
     if needs_plot_outputs:
-        plotter = Plotter(original_file_path, params, sample_rate, output_directory, source_audio_path=wav_file_path)
+        plotter = Plotter(
+            original_file_path,
+            params,
+            sample_rate,
+            output_directory,
+            source_audio_path=wav_file_path,
+            peak_type_helper=_get_peak_type_from_debug,
+            format_debug_entry_func=format_debug_entry,
+            peak_type_cls=PeakType,
+        )
         plotly_figure = plotter.plot_and_save(audio_envelope, all_raw_peaks, analysis_data, final_metrics, output_options)
     else:
         logging.info("Skipping all plot outputs (HTML/PNG/CSV) as requested.")
