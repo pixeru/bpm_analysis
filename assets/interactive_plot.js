@@ -1,0 +1,1425 @@
+// assets/interactive_plot.js
+// JavaScript logic for the interactive BPM analysis HTML output.
+// This script expects a global configuration object:
+//   window.BPM_ANALYZER_CONFIG = {
+//       totalDuration: number,
+//       spectrogramSources: { original: string, filtered: string },
+//       spectrogramAvailable: { original: boolean, filtered: boolean },
+//       audioSources: { original: string, filtered: string },
+//       audioLabels: { original: string, filtered: string }
+//   };
+
+(function () {
+  const cfg = window.BPM_ANALYZER_CONFIG || {};
+  const TOTAL_DURATION = cfg.totalDuration || 0;
+  const EPOCH = new Date(0);
+  const SPECTROGRAM_SOURCES = cfg.spectrogramSources || {};
+  const SPECTROGRAM_AVAILABLE = cfg.spectrogramAvailable || {};
+  const AUDIO_SOURCES = cfg.audioSources || {};
+  const AUDIO_LABELS = cfg.audioLabels || {};
+
+  // DOM Elements
+  const audio = document.getElementById("audio-player");
+  const playBtn = document.getElementById("play-btn");
+  const stopBtn = document.getElementById("stop-btn");
+  const syncBtn = document.getElementById("sync-btn");
+  const spectrogramBtn = document.getElementById("spectrogram-btn");
+  const spectrogramOpacity = document.getElementById("spectrogram-opacity");
+  const spectrogramContainer = document.getElementById("spectrogram-container");
+  const spectrogramImage = document.getElementById("spectrogram-image");
+  const volumeSlider = document.getElementById("volume-slider");
+  const currentTimeEl = document.getElementById("current-time");
+  const timelineScrubber = document.getElementById("timeline-scrubber");
+  const timelineProgress = document.getElementById("timeline-progress");
+  const timelinePlayhead = document.getElementById("timeline-playhead");
+  const timelineTicks = document.getElementById("timeline-ticks");
+  const chartPlayhead = document.getElementById("chart-playhead");
+  const chartContainer = document.getElementById("chart-container");
+  const audioFileNameEl = document.getElementById("audio-file-name");
+  const audioSourceSelect = document.getElementById("audio-source-select");
+  const axisGridButtons = document.querySelectorAll("[data-grid-axis]");
+  const labelTypeSelect = document.getElementById("label-type-select");
+  const applyLabelBtn = document.getElementById("apply-label-btn");
+  const downloadLabelsBtn = document.getElementById("download-labels-btn");
+  const importLabelsBtn = document.getElementById("import-labels-btn");
+  const importLabelsInput = document.getElementById("import-labels-input");
+
+  const DEFAULT_AUDIO_KEY = "original";
+  let currentAudioKey = DEFAULT_AUDIO_KEY;
+  if (audioFileNameEl) {
+    audioFileNameEl.dataset.defaultName = audioFileNameEl.textContent || "";
+  }
+
+  let isPlaying = false;
+  let isSynced = true;
+  let isSpectrogramVisible = false;
+  let plotlyGraphDiv = null;
+  let xAxisRange = null;
+  let fullXAxisRange = null; // Store the full x-axis range for spectrogram positioning
+  // Editable peak labels (one entry per plotted peak)
+  let editablePeaks = [];
+  // Overlay Plotly traces for manual labels
+  const manualLabelTraceIndices = { S1: null, S2: null, Noise: null };
+
+  const logAudioSource = () => {
+    if (!audio) return;
+    console.log("🔊 Audio source path:", audio.src);
+    console.log("📁 Expected audio file location relative to HTML:", audio.src);
+  };
+
+  const updateSpectrogramSourceForCurrentAudio = () => {
+    if (!spectrogramImage) return;
+    const src = SPECTROGRAM_SOURCES[currentAudioKey];
+    if (src) {
+      spectrogramImage.src = src;
+    }
+  };
+
+  const updateAudioSource = (key, resumePlayback = false) => {
+    if (!audio) return;
+    const candidateKey = key && AUDIO_SOURCES[key] ? key : DEFAULT_AUDIO_KEY;
+    const src = AUDIO_SOURCES[candidateKey];
+
+    if (!src) {
+      console.warn("🔇 Audio source unavailable for", key);
+      return;
+    }
+
+    currentAudioKey = candidateKey;
+    audio.src = src;
+    if (audioFileNameEl) {
+      audioFileNameEl.textContent =
+        AUDIO_LABELS[candidateKey] || audioFileNameEl.dataset.defaultName || "";
+      audioFileNameEl.title = audioFileNameEl.textContent;
+    }
+    if (audioSourceSelect) {
+      audioSourceSelect.value = candidateKey;
+    }
+    audio.load();
+    logAudioSource();
+    console.log(
+      "🔁 Switched audio to",
+      AUDIO_LABELS[candidateKey] || candidateKey,
+      src
+    );
+
+    // If spectrogram is visible, update it to match the current audio source
+    if (isSpectrogramVisible) {
+      if (SPECTROGRAM_AVAILABLE[currentAudioKey] && SPECTROGRAM_SOURCES[currentAudioKey]) {
+        updateSpectrogramSourceForCurrentAudio();
+        updateSpectrogramPosition();
+      } else if (spectrogramImage && spectrogramBtn) {
+        // Hide spectrogram if not available for this source
+        spectrogramImage.classList.add("hidden");
+        spectrogramBtn.classList.remove("active");
+        isSpectrogramVisible = false;
+        console.warn(
+          "No spectrogram available for audio source:",
+          currentAudioKey
+        );
+      }
+    }
+    if (resumePlayback && isPlaying) {
+      audio.play().catch((e) => console.log("Audio play error:", e));
+    }
+  };
+
+  if (audioSourceSelect) {
+    audioSourceSelect.addEventListener("change", (event) => {
+      updateAudioSource(event.target.value, isPlaying);
+    });
+  }
+
+  updateAudioSource(audioSourceSelect ? audioSourceSelect.value : DEFAULT_AUDIO_KEY);
+
+  // Format time as MM:SS.mmm (seconds)
+  function formatTime(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 1000);
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(
+      2,
+      "0"
+    )}.${String(ms).padStart(3, "0")} (${seconds.toFixed(2)}s)`;
+  }
+
+  // Convert seconds to datetime (epoch + seconds)
+  function secondsToDatetime(seconds) {
+    return new Date(EPOCH.getTime() + seconds * 1000);
+  }
+
+  // Get x-axis position for a given time
+  function getXPositionForTime(seconds) {
+    if (!plotlyGraphDiv || !xAxisRange) return null;
+
+    const datetime = secondsToDatetime(seconds);
+    const xMin = new Date(xAxisRange[0]).getTime();
+    const xMax = new Date(xAxisRange[1]).getTime();
+    const xTime = datetime.getTime();
+
+    const plotArea = plotlyGraphDiv._fullLayout;
+    if (!plotArea) return null;
+
+    const xaxis = plotArea.xaxis;
+    if (!xaxis) return null;
+
+    const plotLeft = xaxis._offset;
+    const plotWidth = xaxis._length;
+
+    const ratio = (xTime - xMin) / (xMax - xMin);
+    return plotLeft + ratio * plotWidth;
+  }
+
+  // Initialize timeline ticks
+  function initTimelineTicks() {
+    if (!timelineTicks) return;
+    timelineTicks.innerHTML = "";
+    const numMajorTicks = 10;
+    const numMinorTicks = 50;
+
+    // Major ticks with labels
+    for (let i = 0; i <= numMajorTicks; i++) {
+      const percent = (i / numMajorTicks) * 100;
+      const time = (i / numMajorTicks) * TOTAL_DURATION;
+
+      const tick = document.createElement("div");
+      tick.className = "timeline-tick major";
+      tick.style.left = percent + "%";
+      timelineTicks.appendChild(tick);
+
+      const label = document.createElement("div");
+      label.className = "tick-label";
+      label.style.left = percent + "%";
+      label.textContent = `${Math.floor(time / 60)}:${String(
+        Math.floor(time % 60)
+      ).padStart(2, "0")}`;
+      timelineTicks.appendChild(label);
+    }
+
+    // Minor ticks
+    for (let i = 0; i < numMinorTicks; i++) {
+      if (i % (numMinorTicks / numMajorTicks) === 0) continue;
+      const percent = (i / numMinorTicks) * 100;
+
+      const tick = document.createElement("div");
+      tick.className = "timeline-tick minor";
+      tick.style.left = percent + "%";
+      timelineTicks.appendChild(tick);
+    }
+  }
+
+  // Update playhead positions
+  function updatePlayhead(currentTime) {
+    const percent = TOTAL_DURATION > 0 ? (currentTime / TOTAL_DURATION) * 100 : 0;
+
+    // Update timeline
+    if (timelineProgress) {
+      timelineProgress.style.width = percent + "%";
+    }
+    if (timelinePlayhead) {
+      timelinePlayhead.style.left = percent + "%";
+    }
+
+    // Update time display
+    if (currentTimeEl) {
+      currentTimeEl.textContent = formatTime(currentTime);
+    }
+
+    // Update chart playhead if synced
+    if (isSynced && plotlyGraphDiv && chartPlayhead) {
+      const xPos = getXPositionForTime(currentTime);
+      if (xPos !== null) {
+        chartPlayhead.style.display = "block";
+        chartPlayhead.style.left = xPos + "px";
+      } else {
+        chartPlayhead.style.display = "none";
+      }
+    }
+  }
+
+  // Seek to position
+  function seekTo(seconds) {
+    if (!audio) return;
+    audio.currentTime = Math.max(0, Math.min(seconds, TOTAL_DURATION));
+    updatePlayhead(audio.currentTime);
+  }
+
+  // Play/Pause toggle
+  function togglePlay() {
+    if (!audio) return;
+    if (isPlaying) {
+      audio.pause();
+      if (playBtn) {
+        playBtn.textContent = "▶ Play";
+        playBtn.classList.remove("active");
+      }
+    } else {
+      audio.play().catch((e) => console.log("Audio play error:", e));
+      if (playBtn) {
+        playBtn.textContent = "⏸ Pause";
+        playBtn.classList.add("active");
+      }
+    }
+    isPlaying = !isPlaying;
+  }
+
+  // Stop playback
+  function stopPlayback() {
+    if (!audio) return;
+    audio.pause();
+    audio.currentTime = 0;
+    isPlaying = false;
+    if (playBtn) {
+      playBtn.textContent = "▶ Play";
+      playBtn.classList.remove("active");
+    }
+    updatePlayhead(0);
+  }
+
+  // Toggle sync
+  function toggleSync() {
+    isSynced = !isSynced;
+    if (syncBtn) {
+      syncBtn.classList.toggle("active", isSynced);
+    }
+    if (!isSynced && chartPlayhead) {
+      chartPlayhead.style.display = "none";
+    } else if (audio) {
+      updatePlayhead(audio.currentTime);
+    }
+  }
+
+  // Toggle spectrogram visibility
+  function toggleSpectrogram() {
+    if (!spectrogramImage || !spectrogramBtn) return;
+    if (!SPECTROGRAM_AVAILABLE[currentAudioKey]) {
+      alert("Spectrogram not available for this audio source.");
+      return;
+    }
+    isSpectrogramVisible = !isSpectrogramVisible;
+    spectrogramBtn.classList.toggle("active", isSpectrogramVisible);
+    spectrogramImage.classList.toggle("hidden", !isSpectrogramVisible);
+    if (isSpectrogramVisible) {
+      updateSpectrogramSourceForCurrentAudio();
+      updateSpectrogramPosition();
+    }
+  }
+
+  const pendingAxisGridUpdates = {};
+
+  function getAxisShowGrid(axisKey) {
+    if (!axisKey) {
+      return true;
+    }
+    if (Object.prototype.hasOwnProperty.call(pendingAxisGridUpdates, axisKey)) {
+      return pendingAxisGridUpdates[axisKey];
+    }
+    if (plotlyGraphDiv && plotlyGraphDiv._fullLayout) {
+      const axisLayout = plotlyGraphDiv._fullLayout[axisKey];
+      if (axisLayout && typeof axisLayout.showgrid === "boolean") {
+        return axisLayout.showgrid;
+      }
+    }
+    return true;
+  }
+
+  function refreshAxisGridButtons() {
+    if (!axisGridButtons || axisGridButtons.length === 0) {
+      return;
+    }
+    axisGridButtons.forEach((button) => {
+      const axisKey = button.dataset.gridAxis;
+      const showGrid = getAxisShowGrid(axisKey);
+      button.classList.toggle("active", showGrid);
+    });
+  }
+
+  function applyAxisGridState(axisKey, showGrid) {
+    if (!axisKey) {
+      return;
+    }
+    if (!plotlyGraphDiv) {
+      pendingAxisGridUpdates[axisKey] = showGrid;
+      return;
+    }
+    const layoutKey = axisKey + ".showgrid";
+    const updates = {};
+    updates[layoutKey] = showGrid;
+    Plotly.relayout(plotlyGraphDiv, updates).then(() => {
+      refreshAxisGridButtons();
+    });
+  }
+
+  function toggleAxisGrid(event) {
+    const button = event.currentTarget;
+    const axisKey = button && button.dataset ? button.dataset.gridAxis : null;
+    if (!axisKey) {
+      return;
+    }
+    const nextState = !getAxisShowGrid(axisKey);
+    button.classList.toggle("active", nextState);
+    applyAxisGridState(axisKey, nextState);
+  }
+
+  function flushPendingAxisGridUpdates() {
+    if (!plotlyGraphDiv) {
+      return;
+    }
+    const updates = {};
+    let hasUpdates = false;
+    for (const axisKey in pendingAxisGridUpdates) {
+      if (!Object.prototype.hasOwnProperty.call(pendingAxisGridUpdates, axisKey)) {
+        continue;
+      }
+      updates[axisKey + ".showgrid"] = pendingAxisGridUpdates[axisKey];
+      delete pendingAxisGridUpdates[axisKey];
+      hasUpdates = true;
+    }
+    if (hasUpdates) {
+      Plotly.relayout(plotlyGraphDiv, updates).then(() => {
+        refreshAxisGridButtons();
+      });
+    }
+  }
+
+  // Update spectrogram opacity
+  function updateSpectrogramOpacity(value) {
+    if (spectrogramImage) {
+      spectrogramImage.style.opacity = value;
+    }
+  }
+
+  // Update spectrogram position and scale based on current view
+  function updateSpectrogramPosition() {
+    if (
+      !plotlyGraphDiv ||
+      !isSpectrogramVisible ||
+      !SPECTROGRAM_AVAILABLE[currentAudioKey] ||
+      !xAxisRange ||
+      !spectrogramContainer ||
+      !spectrogramImage
+    )
+      return;
+
+    const plotArea = plotlyGraphDiv._fullLayout;
+    if (!plotArea) return;
+
+    const xaxis = plotArea.xaxis;
+    const yaxis = plotArea.yaxis;
+    if (!xaxis || !yaxis) return;
+
+    // Get plot area dimensions
+    const plotLeft = xaxis._offset;
+    const plotWidth = xaxis._length;
+    const plotTop = yaxis._offset;
+    const plotHeight = yaxis._length;
+
+    // Get current view range
+    const viewXMin = new Date(xAxisRange[0]).getTime();
+    const viewXMax = new Date(xAxisRange[1]).getTime();
+
+    // Get full data range (0 to total duration)
+    const fullXMin = EPOCH.getTime();
+    const fullXMax = EPOCH.getTime() + TOTAL_DURATION * 1000;
+
+    // Calculate what portion of the full data is visible
+    const visibleStartRatio = (viewXMin - fullXMin) / (fullXMax - fullXMin || 1);
+    const visibleEndRatio = (viewXMax - fullXMin) / (fullXMax - fullXMin || 1);
+    const visibleRatio = visibleEndRatio - visibleStartRatio || 1;
+
+    // Calculate spectrogram dimensions
+    const spectrogramFullWidth = plotWidth / visibleRatio;
+    const spectrogramLeft = plotLeft - visibleStartRatio * spectrogramFullWidth;
+
+    // Position the spectrogram container to match plot area
+    spectrogramContainer.style.left = plotLeft + "px";
+    spectrogramContainer.style.top = plotTop + "px";
+    spectrogramContainer.style.width = plotWidth + "px";
+    spectrogramContainer.style.height = plotHeight + "px";
+
+    // Position the spectrogram image
+    spectrogramImage.style.left = spectrogramLeft - plotLeft + "px";
+    spectrogramImage.style.width = spectrogramFullWidth + "px";
+    spectrogramImage.style.height = plotHeight + "px";
+    spectrogramImage.style.top = "0px";
+  }
+
+  // Event Listeners
+  if (playBtn) playBtn.addEventListener("click", togglePlay);
+  if (stopBtn) stopBtn.addEventListener("click", stopPlayback);
+  if (syncBtn) syncBtn.addEventListener("click", toggleSync);
+  if (spectrogramBtn) spectrogramBtn.addEventListener("click", toggleSpectrogram);
+
+  if (spectrogramOpacity) {
+    spectrogramOpacity.addEventListener("input", (e) => {
+      updateSpectrogramOpacity(parseFloat(e.target.value));
+    });
+  }
+
+  if (volumeSlider && audio) {
+    volumeSlider.addEventListener("input", (e) => {
+      audio.volume = parseFloat(e.target.value);
+    });
+  }
+
+  if (axisGridButtons && axisGridButtons.length > 0) {
+    axisGridButtons.forEach((button) => {
+      button.addEventListener("click", toggleAxisGrid);
+    });
+  }
+
+  // --- Labeling helpers ---
+
+  // Find the index of a trace by its exact name.
+  function findTraceIndexByName(targetName) {
+    if (!plotlyGraphDiv || !plotlyGraphDiv.data) return null;
+    for (let i = 0; i < plotlyGraphDiv.data.length; i++) {
+      const tr = plotlyGraphDiv.data[i];
+      if (!tr) continue;
+      const name = tr.name || "";
+      if (name === targetName) return i;
+    }
+    return null;
+  }
+
+  // Sample the "Audio Envelope" trace at an arbitrary time (in seconds).
+  // Returns { xVal, yVal } or null if the envelope trace is missing.
+  function getEnvelopePointAtTime(timeSec) {
+    if (!plotlyGraphDiv || !plotlyGraphDiv.data) return null;
+    const idx = findTraceIndexByName("Audio Envelope");
+    if (idx === null) {
+      // TODO: remove this guard log if we never see missing envelope traces in production.
+      // eslint-disable-next-line no-console
+      // console.warn(
+      //   "[manual-labels] No 'Audio Envelope' trace found; cannot derive y from envelope."
+      // );
+      return null;
+    }
+
+    const tr = plotlyGraphDiv.data[idx];
+    if (!tr || !tr.x || !tr.y) return null;
+
+    let bestI = -1;
+    let bestDt = Infinity;
+
+    for (let i = 0; i < tr.x.length; i++) {
+      const xVal = tr.x[i];
+      if (!xVal) continue;
+
+      let tSec = null;
+      if (xVal instanceof Date) {
+        const ms = xVal.getTime();
+        if (Number.isFinite(ms)) {
+          tSec = (ms - EPOCH.getTime()) / 1000;
+        }
+      } else {
+        const d = new Date(xVal);
+        const ms = d.getTime();
+        if (Number.isFinite(ms)) {
+          tSec = (ms - EPOCH.getTime()) / 1000;
+        }
+      }
+      if (tSec === null || !Number.isFinite(tSec)) continue;
+
+      const dt = Math.abs(tSec - timeSec);
+      if (dt < bestDt) {
+        bestDt = dt;
+        bestI = i;
+      }
+    }
+
+    if (bestI < 0) return null;
+
+    let yVal = null;
+    try {
+      const candidate = tr.y[bestI];
+      const num =
+        typeof candidate === "number" ? candidate : parseFloat(candidate);
+      if (!Number.isFinite(num)) return null;
+      yVal = num;
+    } catch (e) {
+      // TODO: uncomment this if we ever need to debug envelope sampling again.
+      // eslint-disable-next-line no-console
+      // console.warn(
+      //   "[manual-labels] getEnvelopePointAtTime: error reading y",
+      //   { idx, bestI, error: String(e), yType: tr && tr.y && typeof tr.y }
+      // );
+      return null;
+    }
+
+    return { xVal: tr.x[bestI], yVal };
+  }
+
+  function buildEditablePeaks() {
+    editablePeaks = [];
+    if (!plotlyGraphDiv || !plotlyGraphDiv.data) return;
+
+    const baseTraceIndices = new Set();
+
+    plotlyGraphDiv.data.forEach((trace, traceIndex) => {
+      const name = trace.name || "";
+      let baseLabel = null;
+      if (name === "S1 Beats") baseLabel = "S1";
+      else if (name === "S2 Beats") baseLabel = "S2";
+      else if (name === "Noise/Rejected") baseLabel = "Noise";
+
+      if (!baseLabel || !trace.x || !trace.x.length) return;
+      baseTraceIndices.add(traceIndex);
+
+      for (let i = 0; i < trace.x.length; i++) {
+        const xVal = trace.x[i];
+        if (!xVal) continue;
+        const tSec = (new Date(xVal).getTime() - EPOCH.getTime()) / 1000;
+
+        // Capture the y-value at this peak so we can reliably round-trip it
+        // in CSV exports. Plotly's underlying array may be a typed/ndarray-like
+        // object with numeric data stored on _inputArray or bdata.
+        let yVal = null;
+        try {
+          if (trace && trace.y) {
+            const yContainer = trace.y;
+
+            const tryArrayLike = (src) => {
+              if (!src) return null;
+              if (typeof src.length === "number" && src.length > i) {
+                const v = src[i];
+                const num =
+                  typeof v === "number" ? v : parseFloat(v);
+                return Number.isFinite(num) ? num : null;
+              }
+              return null;
+            };
+
+            // 1) Direct array-like access
+            yVal = tryArrayLike(yContainer);
+            // 2) Common internal fields used by Plotly/ndarray wrappers
+            if (yVal === null) {
+              yVal =
+                tryArrayLike(yContainer._inputArray) ||
+                tryArrayLike(yContainer.bdata) ||
+                tryArrayLike(yContainer.data) ||
+                tryArrayLike(yContainer.values);
+            }
+          }
+        } catch (e) {
+          // TODO: keep this log handy while we verify y extraction, remove if stable.
+          // eslint-disable-next-line no-console
+          // console.warn(
+          //   "[manual-labels] buildEditablePeaks: error reading y for peak",
+          //   {
+          //     traceIndex,
+          //     name,
+          //     i,
+          //     error: String(e),
+          //     yType: trace && trace.y && typeof trace.y,
+          //   }
+          // );
+        }
+
+        editablePeaks.push({
+          timeSec: tSec,
+          traceIndex,
+          pointIndex: i,
+          baseLabel,
+          manualLabel: baseLabel,
+          yVal,
+        });
+      }
+    });
+
+    // TODO: remove this chunk once we are confident in the data extraction; keeps the old debugging logic for now.
+    // try {
+    //   console.log(
+    //     "[manual-labels] buildEditablePeaks: editablePeaks.length=",
+    //     editablePeaks.length
+    //   );
+    //   if (editablePeaks.length > 0) {
+    //     console.log(
+    //       "[manual-labels] First 5 peaks:",
+    //       editablePeaks.slice(0, 5).map((p) => ({
+    //         t: p.timeSec,
+    //         baseLabel: p.baseLabel,
+    //         manualLabel: p.manualLabel,
+    //         traceIndex: p.traceIndex,
+    //         pointIndex: p.pointIndex,
+    //         yVal: p.yVal,
+    //       }))
+    //     );
+    //   }
+    //   if (plotlyGraphDiv && plotlyGraphDiv.data) {
+    //     console.log(
+    //       "[manual-labels] Trace summary:",
+    //       plotlyGraphDiv.data.map((tr, idx) => {
+    //         let yLen = undefined;
+    //         let yType = undefined;
+    //         let ySample = undefined;
+    //         let yKeys = undefined;
+    //         let innerSample = undefined;
+    //         try {
+    //           if (tr && tr.y) {
+    //             yType = typeof tr.y;
+    //             yKeys = Object.keys(tr.y);
+    //             if (typeof tr.y.length === "number") {
+    //               yLen = tr.y.length;
+    //             }
+    //             if (tr.y && tr.y[0] !== undefined) {
+    //               ySample = [tr.y[0], tr.y[1]];
+    //             }
+    //             if (tr.y.data && tr.y.data[0] !== undefined) {
+    //               innerSample = [tr.y.data[0], tr.y.data[1]];
+    //             } else if (tr.y.values && tr.y.values[0] !== undefined) {
+    //               innerSample = [tr.y.values[0], tr.y.values[1]];
+    //             }
+    //           }
+    //         } catch (e) {
+    //           ySample = `error: ${String(e)}`;
+    //         }
+    //         return {
+    //           idx,
+    //           name: tr && tr.name,
+    //           hasY: !!(tr && tr.y),
+    //           yType,
+    //           yLen,
+    //           yKeys,
+    //           ySample,
+    //           innerSample,
+    //           type: tr && tr.type,
+    //         };
+    //       })
+    //     );
+    //   }
+    // } catch (e) {
+    //   // ignore logging errors
+    // }
+    // Dim the original classifier markers slightly so manual overlays stand out.
+    if (baseTraceIndices.size > 0) {
+      Plotly.restyle(
+        plotlyGraphDiv,
+        { opacity: 0.90 },
+        Array.from(baseTraceIndices)
+      );
+    }
+    refreshManualLabelTraces();
+  }
+
+  function ensureManualLabelTraces() {
+    if (!plotlyGraphDiv) return;
+    // If traces already exist, nothing to do.
+    if (
+      manualLabelTraceIndices.S1 !== null &&
+      manualLabelTraceIndices.S2 !== null &&
+      manualLabelTraceIndices.Noise !== null
+    ) {
+      return;
+    }
+
+    const baseIndex = plotlyGraphDiv.data.length;
+    const commonOpts = {
+      mode: "markers",
+      yaxis: "y",
+      showlegend: true,
+      visible: "legendonly",
+      hovertemplate:
+        "Manual %{customdata[0]}<br>Time: %{x|%M:%S.%L}<br>Base: %{customdata[1]}<extra></extra>",
+      customdata: [],
+    };
+
+    const traces = [
+      {
+        name: "Manual S1",
+        marker: { color: "#ff4d4d", size: 10, symbol: "diamond-open" },
+        x: [],
+        y: [],
+        ...commonOpts,
+      },
+      {
+        name: "Manual S2",
+        marker: { color: "#ffa94d", size: 9, symbol: "circle-open" },
+        x: [],
+        y: [],
+        ...commonOpts,
+      },
+      {
+        name: "Manual Noise",
+        marker: { color: "#bbbbbb", size: 8, symbol: "x" },
+        x: [],
+        y: [],
+        ...commonOpts,
+      },
+    ];
+
+    Plotly.addTraces(plotlyGraphDiv, traces);
+    manualLabelTraceIndices.S1 = baseIndex;
+    manualLabelTraceIndices.S2 = baseIndex + 1;
+    manualLabelTraceIndices.Noise = baseIndex + 2;
+  }
+
+  function refreshManualLabelTraces() {
+    if (!plotlyGraphDiv || !editablePeaks.length) return;
+    ensureManualLabelTraces();
+
+    const s1X = [];
+    const s1Y = [];
+    const s1Custom = [];
+
+    const s2X = [];
+    const s2Y = [];
+    const s2Custom = [];
+
+    const noiseX = [];
+    const noiseY = [];
+    const noiseCustom = [];
+    const unknownLabels = new Set();
+
+    const canonicalLabel = (s) =>
+      String(s || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_]/g, "");
+
+    editablePeaks.forEach((p) => {
+      const tDate = secondsToDatetime(p.timeSec);
+      let yVal = null;
+
+      // 1) Prefer stored yVal if available
+      if (typeof p.yVal === "number" && Number.isFinite(p.yVal)) {
+        yVal = p.yVal;
+      } else {
+        // 2) Try to read from the original base trace
+        const baseTrace =
+          plotlyGraphDiv &&
+          p.traceIndex != null &&
+          plotlyGraphDiv.data &&
+          plotlyGraphDiv.data[p.traceIndex]
+            ? plotlyGraphDiv.data[p.traceIndex]
+            : null;
+        if (baseTrace && baseTrace.y) {
+          const yContainer = baseTrace.y;
+          const tryArrayLike = (src) => {
+            if (!src) return null;
+            if (
+              typeof src.length === "number" &&
+              src.length > p.pointIndex
+            ) {
+              const v = src[p.pointIndex];
+              const num =
+                typeof v === "number" ? v : parseFloat(v);
+              return Number.isFinite(num) ? num : null;
+            }
+            return null;
+          };
+
+          yVal =
+            tryArrayLike(yContainer) ||
+            tryArrayLike(yContainer._inputArray) ||
+            tryArrayLike(yContainer.bdata) ||
+            tryArrayLike(yContainer.data) ||
+            tryArrayLike(yContainer.values) ||
+            yVal;
+        }
+
+        // 3) Fallback: sample from the Audio Envelope trace at this time
+        if (yVal === null || typeof yVal === "undefined") {
+          const envPt = getEnvelopePointAtTime(p.timeSec);
+          if (envPt && typeof envPt.yVal === "number") {
+            yVal = envPt.yVal;
+          }
+        }
+
+        // Cache back onto the peak object for future exports/updates.
+        if (typeof yVal === "number" && Number.isFinite(yVal)) {
+          p.yVal = yVal;
+        }
+      }
+      if (yVal === null || typeof yVal === "undefined") return;
+
+      const entry = [p.manualLabel, p.baseLabel];
+      const lblCanon = canonicalLabel(p.manualLabel);
+
+      if (lblCanon === "s1") {
+        s1X.push(tDate);
+        s1Y.push(yVal);
+        s1Custom.push(entry);
+      } else if (lblCanon === "s2") {
+        s2X.push(tDate);
+        s2Y.push(yVal);
+        s2Custom.push(entry);
+      } else if (
+        lblCanon === "noise" ||
+        lblCanon === "noiserejected" ||
+        lblCanon === "rejected" ||
+        lblCanon === "artifact" ||
+        lblCanon === "artifacts"
+      ) {
+        noiseX.push(tDate);
+        noiseY.push(yVal);
+        noiseCustom.push(entry);
+      } else {
+        if (p.manualLabel) {
+          unknownLabels.add(p.manualLabel);
+        }
+      }
+    });
+
+    if (unknownLabels.size) {
+      // TODO: keep this warning available during manual label experimentation; remove once labels are always canonical.
+      // eslint-disable-next-line no-console
+      // console.warn(
+      //   "[manual-labels] Some peaks have manualLabel values that are not recognized as S1/S2/Noise and will not be drawn:",
+      //   Array.from(unknownLabels)
+      // );
+    }
+
+    Plotly.restyle(
+      plotlyGraphDiv,
+      { x: [s1X], y: [s1Y], customdata: [s1Custom] },
+      manualLabelTraceIndices.S1
+    );
+    Plotly.restyle(
+      plotlyGraphDiv,
+      { x: [s2X], y: [s2Y], customdata: [s2Custom] },
+      manualLabelTraceIndices.S2
+    );
+    Plotly.restyle(
+      plotlyGraphDiv,
+      { x: [noiseX], y: [noiseY], customdata: [noiseCustom] },
+      manualLabelTraceIndices.Noise
+    );
+  }
+
+  function findNearestEditablePeak(timeSec) {
+    if (!editablePeaks.length) return null;
+    let best = null;
+    let bestDt = Infinity;
+    editablePeaks.forEach((p) => {
+      const dt = Math.abs(p.timeSec - timeSec);
+      if (dt < bestDt) {
+        bestDt = dt;
+        best = p;
+      }
+    });
+    if (!best) return null;
+    return { peak: best, delta: bestDt };
+  }
+
+  function applyLabelToNearestPeak() {
+    if (!audio) return;
+    if (!editablePeaks.length) {
+      alert("No peaks available to relabel in this plot.");
+      return;
+    }
+    const targetTime = audio.currentTime;
+    const result = findNearestEditablePeak(targetTime);
+    if (!result) {
+      alert("Could not find any peaks to relabel.");
+      return;
+    }
+    const { peak, delta } = result;
+    const desiredLabel =
+      (labelTypeSelect && labelTypeSelect.value) ? labelTypeSelect.value : "S1";
+
+    // Optional sanity threshold: 0.4s from playhead
+    if (delta > 0.4) {
+      if (
+        !window.confirm(
+          `Nearest peak is ${delta.toFixed(
+            3
+          )}s away from playhead at t=${targetTime.toFixed(
+            3
+          )}s. Apply label ${desiredLabel} anyway?`
+        )
+      ) {
+        return;
+      }
+    }
+
+    const prev = peak.manualLabel;
+    peak.manualLabel = desiredLabel;
+    console.log(
+      `Relabeled peak at t=${peak.timeSec.toFixed(
+        3
+      )}s from ${prev} → ${desiredLabel}`
+    );
+    refreshManualLabelTraces();
+  }
+
+  function downloadLabelsCsv() {
+    if (!editablePeaks.length) {
+      alert("No peak labels available to export.");
+      return;
+    }
+
+    // Debug-friendly export: include both logical time and the actual x/y used for plotting.
+    // x_plot_sec is just time_sec; y_plot is the envelope/sample value used when drawing.
+    const header =
+      "time_sec,base_label,manual_label,x_plot_sec,y_plot\n";
+    const sorted = [...editablePeaks].sort(
+      (a, b) => a.timeSec - b.timeSec
+    );
+    let missingYCount = 0;
+    const lines = sorted.map((p, idx) => {
+      // time_sec / x_plot_sec
+      const t = Number.isFinite(p.timeSec) ? p.timeSec : NaN;
+
+      // y_plot: prefer stored yVal; otherwise, derive from base trace if possible.
+      let yPlot = null;
+      if (typeof p.yVal === "number") {
+        yPlot = p.yVal;
+      } else if (
+        plotlyGraphDiv &&
+        p.traceIndex != null &&
+        p.pointIndex != null &&
+        plotlyGraphDiv.data &&
+        plotlyGraphDiv.data[p.traceIndex] &&
+        plotlyGraphDiv.data[p.traceIndex].y
+      ) {
+        const baseTrace = plotlyGraphDiv.data[p.traceIndex];
+        const yContainer = baseTrace.y;
+        const tryArrayLike = (src) => {
+          if (!src) return null;
+          if (
+            typeof src.length === "number" &&
+            src.length > p.pointIndex
+          ) {
+            const v = src[p.pointIndex];
+            const num =
+              typeof v === "number" ? v : parseFloat(v);
+            return Number.isFinite(num) ? num : null;
+          }
+          return null;
+        };
+
+        yPlot =
+          tryArrayLike(yContainer) ||
+          tryArrayLike(yContainer._inputArray) ||
+          tryArrayLike(yContainer.bdata) ||
+          tryArrayLike(yContainer.data) ||
+          tryArrayLike(yContainer.values) ||
+          yPlot;
+      } else {
+        // Fallback for robustness: sample from Audio Envelope at this time.
+        try {
+          const envPt = getEnvelopePointAtTime(p.timeSec);
+          if (envPt && typeof envPt.yVal === "number") {
+            yPlot = envPt.yVal;
+          }
+        } catch (e) {
+          // ignore export-time envelope lookup errors
+        }
+      }
+
+      const safeY = Number.isFinite(yPlot) ? yPlot : "";
+
+      if (!Number.isFinite(yPlot)) {
+        missingYCount++;
+        if (missingYCount <= 5) {
+          // TODO: logging for missing y is only needed during debugging.
+          // eslint-disable-next-line no-console
+          // console.warn("[manual-labels] downloadLabelsCsv: missing y for peak", {
+          //   idxInSorted: idx,
+          //   timeSec: p.timeSec,
+          //   baseLabel: p.baseLabel,
+          //   manualLabel: p.manualLabel,
+          //   traceIndex: p.traceIndex,
+          //   pointIndex: p.pointIndex,
+          //   yVal: p.yVal,
+          // });
+        }
+      }
+
+      return [
+        Number.isFinite(t) ? t.toFixed(3) : "",
+        p.baseLabel ?? "",
+        p.manualLabel ?? "",
+        Number.isFinite(t) ? t.toFixed(3) : "",
+        safeY,
+      ].join(",");
+    });
+    const csvContent = header + lines.join("\n");
+
+    if (missingYCount > 0) {
+      // TODO: remove this summary warning once exports are stable; keep it if we need to re-investigate.
+      // eslint-disable-next-line no-console
+      // console.warn(
+      //   `[manual-labels] downloadLabelsCsv: y_plot could not be determined for ${missingYCount} peaks (see earlier warnings for details).`
+      // );
+    }
+
+    const blob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const baseName =
+      (audioFileNameEl && audioFileNameEl.dataset && audioFileNameEl.dataset.defaultName) ||
+      "labels";
+    link.href = url;
+    link.download = `${baseName}_manually_Labeled_peaks.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  // Import labels from a CSV that was previously exported by this tool.
+  // This implementation is intentionally simple and deterministic:
+  // - It matches peaks by rounded time_sec (3 decimal places).
+  // - It updates manual_label (and base_label, if present) on existing peaks.
+  // - It does NOT create new peaks; rows without a matching time are ignored.
+  function applyImportedLabelsCsv(csvText) {
+    if (!csvText) {
+      alert("No CSV content available to import labels.");
+      return;
+    }
+    if (!editablePeaks.length) {
+      alert("No peaks available to relabel in this plot.");
+      return;
+    }
+
+    const lines = csvText.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length <= 1) {
+      alert("CSV appears to be empty or missing data rows.");
+      return;
+    }
+
+    const headerCells = lines[0].split(",");
+    const lower = headerCells.map((h) => h.trim().toLowerCase());
+    const timeIdx = lower.indexOf("time_sec");
+    const manualIdx = lower.indexOf("manual_label");
+    const baseIdx = lower.indexOf("base_label");
+
+    if (timeIdx === -1 || (manualIdx === -1 && baseIdx === -1)) {
+      alert(
+        'CSV must contain at least "time_sec" and "manual_label" or "base_label" columns.'
+      );
+      return;
+    }
+
+    // Build a lookup table from rounded time_sec -> { manual, base }.
+    const importedByTime = new Map();
+    for (let i = 1; i < lines.length; i++) {
+      const row = lines[i];
+      const cells = row.split(",");
+      if (cells.length <= timeIdx) continue;
+
+      const tRaw = cells[timeIdx];
+      const t = parseFloat(tRaw);
+      if (!Number.isFinite(t)) continue;
+      const key = t.toFixed(3);
+
+      const manualCell =
+        manualIdx !== -1 && cells.length > manualIdx ? cells[manualIdx] : "";
+      const baseCell =
+        baseIdx !== -1 && cells.length > baseIdx ? cells[baseIdx] : "";
+
+      const manual = (manualCell || "").trim();
+      const base = (baseCell || "").trim();
+
+      if (!manual && !base) continue;
+
+      importedByTime.set(key, { manual, base });
+    }
+
+    if (!importedByTime.size) {
+      alert("No usable label rows found in CSV.");
+      return;
+    }
+
+    let updatedCount = 0;
+
+    editablePeaks.forEach((p) => {
+      if (!Number.isFinite(p.timeSec)) return;
+      const key = p.timeSec.toFixed(3);
+      const rec = importedByTime.get(key);
+      if (!rec) return;
+
+      const { manual, base } = rec;
+      if (!manual && !base) return;
+
+      if (manual) {
+        p.manualLabel = manual;
+      }
+      if (base) {
+        p.baseLabel = base;
+      }
+      updatedCount++;
+    });
+
+    if (updatedCount > 0) {
+      // TODO: keep this log for the next iteration; remove if we never need the confirmation.
+      // eslint-disable-next-line no-console
+      // console.log(
+      //   `[manual-labels] Imported labels: updated ${updatedCount} existing peaks (round-trip by time_sec).`
+      // );
+      refreshManualLabelTraces();
+    } else {
+      alert(
+        "No labels from CSV could be matched to existing peaks by time_sec. Check that the file was exported from this viewer."
+      );
+    }
+  }
+
+  if (applyLabelBtn) {
+    applyLabelBtn.addEventListener("click", applyLabelToNearestPeak);
+  }
+  if (downloadLabelsBtn) {
+    downloadLabelsBtn.addEventListener("click", downloadLabelsCsv);
+  }
+  if (importLabelsBtn && importLabelsInput) {
+    // Use a hidden file input so Import CSV is only processed on explicit click.
+    importLabelsBtn.addEventListener("click", () => {
+      if (!plotlyGraphDiv || !editablePeaks.length) {
+        alert(
+          "Plot not ready or no peaks available yet. Wait for the chart to finish loading before importing labels."
+        );
+        return;
+      }
+      importLabelsInput.value = "";
+      importLabelsInput.click();
+    });
+
+    importLabelsInput.addEventListener("change", (event) => {
+      const file =
+        event && event.target && event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const text = e && e.target && e.target.result ? e.target.result : "";
+        applyImportedLabelsCsv(text);
+      };
+      reader.readAsText(file);
+    });
+  }
+
+  // Timeline scrubber click/drag
+  let isDragging = false;
+
+  function handleTimelineInteraction(e) {
+    if (!timelineScrubber) return;
+    const rect = timelineScrubber.getBoundingClientRect();
+    const percent = Math.max(
+      0,
+      Math.min(1, (e.clientX - rect.left) / (rect.width || 1))
+    );
+    seekTo(percent * TOTAL_DURATION);
+  }
+
+  if (timelineScrubber) {
+    timelineScrubber.addEventListener("mousedown", (e) => {
+      isDragging = true;
+      handleTimelineInteraction(e);
+    });
+  }
+
+  document.addEventListener("mousemove", (e) => {
+    if (isDragging) {
+      handleTimelineInteraction(e);
+    }
+  });
+
+  document.addEventListener("mouseup", () => {
+    isDragging = false;
+  });
+
+  // Audio error handling
+  if (audio) {
+    audio.addEventListener("error", function () {
+      let error_msg = "Unknown error";
+      switch (audio.error && audio.error.code) {
+        case 1:
+          error_msg = "Audio loading aborted";
+          break;
+        case 2:
+          error_msg = "Network error - file not found or inaccessible";
+          break;
+        case 3:
+          error_msg = "Audio decoding error - file may be corrupted";
+          break;
+        case 4:
+          error_msg = "Audio format not supported";
+          break;
+      }
+
+      console.error("❌ Audio Error:", error_msg, "Code:", audio.error && audio.error.code);
+
+      const errorDiv = document.getElementById("audio-error");
+      if (!errorDiv) return;
+      const attempted =
+        AUDIO_SOURCES[currentAudioKey] || AUDIO_SOURCES[DEFAULT_AUDIO_KEY] || "";
+      errorDiv.innerHTML = `
+                <strong>Audio Playback Error</strong><br><br>
+                ${error_msg}<br><br>
+                <strong>File attempted:</strong> ${decodeURIComponent(attempted)}<br>
+                <strong>Solution:</strong> Ensure the audio file is in the same folder as this HTML file.<br>
+                Press F12 and check the Console for more details.
+            `;
+      errorDiv.style.display = "block";
+
+      setTimeout(() => {
+        errorDiv.style.display = "none";
+      }, 10000);
+    });
+
+    // Debug: log audio load status
+    audio.addEventListener("canplaythrough", function () {
+      console.log("✅ Audio file loaded successfully and can play through");
+    });
+
+    audio.addEventListener("loadstart", function () {
+      console.log("🔄 Starting to load audio...");
+    });
+
+    // Audio time update
+    audio.addEventListener("timeupdate", () => {
+      updatePlayhead(audio.currentTime);
+    });
+
+    audio.addEventListener("ended", () => {
+      isPlaying = false;
+      if (playBtn) {
+        playBtn.textContent = "▶ Play";
+        playBtn.classList.remove("active");
+      }
+    });
+  }
+
+  // Keyboard shortcuts
+  document.addEventListener("keydown", (e) => {
+    // Don't trigger if typing in an input
+    if (e.target && e.target.tagName === "INPUT") return;
+
+    switch (e.code) {
+      case "Space":
+        e.preventDefault();
+        togglePlay();
+        break;
+      case "KeyS":
+        stopPlayback();
+        break;
+      case "ArrowLeft":
+        e.preventDefault();
+        seekTo(audio ? audio.currentTime - 5 : 0);
+        break;
+      case "ArrowRight":
+        e.preventDefault();
+        seekTo(audio ? audio.currentTime + 5 : 0);
+        break;
+      case "Home":
+        e.preventDefault();
+        seekTo(0);
+        break;
+      case "End":
+        e.preventDefault();
+        seekTo(TOTAL_DURATION);
+        break;
+      case "KeyG":
+        toggleSpectrogram();
+        break;
+    }
+  });
+
+  // Initialize Plotly integration after chart loads
+  function initPlotlyIntegration() {
+    const graphDivs = document.querySelectorAll(".plotly-graph-div");
+    if (graphDivs.length > 0) {
+      plotlyGraphDiv = graphDivs[0];
+      refreshAxisGridButtons();
+      flushPendingAxisGridUpdates();
+      buildEditablePeaks();
+
+      function updateAxisRange() {
+        if (plotlyGraphDiv._fullLayout && plotlyGraphDiv._fullLayout.xaxis) {
+          xAxisRange = plotlyGraphDiv._fullLayout.xaxis.range;
+          if (!fullXAxisRange && xAxisRange) {
+            fullXAxisRange = [...xAxisRange];
+          }
+        }
+      }
+
+      updateAxisRange();
+
+      plotlyGraphDiv.on("plotly_relayout", function () {
+        updateAxisRange();
+        if (audio) {
+          updatePlayhead(audio.currentTime);
+        }
+        updateSpectrogramPosition();
+        refreshAxisGridButtons();
+      });
+
+      plotlyGraphDiv.on("plotly_afterplot", function () {
+        updateAxisRange();
+        updateSpectrogramPosition();
+        refreshAxisGridButtons();
+      });
+
+      window.addEventListener("resize", () => {
+        updateAxisRange();
+        if (audio) {
+          updatePlayhead(audio.currentTime);
+        }
+        updateSpectrogramPosition();
+        Plotly.Plots.resize(plotlyGraphDiv);
+      });
+
+      plotlyGraphDiv.on("plotly_click", function (data) {
+        if (data.points && data.points.length > 0) {
+          const point = data.points[0];
+          if (point.x) {
+            const clickTime = new Date(point.x);
+            const seconds = (clickTime.getTime() - EPOCH.getTime()) / 1000;
+            seekTo(seconds);
+          }
+        }
+      });
+
+      setTimeout(updateSpectrogramPosition, 100);
+    } else {
+      setTimeout(initPlotlyIntegration, 100);
+    }
+  }
+
+  // Initialize spectrogram controls based on availability
+  function initSpectrogramControls() {
+    if (!spectrogramBtn || !spectrogramOpacity) return;
+    const anySpectrogramAvailable =
+      SPECTROGRAM_AVAILABLE.original || SPECTROGRAM_AVAILABLE.filtered;
+    if (!anySpectrogramAvailable) {
+      spectrogramBtn.style.opacity = "0.5";
+      spectrogramBtn.style.cursor = "not-allowed";
+      spectrogramOpacity.disabled = true;
+      spectrogramOpacity.style.opacity = "0.5";
+    }
+  }
+
+  // Initialize
+  initTimelineTicks();
+  initSpectrogramControls();
+  setTimeout(initPlotlyIntegration, 500);
+
+  // DEBUG: Check for audio file presence relative to HTML
+  const debugAudioPath =
+    AUDIO_SOURCES[currentAudioKey] || AUDIO_SOURCES[DEFAULT_AUDIO_KEY] || "";
+  if (debugAudioPath) {
+    console.log("📂 Checking for audio file in same directory...", debugAudioPath);
+    fetch("./" + decodeURIComponent(debugAudioPath), { method: "HEAD" })
+      .then((response) => {
+        if (response.ok) {
+          console.log("✅ Audio file found at expected location!");
+        } else {
+          console.error("❌ Audio file NOT found at expected location");
+        }
+      })
+      .catch((err) => {
+        console.error("❌ Cannot access audio file:", err);
+        console.log(
+          "💡 If you're using file:// protocol, try running a local server instead:"
+        );
+        console.log("   python -m http.server 8000");
+      });
+  } else {
+    console.warn("⚠️ No audio file specified for HEAD check.");
+  }
+})();
+
+

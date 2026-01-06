@@ -47,6 +47,7 @@ DEFAULT_PARAMS = {
     "noise_floor_quantile": 0.20,        # Quantile of troughs used to calculate the noise floor. (0.2 = 20th percentile).
     "noise_window_sec": 4,               # I Adjusted This✔ Rolling window in seconds. smaller means more sensitive to noise.
     "trough_rejection_multiplier": 10.0, # I Adjusted This✔ A trough N-times higher than the draft noise floor is rejected.
+    # I wanted to keep this value high to be conservative
 
     # --- 3.2. Peak Noise Vetoing ---
     "noise_confidence_threshold": 0.6,  # A peak is rejected if its calculated "noise confidence" exceeds this.
@@ -63,7 +64,7 @@ DEFAULT_PARAMS = {
     "s1_s2_interval_cap_sec": 0.4,        # The absolute maximum time (seconds) allowed between S1 and S2.
     "s1_s2_interval_rr_fraction": 0.7,    # The S1-S2 interval cannot be longer than this fraction of the R-R interval.
     'min_s1_s2_interval_sec': 0.10,           # Absolute minimum (100ms)
-    'min_s1_s2_interval_rr_fraction': 0.23,   # Or 20% of total RR interval
+    'min_s1_s2_interval_rr_fraction': 0.23,   # Or 23% of total RR interval
     'noise_prominence_threshold': 0.35,   # Peaks below this ratio are "suspect noise" 
     'enable_lookahead_skipping': True,    # Enable/disable lookahead skipping
 
@@ -84,6 +85,7 @@ DEFAULT_PARAMS = {
     "forward_look_max_penalty": 0.4,        # Max penalty for this scenario
     "s2_s1_ratio_low_bpm": 1.6,             # I adjusted this✔ to 1.6 because at low BPM, allows S2 to be up to 1.6x S1 strength before penalty.
     "s2_s1_ratio_high_bpm": 1.2,            # I adjusted this✔ At high BPM, expects S2 to be no more than 1.2x S1 strength.
+    # We should test the contractility model with different values for these params to determine the best values for the dataset I have on hand.
     "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
     "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
     "contractility_penalty_strength": 0.35,  # Strength of the contractility penalty.

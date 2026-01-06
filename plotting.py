@@ -5,6 +5,7 @@ import csv
 import base64
 import shutil
 import io
+import json
 from typing import Dict, Optional, List, Any, Callable
 
 import numpy as np
@@ -806,6 +807,40 @@ class Plotter:
             + '</select>'
         )
         
+        # Build configuration payload for external interactive_plot.js script
+        config_payload = {
+            "totalDuration": float(duration_sec),
+            "spectrogramSources": {
+                "original": spectrogram_original_src,
+                "filtered": spectrogram_filtered_src,
+            },
+            "spectrogramAvailable": {
+                "original": spectrogram_available_original == "true",
+                "filtered": spectrogram_available_filtered == "true",
+            },
+            "audioSources": {
+                "original": audio_src_escaped,
+                "filtered": filtered_audio_src_escaped,
+            },
+            "audioLabels": {
+                "original": audio_file_name,
+                "filtered": filtered_debug_file_name if filtered_available else audio_file_name,
+            },
+        }
+        config_json = json.dumps(config_payload)
+
+        # Ensure interactive_plot.js is available next to the HTML file
+        try:
+            js_src_path = os.path.join(os.path.dirname(__file__), "assets", "interactive_plot.js")
+            js_dest_path = os.path.join(self.output_directory, "interactive_plot.js")
+            if os.path.exists(js_src_path):
+                shutil.copy2(js_src_path, js_dest_path)
+                logging.info(f"Copied interactive_plot.js to {js_dest_path}")
+            else:
+                logging.error(f"interactive_plot.js not found at {js_src_path}; HTML will reference a missing script.")
+        except Exception as e:
+            logging.error(f"Failed to copy interactive_plot.js: {e}")
+
         html_template = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -967,6 +1002,44 @@ class Plotter:
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }}
+
+        /* Labeling controls */
+        #labeling-controls {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #aaa;
+            flex-wrap: wrap;
+        }}
+
+        #label-type-select {{
+            background: #1e1e2e;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-family: 'Segoe UI', sans-serif;
+        }}
+
+        #apply-label-btn,
+        #download-labels-btn {{
+            background: #2a2a3a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            padding: 3px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.15s;
+        }}
+
+        #apply-label-btn:hover,
+        #download-labels-btn:hover {{
+            background: #3a3a4a;
+            border-color: #00d4ff;
         }}
         
         /* Timeline scrubber bar */
@@ -1156,6 +1229,18 @@ class Plotter:
                     <button class="grid-toggle-button" data-grid-axis="yaxis" title="Toggle signal amplitude gridlines">Signal</button>
                     <button class="grid-toggle-button active" data-grid-axis="yaxis2" title="Toggle BPM/HRV gridlines">BPM</button>
                 </div>
+                <div id="labeling-controls">
+                    <span class="grid-label">Label:</span>
+                    <select id="label-type-select" title="Desired label for nearest peak">
+                        <option value="S1">S1</option>
+                        <option value="S2">S2</option>
+                        <option value="Noise">Noise</option>
+                    </select>
+                    <button id="apply-label-btn" title="Relabel nearest peak to current playhead time">Apply</button>
+                    <button id="download-labels-btn" title="Download current labels as CSV">Download CSV</button>
+                    <button id="import-labels-btn" title="Import manually labeled peaks CSV">Import CSV</button>
+                    <input type="file" id="import-labels-input" accept=".csv" style="display:none" />
+                </div>
                 <span id="total-time">{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}</span>
                 <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
             </div>
@@ -1195,622 +1280,9 @@ class Plotter:
     </div>
     
     <script>
-        // Configuration
-        const TOTAL_DURATION = {duration_sec};
-        const EPOCH = new Date(0);
-        const SPECTROGRAM_SOURCES = {{
-            original: "{spectrogram_original_src}",
-            filtered: "{spectrogram_filtered_src}"
-        }};
-        const SPECTROGRAM_AVAILABLE = {{
-            original: {spectrogram_available_original},
-            filtered: {spectrogram_available_filtered}
-        }};
-        const AUDIO_SOURCES = {{
-            original: "{audio_src_escaped}",
-            filtered: "{filtered_audio_src_escaped}"
-        }};
-        const AUDIO_LABELS = {{
-            original: "{audio_file_name}",
-            filtered: "{filtered_debug_file_name if filtered_available else audio_file_name}"
-        }};
-        
-        // DOM Elements
-        const audio = document.getElementById('audio-player');
-        const playBtn = document.getElementById('play-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        const syncBtn = document.getElementById('sync-btn');
-        const spectrogramBtn = document.getElementById('spectrogram-btn');
-        const spectrogramOpacity = document.getElementById('spectrogram-opacity');
-        const spectrogramContainer = document.getElementById('spectrogram-container');
-        const spectrogramImage = document.getElementById('spectrogram-image');
-        const volumeSlider = document.getElementById('volume-slider');
-        const currentTimeEl = document.getElementById('current-time');
-        const timelineScrubber = document.getElementById('timeline-scrubber');
-        const timelineProgress = document.getElementById('timeline-progress');
-        const timelinePlayhead = document.getElementById('timeline-playhead');
-        const timelineTicks = document.getElementById('timeline-ticks');
-        const chartPlayhead = document.getElementById('chart-playhead');
-        const chartContainer = document.getElementById('chart-container');
-        const audioFileNameEl = document.getElementById('audio-file-name');
-        const audioSourceSelect = document.getElementById('audio-source-select');
-        const axisGridButtons = document.querySelectorAll('[data-grid-axis]');
-        
-        const DEFAULT_AUDIO_KEY = "original";
-        let currentAudioKey = DEFAULT_AUDIO_KEY;
-        audioFileNameEl.dataset.defaultName = audioFileNameEl.textContent;
-        
-        let isPlaying = false;
-        let isSynced = true;
-        let isSpectrogramVisible = false;
-        let plotlyGraphDiv = null;
-        let xAxisRange = null;
-        let fullXAxisRange = null;  // Store the full x-axis range for spectrogram positioning
-
-        const logAudioSource = () => {{
-            console.log("🔊 Audio source path:", audio.src);
-            console.log("📁 Expected audio file location relative to HTML:", audio.src);
-        }};
-
-        const updateAudioSource = (key, resumePlayback = false) => {{
-            const candidateKey = key && AUDIO_SOURCES[key] ? key : DEFAULT_AUDIO_KEY;
-            const src = AUDIO_SOURCES[candidateKey];
-
-            if (!src) {{
-                console.warn("🔇 Audio source unavailable for", key);
-                return;
-            }}
-
-            currentAudioKey = candidateKey;
-            audio.src = src;
-            audioFileNameEl.textContent = AUDIO_LABELS[candidateKey] || audioFileNameEl.dataset.defaultName;
-            audioFileNameEl.title = audioFileNameEl.textContent;
-            if (audioSourceSelect) {{
-                audioSourceSelect.value = candidateKey;
-            }}
-            audio.load();
-            logAudioSource();
-            console.log("🔁 Switched audio to", AUDIO_LABELS[candidateKey] || candidateKey, src);
-            // If spectrogram is visible, update it to match the current audio source
-            if (isSpectrogramVisible) {{
-                if (SPECTROGRAM_AVAILABLE[currentAudioKey] && SPECTROGRAM_SOURCES[currentAudioKey]) {{
-                    updateSpectrogramSourceForCurrentAudio();
-                    updateSpectrogramPosition();
-                }} else {{
-                    // Hide spectrogram if not available for this source
-                    spectrogramImage.classList.add('hidden');
-                    spectrogramBtn.classList.remove('active');
-                    isSpectrogramVisible = false;
-                    console.warn("No spectrogram available for audio source:", currentAudioKey);
-                }}
-            }}
-            if (resumePlayback && isPlaying) {{
-                audio.play().catch((e) => console.log("Audio play error:", e));
-            }}
-        }};
-
-        if (audioSourceSelect) {{
-            audioSourceSelect.addEventListener("change", (event) => {{
-                updateAudioSource(event.target.value, isPlaying);
-            }});
-        }}
-
-        updateAudioSource(audioSourceSelect ? audioSourceSelect.value : DEFAULT_AUDIO_KEY);
-        
-        // Format time as MM:SS.mmm (seconds)
-        function formatTime(seconds) {{
-            const mins = Math.floor(seconds / 60);
-            const secs = Math.floor(seconds % 60);
-            const ms = Math.floor((seconds % 1) * 1000);
-            return `${{String(mins).padStart(2, '0')}}:${{String(secs).padStart(2, '0')}}.${{String(ms).padStart(3, '0')}} (${{seconds.toFixed(2)}}s)`;
-        }}
-        
-        // Convert seconds to datetime (epoch + seconds)
-        function secondsToDatetime(seconds) {{
-            return new Date(EPOCH.getTime() + seconds * 1000);
-        }}
-        
-        // Get x-axis position for a given time
-        function getXPositionForTime(seconds) {{
-            if (!plotlyGraphDiv || !xAxisRange) return null;
-            
-            const datetime = secondsToDatetime(seconds);
-            const xMin = new Date(xAxisRange[0]).getTime();
-            const xMax = new Date(xAxisRange[1]).getTime();
-            const xTime = datetime.getTime();
-            
-            // Calculate position within the plot area
-            const plotArea = plotlyGraphDiv._fullLayout;
-            if (!plotArea) return null;
-            
-            const xaxis = plotArea.xaxis;
-            if (!xaxis) return null;
-            
-            const plotLeft = xaxis._offset;
-            const plotWidth = xaxis._length;
-            
-            const ratio = (xTime - xMin) / (xMax - xMin);
-            return plotLeft + ratio * plotWidth;
-        }}
-        
-        // Initialize timeline ticks
-        function initTimelineTicks() {{
-            timelineTicks.innerHTML = '';
-            const numMajorTicks = 10;
-            const numMinorTicks = 50;
-            
-            // Major ticks with labels
-            for (let i = 0; i <= numMajorTicks; i++) {{
-                const percent = (i / numMajorTicks) * 100;
-                const time = (i / numMajorTicks) * TOTAL_DURATION;
-                
-                const tick = document.createElement('div');
-                tick.className = 'timeline-tick major';
-                tick.style.left = percent + '%';
-                timelineTicks.appendChild(tick);
-                
-                const label = document.createElement('div');
-                label.className = 'tick-label';
-                label.style.left = percent + '%';
-                label.textContent = `${{Math.floor(time / 60)}}:${{String(Math.floor(time % 60)).padStart(2, '0')}}`;
-                timelineTicks.appendChild(label);
-            }}
-            
-            // Minor ticks
-            for (let i = 0; i < numMinorTicks; i++) {{
-                if (i % (numMinorTicks / numMajorTicks) === 0) continue;
-                const percent = (i / numMinorTicks) * 100;
-                
-                const tick = document.createElement('div');
-                tick.className = 'timeline-tick minor';
-                tick.style.left = percent + '%';
-                timelineTicks.appendChild(tick);
-            }}
-        }}
-        
-        // Update playhead positions
-        function updatePlayhead(currentTime) {{
-            const percent = (currentTime / TOTAL_DURATION) * 100;
-            
-            // Update timeline
-            timelineProgress.style.width = percent + '%';
-            timelinePlayhead.style.left = percent + '%';
-            
-            // Update time display
-            currentTimeEl.textContent = formatTime(currentTime);
-            
-            // Update chart playhead if synced
-            if (isSynced && plotlyGraphDiv) {{
-                const xPos = getXPositionForTime(currentTime);
-                if (xPos !== null) {{
-                    chartPlayhead.style.display = 'block';
-                    chartPlayhead.style.left = xPos + 'px';
-                }} else {{
-                    chartPlayhead.style.display = 'none';
-                }}
-            }}
-        }}
-        
-        // Seek to position
-        function seekTo(seconds) {{
-            audio.currentTime = Math.max(0, Math.min(seconds, TOTAL_DURATION));
-            updatePlayhead(audio.currentTime);
-        }}
-        
-        // Play/Pause toggle
-        function togglePlay() {{
-            if (isPlaying) {{
-                audio.pause();
-                playBtn.textContent = '▶ Play';
-                playBtn.classList.remove('active');
-            }} else {{
-                audio.play().catch(e => console.log('Audio play error:', e));
-                playBtn.textContent = '⏸ Pause';
-                playBtn.classList.add('active');
-            }}
-            isPlaying = !isPlaying;
-        }}
-        
-        // Stop playback
-        function stopPlayback() {{
-            audio.pause();
-            audio.currentTime = 0;
-            isPlaying = false;
-            playBtn.textContent = '▶ Play';
-            playBtn.classList.remove('active');
-            updatePlayhead(0);
-        }}
-        
-        // Toggle sync
-        function toggleSync() {{
-            isSynced = !isSynced;
-            syncBtn.classList.toggle('active', isSynced);
-            if (!isSynced) {{
-                chartPlayhead.style.display = 'none';
-            }} else {{
-                updatePlayhead(audio.currentTime);
-            }}
-        }}
-        
-        function updateSpectrogramSourceForCurrentAudio() {{
-            const src = SPECTROGRAM_SOURCES[currentAudioKey];
-            if (src) {{
-                spectrogramImage.src = src;
-            }}
-        }}
-
-        // Toggle spectrogram visibility
-        function toggleSpectrogram() {{
-            if (!SPECTROGRAM_AVAILABLE[currentAudioKey]) {{
-                alert('Spectrogram not available for this audio source.');
-                return;
-            }}
-            isSpectrogramVisible = !isSpectrogramVisible;
-            spectrogramBtn.classList.toggle('active', isSpectrogramVisible);
-            spectrogramImage.classList.toggle('hidden', !isSpectrogramVisible);
-            if (isSpectrogramVisible) {{
-                updateSpectrogramSourceForCurrentAudio();
-                updateSpectrogramPosition();
-            }}
-        }}
-        
-        const pendingAxisGridUpdates = {{}};
-
-        function getAxisShowGrid(axisKey) {{
-            if (!axisKey) {{
-                return true;
-            }}
-            if (Object.prototype.hasOwnProperty.call(pendingAxisGridUpdates, axisKey)) {{
-                return pendingAxisGridUpdates[axisKey];
-            }}
-            if (plotlyGraphDiv && plotlyGraphDiv._fullLayout) {{
-                const axisLayout = plotlyGraphDiv._fullLayout[axisKey];
-                if (axisLayout && typeof axisLayout.showgrid === 'boolean') {{
-                    return axisLayout.showgrid;
-                }}
-            }}
-            return true;
-        }}
-
-        function refreshAxisGridButtons() {{
-            if (!axisGridButtons || axisGridButtons.length === 0) {{
-                return;
-            }}
-            axisGridButtons.forEach((button) => {{
-                const axisKey = button.dataset.gridAxis;
-                const showGrid = getAxisShowGrid(axisKey);
-                button.classList.toggle('active', showGrid);
-            }});
-        }}
-
-        function applyAxisGridState(axisKey, showGrid) {{
-            if (!axisKey) {{
-                return;
-            }}
-            if (!plotlyGraphDiv) {{
-                pendingAxisGridUpdates[axisKey] = showGrid;
-                return;
-            }}
-            const layoutKey = axisKey + '.showgrid';
-            const updates = {{}};
-            updates[layoutKey] = showGrid;
-            Plotly.relayout(plotlyGraphDiv, updates).then(() => {{
-                refreshAxisGridButtons();
-            }});
-        }}
-
-        function toggleAxisGrid(event) {{
-            const button = event.currentTarget;
-            const axisKey = button && button.dataset ? button.dataset.gridAxis : null;
-            if (!axisKey) {{
-                return;
-            }}
-            const nextState = !getAxisShowGrid(axisKey);
-            button.classList.toggle('active', nextState);
-            applyAxisGridState(axisKey, nextState);
-        }}
-
-        function flushPendingAxisGridUpdates() {{
-            if (!plotlyGraphDiv) {{
-                return;
-            }}
-            const updates = {{}};
-            let hasUpdates = false;
-            for (const axisKey in pendingAxisGridUpdates) {{
-                if (!Object.prototype.hasOwnProperty.call(pendingAxisGridUpdates, axisKey)) {{
-                    continue;
-                }}
-                updates[axisKey + '.showgrid'] = pendingAxisGridUpdates[axisKey];
-                delete pendingAxisGridUpdates[axisKey];
-                hasUpdates = true;
-            }}
-            if (hasUpdates) {{
-                Plotly.relayout(plotlyGraphDiv, updates).then(() => {{
-                    refreshAxisGridButtons();
-                }});
-            }}
-        }}
-
-        // Update spectrogram opacity
-        function updateSpectrogramOpacity(value) {{
-            spectrogramImage.style.opacity = value;
-        }}
-        
-        // Update spectrogram position and scale based on current view
-        function updateSpectrogramPosition() {{
-            if (!plotlyGraphDiv || !isSpectrogramVisible || !SPECTROGRAM_AVAILABLE[currentAudioKey] || !xAxisRange) return;
-            
-            const plotArea = plotlyGraphDiv._fullLayout;
-            if (!plotArea) return;
-            
-            const xaxis = plotArea.xaxis;
-            const yaxis = plotArea.yaxis;
-            if (!xaxis || !yaxis) return;
-            
-            // Get plot area dimensions
-            const plotLeft = xaxis._offset;
-            const plotWidth = xaxis._length;
-            const plotTop = yaxis._offset;
-            const plotHeight = yaxis._length;
-            
-            // Get current view range
-            const viewXMin = new Date(xAxisRange[0]).getTime();
-            const viewXMax = new Date(xAxisRange[1]).getTime();
-            
-            // Get full data range (0 to total duration)
-            const fullXMin = EPOCH.getTime();
-            const fullXMax = EPOCH.getTime() + TOTAL_DURATION * 1000;
-            
-            // Calculate what portion of the full data is visible
-            const visibleStartRatio = (viewXMin - fullXMin) / (fullXMax - fullXMin);
-            const visibleEndRatio = (viewXMax - fullXMin) / (fullXMax - fullXMin);
-            const visibleRatio = visibleEndRatio - visibleStartRatio;
-            
-            // Calculate spectrogram dimensions
-            // The spectrogram should stretch to cover the full data range
-            const spectrogramFullWidth = plotWidth / visibleRatio;
-            const spectrogramLeft = plotLeft - (visibleStartRatio * spectrogramFullWidth);
-            
-            // Position the spectrogram container to match plot area
-            spectrogramContainer.style.left = plotLeft + 'px';
-            spectrogramContainer.style.top = plotTop + 'px';
-            spectrogramContainer.style.width = plotWidth + 'px';
-            spectrogramContainer.style.height = plotHeight + 'px';
-            
-            // Position the spectrogram image
-            spectrogramImage.style.left = (spectrogramLeft - plotLeft) + 'px';
-            spectrogramImage.style.width = spectrogramFullWidth + 'px';
-            spectrogramImage.style.height = plotHeight + 'px';
-            spectrogramImage.style.top = '0px';
-        }}
-        
-        // Event Listeners
-        playBtn.addEventListener('click', togglePlay);
-        stopBtn.addEventListener('click', stopPlayback);
-        syncBtn.addEventListener('click', toggleSync);
-        spectrogramBtn.addEventListener('click', toggleSpectrogram);
-        
-        spectrogramOpacity.addEventListener('input', (e) => {{
-            updateSpectrogramOpacity(parseFloat(e.target.value));
-        }});
-        
-        volumeSlider.addEventListener('input', (e) => {{
-            audio.volume = parseFloat(e.target.value);
-        }});
-
-        axisGridButtons.forEach((button) => {{
-            button.addEventListener('click', toggleAxisGrid);
-        }});
-        
-        // Timeline scrubber click/drag
-        let isDragging = false;
-        
-        function handleTimelineInteraction(e) {{
-            const rect = timelineScrubber.getBoundingClientRect();
-            const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            seekTo(percent * TOTAL_DURATION);
-        }}
-        
-        timelineScrubber.addEventListener('mousedown', (e) => {{
-            isDragging = true;
-            handleTimelineInteraction(e);
-        }});
-        
-        document.addEventListener('mousemove', (e) => {{
-            if (isDragging) {{
-                handleTimelineInteraction(e);
-            }}
-        }});
-        
-        document.addEventListener('mouseup', () => {{
-            isDragging = false;
-        }});
-
-        // Audio error handling
-        audio.addEventListener('error', function(e) {{
-            let error_msg = "Unknown error";
-            switch(audio.error?.code) {{
-                case 1: error_msg = "Audio loading aborted"; break;
-                case 2: error_msg = "Network error - file not found or inaccessible"; break;
-                case 3: error_msg = "Audio decoding error - file may be corrupted"; break;
-                case 4: error_msg = "Audio format not supported"; break;
-            }}
-
-            console.error("❌ Audio Error:", error_msg, "Code:", audio.error?.code);
-
-            const errorDiv = document.getElementById('audio-error');
-            errorDiv.innerHTML = `
-                <strong>Audio Playback Error</strong><br><br>
-                ${{error_msg}}<br><br>
-                <strong>File attempted:</strong> ${{decodeURIComponent(AUDIO_SOURCES[currentAudioKey] || AUDIO_SOURCES.original)}}<br>
-                <strong>Solution:</strong> Ensure the audio file is in the same folder as this HTML file.<br>
-                Press F12 and check the Console for more details.
-            `;
-            errorDiv.style.display = 'block';
-
-            setTimeout(() => {{ errorDiv.style.display = 'none'; }}, 10000);
-        }});
-
-        // Debug: log audio load status
-        audio.addEventListener('canplaythrough', function() {{
-            console.log("✅ Audio file loaded successfully and can play through");
-        }});
-
-        audio.addEventListener('loadstart', function() {{
-            console.log("🔄 Starting to load audio...");
-        }});
-
-        // Audio time update
-        audio.addEventListener('timeupdate', () => {{
-            updatePlayhead(audio.currentTime);
-        }});
-        
-        audio.addEventListener('ended', () => {{
-            isPlaying = false;
-            playBtn.textContent = '▶ Play';
-            playBtn.classList.remove('active');
-        }});
-        
-        // Keyboard shortcuts
-        document.addEventListener('keydown', (e) => {{
-            // Don't trigger if typing in an input
-            if (e.target.tagName === 'INPUT') return;
-            
-            switch(e.code) {{
-                case 'Space':
-                    e.preventDefault();
-                    togglePlay();
-                    break;
-                case 'KeyS':
-                    stopPlayback();
-                    break;
-                case 'ArrowLeft':
-                    e.preventDefault();
-                    seekTo(audio.currentTime - 5);
-                    break;
-                case 'ArrowRight':
-                    e.preventDefault();
-                    seekTo(audio.currentTime + 5);
-                    break;
-                case 'Home':
-                    e.preventDefault();
-                    seekTo(0);
-                    break;
-                case 'End':
-                    e.preventDefault();
-                    seekTo(TOTAL_DURATION);
-                    break;
-                case 'KeyG':
-                    toggleSpectrogram();
-                    break;
-            }}
-        }});
-        
-        // Initialize Plotly integration after chart loads
-        function initPlotlyIntegration() {{
-            // Find the Plotly graph div
-            const graphDivs = document.querySelectorAll('.plotly-graph-div');
-            if (graphDivs.length > 0) {{
-                plotlyGraphDiv = graphDivs[0];
-                refreshAxisGridButtons();
-                flushPendingAxisGridUpdates();
-                
-                // Get initial axis range
-                function updateAxisRange() {{
-                    if (plotlyGraphDiv._fullLayout && plotlyGraphDiv._fullLayout.xaxis) {{
-                        xAxisRange = plotlyGraphDiv._fullLayout.xaxis.range;
-                        // Store full range on first load
-                        if (!fullXAxisRange) {{
-                            fullXAxisRange = [...xAxisRange];
-                        }}
-                    }}
-                }}
-                
-                updateAxisRange();
-                
-                // Listen for zoom/pan changes
-                plotlyGraphDiv.on('plotly_relayout', function(eventdata) {{
-                    updateAxisRange();
-                    updatePlayhead(audio.currentTime);
-                    updateSpectrogramPosition();
-                    refreshAxisGridButtons();
-                }});
-                
-                // Also listen for plotly_afterplot for initial render
-                plotlyGraphDiv.on('plotly_afterplot', function() {{
-                    updateAxisRange();
-                    updateSpectrogramPosition();
-                    refreshAxisGridButtons();
-                }});
-                
-                // Update on window resize
-                window.addEventListener('resize', () => {{
-                    updateAxisRange();
-                    updatePlayhead(audio.currentTime);
-                    updateSpectrogramPosition();
-                    // Resize Plotly chart to fit container
-                    Plotly.Plots.resize(plotlyGraphDiv);
-                }});
-                
-                // Click on chart to seek
-                plotlyGraphDiv.on('plotly_click', function(data) {{
-                    if (data.points && data.points.length > 0) {{
-                        const point = data.points[0];
-                        if (point.x) {{
-                            // Convert datetime back to seconds
-                            const clickTime = new Date(point.x);
-                            const seconds = (clickTime.getTime() - EPOCH.getTime()) / 1000;
-                            seekTo(seconds);
-                        }}
-                    }}
-                }});
-                
-                // Initial spectrogram position update
-                setTimeout(updateSpectrogramPosition, 100);
-            }} else {{
-                // Retry after a short delay
-                setTimeout(initPlotlyIntegration, 100);
-            }}
-        }}
-        
-        // Initialize spectrogram controls based on availability
-        function initSpectrogramControls() {{
-            const anySpectrogramAvailable =
-                SPECTROGRAM_AVAILABLE.original || SPECTROGRAM_AVAILABLE.filtered;
-            if (!anySpectrogramAvailable) {{
-                spectrogramBtn.style.opacity = '0.5';
-                spectrogramBtn.style.cursor = 'not-allowed';
-                spectrogramOpacity.disabled = true;
-                spectrogramOpacity.style.opacity = '0.5';
-            }}
-        }}
-
-        // Initialize
-        initTimelineTicks();
-        initSpectrogramControls();
-        setTimeout(initPlotlyIntegration, 500);
-
-        // DEBUG: List audio file presence relative to HTML
-        const debugAudioPath = AUDIO_SOURCES[currentAudioKey] || AUDIO_SOURCES.original;
-        if (debugAudioPath) {{
-            console.log("📂 Checking for audio file in same directory...", debugAudioPath);
-            fetch('./' + decodeURIComponent(debugAudioPath), {{ method: 'HEAD' }})
-                .then(response => {{
-                    if (response.ok) {{
-                        console.log("✅ Audio file found at expected location!");
-                    }} else {{
-                        console.error("❌ Audio file NOT found at expected location");
-                    }}
-                }})
-                .catch(err => {{
-                    console.error("❌ Cannot access audio file:", err);
-                    console.log("💡 If you're using file:// protocol, try running a local server instead:");
-                    console.log("   python -m http.server 8000");
-                }});
-        }} else {{
-            console.warn("⚠️ No audio file specified for HEAD check.");
-        }}
+        window.BPM_ANALYZER_CONFIG = {config_json};
     </script>
+    <script src="interactive_plot.js"></script>
 </body>
 </html>'''
         

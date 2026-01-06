@@ -963,7 +963,7 @@ class PeakClassifier:
         """Performs checks to determine if a peak is a valid Lone S1."""
         detail_lines = []
         
-        # --- 1. Basic rhythm & amplitude calculation (existing logic) ---
+        # --- 1. Basic rhythm & amplitude calculation ---
         if not self.state.candidate_beats:
             return True, ["Validated Lone S1: First beat (no prior rhythm to compare)."]
         
@@ -1003,7 +1003,7 @@ class PeakClassifier:
                     f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
                 )
         
-        # --- 3. Forward check (existing logic) ---
+        # --- 3. Forward check ---
         current_peak_all_peaks_idx = np.searchsorted(self.state.all_peaks, current_peak_idx)
         if current_peak_all_peaks_idx < len(self.state.all_peaks) - 1:
             next_raw_peak_idx = self.state.all_peaks[current_peak_all_peaks_idx + 1]
@@ -1021,7 +1021,7 @@ class PeakClassifier:
                     )
                     confidence = 0.0  # Hard veto
         
-        # --- 4. Final threshold check (existing) ---
+        # --- 4. Final threshold check ---
         threshold = self.params.get("lone_s1_confidence_threshold", 0.6)
         if confidence < threshold:
             detail_lines.append(f"Outcome: Rejected Lone S1 (final score {confidence:.2f} < {threshold:.2f})")
