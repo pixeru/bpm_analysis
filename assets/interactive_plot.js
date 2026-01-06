@@ -1315,6 +1315,30 @@
       case "KeyG":
         toggleSpectrogram();
         break;
+      case "Digit1":
+        // Label nearest peak as S1
+        e.preventDefault();
+        if (labelTypeSelect) {
+          labelTypeSelect.value = "S1";
+        }
+        applyLabelToNearestPeak();
+        break;
+      case "Digit2":
+        // Label nearest peak as S2
+        e.preventDefault();
+        if (labelTypeSelect) {
+          labelTypeSelect.value = "S2";
+        }
+        applyLabelToNearestPeak();
+        break;
+      case "Digit3":
+        // Label nearest peak as Noise
+        e.preventDefault();
+        if (labelTypeSelect) {
+          labelTypeSelect.value = "Noise";
+        }
+        applyLabelToNearestPeak();
+        break;
     }
   });
 
