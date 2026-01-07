@@ -9,6 +9,8 @@ import subprocess
 import platform
 import logging
 import time
+import re
+import datetime
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
@@ -29,7 +31,7 @@ class UIMessage:
 class BPMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Heartbeat BPM Analyzer (Batch Mode)")
+        self.root.title("Heartbeat BPM Analyzer")
         self.root.geometry("800x660")
         self.style = ttkb.Style(theme='minty')
         self.current_files = []
@@ -93,6 +95,8 @@ class BPMApp:
         self.output_bpm_text = tk.BooleanVar(value=False)
         # HTML spectrogram overlay can be slow to generate; expose as a separate toggle.
         self.output_spectrogram = tk.BooleanVar(value=True)
+        # Optional regression testing output log (Markdown)
+        self.output_regression_log = tk.BooleanVar(value=False)
         # Long-plot optimization (HTML debug traces)
         self.optimize_long_plots = tk.BooleanVar(value=False)
         # Output location option
@@ -119,24 +123,30 @@ class BPMApp:
                        command=self._update_output_status).grid(row=3, column=0, sticky="w", padx=(0, 20))
         ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
                        command=self._update_output_status).grid(row=3, column=1, sticky="w", padx=(0, 20))
+        ttk.Checkbutton(
+            output_frame,
+            text="Regression testing output log (Markdown)",
+            variable=self.output_regression_log,
+            command=self._update_output_status,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 20))
 
         # Long-plot optimization option (does not change output type counts)
         ttk.Checkbutton(
             output_frame,
             text="Optimize long HTML plots (>10 min): hide detailed debug traces to reduce file size",
             variable=self.optimize_long_plots,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
 
         # Output location option (does not change output type counts)
         ttk.Checkbutton(
             output_frame,
             text="Save outputs next to input files (instead of 'processed_files')",
             variable=self.output_to_input_dir,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
 
         # Select All/None buttons
         btn_frame_output = ttk.Frame(output_frame)
-        btn_frame_output.grid(row=6, column=0, columnspan=2, pady=(10, 0))
+        btn_frame_output.grid(row=7, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(btn_frame_output, text="Select All", command=self.select_all_outputs, 
                   bootstyle=SECONDARY).grid(row=0, column=0, padx=(0, 5))
         ttk.Button(btn_frame_output, text="Select None", command=self.select_none_outputs, 
@@ -144,7 +154,7 @@ class BPMApp:
 
         # Output status label
         self.output_status_label = ttk.Label(output_frame, text="", font=("TkDefaultFont", 9))
-        self.output_status_label.grid(row=7, column=0, columnspan=2, pady=(5, 0))
+        self.output_status_label.grid(row=8, column=0, columnspan=2, pady=(5, 0))
         
         # Bind output option changes to update status and save settings
         def on_output_change(*args):
@@ -159,6 +169,7 @@ class BPMApp:
         self.output_filtered_wav.trace('w', on_output_change)
         self.output_bpm_text.trace('w', on_output_change)
         self.output_spectrogram.trace('w', on_output_change)
+        self.output_regression_log.trace('w', on_output_change)
         self.output_to_input_dir.trace('w', lambda *args: self.save_ui_settings())
         self.optimize_long_plots.trace('w', lambda *args: self.save_ui_settings())
 
@@ -266,6 +277,25 @@ class BPMApp:
         """Safely update the status bar from any thread."""
         self.root.after(0, lambda: self.status_var.set(message))
 
+    def _extract_bpm_from_filename(self, file_path: str):
+        """
+        Try to detect a starting BPM from the file name if the user did not enter one.
+
+        Looks for patterns like '120bpm' or '120 bpm' (case-insensitive) in the base file name.
+        Returns a float BPM value if found, otherwise None.
+        """
+        base = os.path.basename(file_path)
+        # Case-insensitive search for "<number> [optional space] bpm"
+        match = re.search(r"(\d+)\s*bpm", base, flags=re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            bpm_val = float(match.group(1))
+            logging.info("Using BPM %s from file name for '%s'.", bpm_val, base)
+            return bpm_val
+        except (TypeError, ValueError):
+            return None
+
     def save_ui_settings(self):
         """Save current UI settings to a JSON file."""
         # Don't save during initialization when loading settings
@@ -284,6 +314,7 @@ class BPMApp:
                 'output_filtered_wav': self.output_filtered_wav.get(),
                 'output_bpm_text': self.output_bpm_text.get(),
                 'output_spectrogram': self.output_spectrogram.get(),
+                'output_regression_log': self.output_regression_log.get(),
                 'optimize_long_plots': self.optimize_long_plots.get(),
                 'output_to_input_dir': self.output_to_input_dir.get(),
                 'last_files': self.current_files if self.current_files else []
@@ -330,6 +361,8 @@ class BPMApp:
                 self.output_bpm_text.set(settings['output_bpm_text'])
             if 'output_spectrogram' in settings:
                 self.output_spectrogram.set(settings['output_spectrogram'])
+            if 'output_regression_log' in settings:
+                self.output_regression_log.set(settings['output_regression_log'])
             if 'optimize_long_plots' in settings:
                 self.optimize_long_plots.set(settings['optimize_long_plots'])
             if 'output_to_input_dir' in settings:
@@ -430,6 +463,7 @@ class BPMApp:
             'filtered_wav': self.output_filtered_wav.get(),
             'bpm_text': self.output_bpm_text.get(),
             'spectrogram': self.output_spectrogram.get(),
+            'regression_log': self.output_regression_log.get(),
         }
 
     def _update_output_status(self, *args):
@@ -476,10 +510,26 @@ class BPMApp:
             # Check for a global BPM value to override all individual settings.
             bpm_override_input = self.bpm_entry.get().strip()
             bpm_override_hint = float(bpm_override_input) if bpm_override_input else None
-            start_bpm_hint = bpm_override_hint
+            # If the user entered a value, use it for the whole batch.
+            # If left blank, we will try to infer BPM from each file name instead.
+            global_start_bpm_hint = bpm_override_hint
 
             base_output_dir = os.path.join(os.getcwd(), "processed_files")
             os.makedirs(base_output_dir, exist_ok=True)
+
+            # Initialize regression testing output log if requested.
+            regression_log_path = None
+            if self.output_regression_log.get():
+                regression_log_path = os.path.join(base_output_dir, "regression_testing_output_log.md")
+                try:
+                    with open(regression_log_path, "w", encoding="utf-8") as log_file:
+                        log_file.write("# Regression Testing Output Log\n")
+                        log_file.write(
+                            f"*Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n"
+                        )
+                except Exception as e:
+                    logging.error("Failed to initialize regression testing output log: %s", e)
+                    regression_log_path = None
 
             # Read batch-wide options once
             process_all_channels = self.process_all_channels.get()
@@ -587,6 +637,16 @@ class BPMApp:
 
                     # Pass the file-specific start_bpm_hint and output options to the analysis function.
                     output_options = self.get_output_options()
+                    if regression_log_path:
+                        # Share the regression log path with the analysis pipeline so that
+                        # per-file validation results can be appended in one central log.
+                        output_options["regression_log_path"] = regression_log_path
+
+                    # Determine starting BPM hint for this original input file.
+                    if global_start_bpm_hint is not None:
+                        file_start_bpm_hint = global_start_bpm_hint
+                    else:
+                        file_start_bpm_hint = self._extract_bpm_from_filename(file_path)
 
                     # Ensure plotting logic sees the long-plot optimization preference
                     if optimize_long_plots:
@@ -610,8 +670,11 @@ class BPMApp:
                         analyze_wav_file(
                             wav_for_analysis,
                             self.params,
-                            start_bpm_hint,
-                            original_file_path=wav_for_analysis,
+                            file_start_bpm_hint,
+                            # Use the original user-selected file path for naming and
+                            # for locating any manually labeled peaks CSV placed next to
+                            # the input file.
+                            original_file_path=file_path,
                             output_directory=output_dir,
                             output_options=output_options,
                         )

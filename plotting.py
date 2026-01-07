@@ -1237,6 +1237,7 @@ class Plotter:
                         <option value="Noise">Noise</option>
                     </select>
                     <button id="apply-label-btn" title="Relabel nearest peak to current playhead time">Apply</button>
+                    <button id="flip-labels-right-btn" title="Flip all S1/S2 labels to the right of the playhead">Flip Right</button>
                     <button id="download-labels-btn" title="Download current labels as CSV">Download CSV</button>
                     <button id="import-labels-btn" title="Import manually labeled peaks CSV">Import CSV</button>
                     <input type="file" id="import-labels-input" accept=".csv" style="display:none" />

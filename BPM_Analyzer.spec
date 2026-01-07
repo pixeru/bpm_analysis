@@ -11,13 +11,13 @@ kaleido_datas = collect_data_files("kaleido")
 # Collect ttkbootstrap themes and other package data so the themed UI renders correctly
 ttk_datas = collect_data_files("ttkbootstrap")
 
-# Bundle the local assets folder (used by the Dash heartbeat labeler keyboard shortcuts)
+# Bundle local JS assets needed at runtime (e.g., interactive Plotly controls)
 extra_datas = [
-    (os.path.join("assets", "keyboard_shortcuts.js"), os.path.join("assets")),
+    (os.path.join("assets", "interactive_plot.js"), os.path.join("assets")),
 ]
 
 a = Analysis(
-    ["main.py"],
+    ["main.pyw"],
     pathex=[],
     binaries=[],
     datas=plotly_datas + kaleido_datas + ttk_datas + extra_datas,

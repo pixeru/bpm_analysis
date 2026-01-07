@@ -423,10 +423,9 @@ Attempting to optimize the remaining 40% of our script's runtime seems kinda sil
 ## Notes about the current state of my codebase
 So far, our code has
 **Technical debt**: 
-Signs of feature creep (e.g., "kick-start" recovery mechanisms, cascade resets) indicate iterative problem-solving without refactoring
+If I can find a better solution these band aid fixes would not be here: (e.g., "kick-start" recovery mechanisms, cascade resets)
 
 **Architectural Debt:**
-- `PeakClassifier` (400+ lines) handles peak finding, confidence scoring, lookahead, kick-start logic—violating Single Responsibility Principle
 - **Deep call stacks**: 6-stage pipeline with shared state dictionaries makes debugging challenging
 
 **Code Quality:**
@@ -436,6 +435,11 @@ Signs of feature creep (e.g., "kick-start" recovery mechanisms, cascade resets) 
 There are bits of logic that I implemented to the script that likely do not need to be there. I come up with a idea to solve a problem, then later I come up with a better idea but left the initial solution in the code. Therefore there may be redundancy in logic that's still being used in the code but from a practical standpoint the logic is redundant. 
 
 Right now, I can't name anything off the top of my head but I get the feeling this issue exists.
+
+
+
+
+
 
 
 
@@ -521,7 +525,9 @@ I was considering this but I can no longer find a example of the issue this is d
 - [ ] Implemented
 
 
-### Other ways to identify S1 and S2
+
+
+### Find a way to input more data into the algorithm to help it identify S1 and S2
 > [!say]
 > I wonder, is it possible to record a spectral fingerprint for S1 and S2 heart sounds?
 > Like, each recording has a different audio characteristic
@@ -532,6 +538,43 @@ I was considering this but I can no longer find a example of the issue this is d
 
 > [!think]
 > S2's higher frequency components (up to 250 Hz) are different S1's lower frequencies. I think there should be a way to exploit this. I need to confirm whether or not this frequency separation exists in my dataset before I try to isolate it. 
+
+
+Each beat, S1 and S2 should have a distinct sound that gives it its unique "profile".  
+
+> [!think]
+> Looking at `Test4_bpm_plot.html`,
+> I wonder, Is it possible make a profile for S1 and S2 heart sounds? that data would be very large. I'm thinking of a way to compress/express this profile data in a easy to parse way.
+> what If we apply different EQ band filters for ever 100 hz or something. This will generate different amplitude peaks for each peak. Then we can get the difference and compare.
+> 
+>So far, we haven't needed to compress the input data because the peak detection algorithm naturally outputs simple and easily parsable data. The additional data I plan to input input to the algorithm will not be easily parsable so I need to find a way to "compress the info" into a more "parsable" format. 
+>
+> I'm just trying to get a way to make the algorithm understand what S1 and S2 *sounds* like. currently, The algorithm knows what S1 and S2 *look* like from a point wise perspective. (there's no logic for trapezoidal shaped waveforms yet). The current data being fed into the algorithm is very minimal which means the current algorithm has to make many educated guesses. If I can find a way to efficiently compress beat "profile" data and feed it into the algorithm, then I should be able to make it substantially more robust. 
+
+
+> [!think]
+> Right now, the algorithms confidence is artificially boosted
+> If we look at the input data the algorithm is receiving. There are many instances where logically there should be no way the algorithm can determine a answer. 
+> But right now it does
+> I've done this intentionally as a band aid fix. I wanted more labeling but I must acknowledge that many peaks are being labeled correctly because the algorithm is simply making a lucky guess
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -611,6 +654,14 @@ but there must be a positive correlation with total audio amplitude and contract
 > 
 > 
 > I've been doing this manual data labeling for a while now, but why don't we find a way to export the labeling data directly from my script. then write a software that allows me to fix/edit those labels. this will speed up my labeling workflow immensely
+
+
+
+
+
+
+
+
 
 
 

@@ -40,6 +40,7 @@
   const axisGridButtons = document.querySelectorAll("[data-grid-axis]");
   const labelTypeSelect = document.getElementById("label-type-select");
   const applyLabelBtn = document.getElementById("apply-label-btn");
+  const flipLabelsRightBtn = document.getElementById("flip-labels-right-btn");
   const downloadLabelsBtn = document.getElementById("download-labels-btn");
   const importLabelsBtn = document.getElementById("import-labels-btn");
   const importLabelsInput = document.getElementById("import-labels-input");
@@ -943,6 +944,38 @@
     refreshManualLabelTraces();
   }
 
+  // Flip all S1/S2 labels to the right of the current playhead.
+  function flipLabelsRightOfPlayhead() {
+    if (!audio) return;
+    if (!editablePeaks.length) {
+      alert("No peaks available to flip in this plot.");
+      return;
+    }
+
+    const cutoffTime = audio.currentTime;
+    let flippedCount = 0;
+
+    editablePeaks.forEach((p) => {
+      if (!Number.isFinite(p.timeSec)) return;
+      if (p.timeSec < cutoffTime) return;
+
+      const manual = p.manualLabel || p.baseLabel;
+      if (manual === "S1") {
+        p.manualLabel = "S2";
+        flippedCount++;
+      } else if (manual === "S2") {
+        p.manualLabel = "S1";
+        flippedCount++;
+      }
+    });
+
+    if (flippedCount > 0) {
+      refreshManualLabelTraces();
+    } else {
+      alert("No S1/S2 peaks to flip to the right of the playhead.");
+    }
+  }
+
   function downloadLabelsCsv() {
     if (!editablePeaks.length) {
       alert("No peak labels available to export.");
@@ -1152,6 +1185,21 @@
       //   `[manual-labels] Imported labels: updated ${updatedCount} existing peaks (round-trip by time_sec).`
       // );
       refreshManualLabelTraces();
+      // Ensure manual trace legends are visible and base S1/S2/Noise traces go to legendonly.
+      const showManualTraces = Object.values(manualLabelTraceIndices).filter(
+        (idx) => typeof idx === "number" && idx >= 0
+      );
+      if (showManualTraces.length && plotlyGraphDiv) {
+        Plotly.restyle(plotlyGraphDiv, { visible: true }, showManualTraces);
+      }
+
+      const hideNames = ["S1 Beats", "S2 Beats", "Noise/Rejected"];
+      const hideIndices = hideNames
+        .map((name) => findTraceIndexByName(name))
+        .filter((idx) => typeof idx === "number" && idx >= 0);
+      if (hideIndices.length && plotlyGraphDiv) {
+        Plotly.restyle(plotlyGraphDiv, { visible: "legendonly" }, hideIndices);
+      }
     } else {
       alert(
         "No labels from CSV could be matched to existing peaks by time_sec. Check that the file was exported from this viewer."
@@ -1161,6 +1209,9 @@
 
   if (applyLabelBtn) {
     applyLabelBtn.addEventListener("click", applyLabelToNearestPeak);
+  }
+  if (flipLabelsRightBtn) {
+    flipLabelsRightBtn.addEventListener("click", flipLabelsRightOfPlayhead);
   }
   if (downloadLabelsBtn) {
     downloadLabelsBtn.addEventListener("click", downloadLabelsCsv);
