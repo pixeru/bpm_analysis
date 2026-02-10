@@ -20,23 +20,6 @@ _You only need to generate the heart rate graph but there are other options in c
 _This script includes a spectrogram view for debugging but it is very slow to generate_
 ![brave_ykQQ36DQv](https://github.com/user-attachments/assets/7a10acc5-0208-455a-9a3a-0300e5a4d722)
 
-# Heartbeat BPM Analyzer
-
-This tool is a heuristic based algorithm for phonocardiogram (PCG) Analysis.
-It analyzes audio recordings of heart sounds to detect heartbeats and graphs the Beats Per Minute (BPM) over time.
-
-### **GUI Interface:**
-_You only need to generate the heart rate graph but there are other options in case you need more information_
-
-<img width="480" height="380" alt="image" src="https://github.com/user-attachments/assets/d1325e51-4c0c-4eab-bb1a-b2fcc6c17227" />
-
-### [🔗 Outputs Heart Rate Graph:](https://youtu.be/uzc9XESJmb8)
-[![Watch the video|857x482](https://github.com/user-attachments/assets/b35ccc4a-dd20-49f6-a21d-64da8c746a92)](https://youtu.be/uzc9XESJmb8)
-
-### **Spectrogram View:**
-_This script includes a spectrogram view for debugging but it is very slow to generate_
-![brave_ykQQ36DQv](https://github.com/user-attachments/assets/7a10acc5-0208-455a-9a3a-0300e5a4d722)
-
 ## Configuration
 All tunable parameters for the `bpm_analysis.py` engine are located in `config.py`
 The parameters are organized into logical categories for easier navigation and tuning.

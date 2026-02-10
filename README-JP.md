@@ -20,23 +20,6 @@ _心拍数グラフを生成するだけで十分ですが、詳細な情報が�
 _このスクリプトにはデバッグ用のスペクトログラムビューが含まれていますが、生成に非常に時間がかかります_
 ![brave_ykQQ36DQv](https://github.com/user-attachments/assets/7a10acc5-0208-455a-9a3a-0300e5a4d722)
 
-# 心拍数 BPM アナライザー
-
-このツールは、心音図（PCG）解析のためのヒューリスティックベースのアルゴリズムです。
-心音のオーディオ録音を解析して心拍を検出し、時間経過に伴う心拍数（BPM）をグラフ化します。
-
-### **GUIインターフェース:**
-_心拍数グラフを生成するだけで十分ですが、詳細な情報が必要な場合のために他のオプションも用意されています_
-
-<img width="480" height="380" alt="image" src="https://github.com/user-attachments/assets/d1325e51-4c0c-4eab-bb1a-b2fcc6c17227" />
-
-### [🔗 心拍数グラフの出力:](https://youtu.be/uzc9XESJmb8)
-[![動画を見る|857x482](https://github.com/user-attachments/assets/b35ccc4a-dd20-49f6-a21d-64da8c746a92)](https://youtu.be/uzc9XESJmb8)
-
-### **スペクトログラムビュー:**
-_このスクリプトにはデバッグ用のスペクトログラムビューが含まれていますが、生成に非常に時間がかかります_
-![brave_ykQQ36DQv](https://github.com/user-attachments/assets/7a10acc5-0208-455a-9a3a-0300e5a4d722)
-
 ## 設定
 `bpm_analysis.py` エンジンのすべての調整可能パラメータは `config.py` に配置されています。
 パラメータは論理的なカテゴリに整理され、ナビゲーションと調整が容易になります。

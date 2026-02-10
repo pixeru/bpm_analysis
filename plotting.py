@@ -278,10 +278,10 @@ class Plotter:
 
         self.fig.update_layout(
             template="plotly_dark",
-            title_text=plot_title,
+            title=dict(text=plot_title, y=0.98, yanchor="bottom"),
             dragmode="pan",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            margin=dict(t=140, b=100),
+            margin=dict(t=160, b=100),
             hovermode="x unified",
         )
 
