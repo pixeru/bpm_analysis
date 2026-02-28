@@ -469,6 +469,95 @@
     });
   }
 
+  // --- Legend category filter (Debug vs Analysis Data) ---
+  const LEGEND_DEBUG_NAMES = new Set([
+    "Audio Envelope",
+    "Dynamic Noise Floor",
+    "Troughs",
+    "S1 Beats",
+    "S2 Beats",
+    "Noise/Rejected",
+    "BPM Trend (Belief)",
+    "Trapezoid Artifacts",
+    "Manual S1",
+    "Manual S2",
+    "Manual Noise",
+  ]);
+
+  // Traces that appear in both Debug and Analysis Data views
+  const LEGEND_IN_BOTH_NAMES = new Set(["Average BPM"]);
+
+  let legendCategoryInitialState = null;
+  let signalAxisRangeDefault = null;
+
+  function snapshotLegendCategoryDefaults() {
+    if (!plotlyGraphDiv || !plotlyGraphDiv.data || legendCategoryInitialState) return;
+    legendCategoryInitialState = plotlyGraphDiv.data.map((tr) => ({
+      visible: tr.visible === undefined ? true : tr.visible,
+      showlegend: tr.showlegend !== false,
+    }));
+    if (
+      plotlyGraphDiv._fullLayout &&
+      plotlyGraphDiv._fullLayout.yaxis &&
+      signalAxisRangeDefault === null
+    ) {
+      const r = plotlyGraphDiv._fullLayout.yaxis.range;
+      if (r && Array.isArray(r) && r.length === 2) {
+        signalAxisRangeDefault = [Number(r[0]), Number(r[1])];
+      }
+    }
+  }
+
+  function getDefaultForTrace(index) {
+    if (legendCategoryInitialState && index < legendCategoryInitialState.length) {
+      return legendCategoryInitialState[index];
+    }
+    return { visible: true, showlegend: true };
+  }
+
+  function applyLegendCategoryFilter(value) {
+    if (!plotlyGraphDiv || !plotlyGraphDiv.data) return;
+    const data = plotlyGraphDiv.data;
+    const visibility = [];
+    const showlegend = [];
+    for (let i = 0; i < data.length; i++) {
+      const name = (data[i].name || "").trim();
+      const isDebug = LEGEND_DEBUG_NAMES.has(name);
+      const defaultState = getDefaultForTrace(i);
+      if (value === "all") {
+        visibility.push(defaultState.visible);
+        showlegend.push(defaultState.showlegend);
+      } else if (value === "debug") {
+        const show = isDebug || LEGEND_IN_BOTH_NAMES.has(name);
+        if (show) {
+          visibility.push(defaultState.visible);
+          showlegend.push(defaultState.showlegend);
+        } else {
+          visibility.push(false);
+          showlegend.push(false);
+        }
+      } else {
+        const show = !isDebug || LEGEND_IN_BOTH_NAMES.has(name);
+        if (show) {
+          visibility.push(defaultState.visible);
+          showlegend.push(defaultState.showlegend);
+        } else {
+          visibility.push(false);
+          showlegend.push(false);
+        }
+      }
+    }
+    Plotly.restyle(plotlyGraphDiv, { visible: visibility, showlegend: showlegend });
+
+    // In Analysis Data view, scale signal (y) axis to 0–1 for visibility; restore default otherwise
+    if (plotlyGraphDiv._fullLayout && plotlyGraphDiv._fullLayout.yaxis) {
+      const range = value === "analysis" ? [0, 1] : signalAxisRangeDefault;
+      if (range && Array.isArray(range) && range.length === 2) {
+        Plotly.relayout(plotlyGraphDiv, { "yaxis.range": range });
+      }
+    }
+  }
+
   // --- Labeling helpers ---
 
   // Find the index of a trace by its exact name.
@@ -1402,6 +1491,13 @@
       flushPendingAxisGridUpdates();
       buildEditablePeaks();
 
+      const legendCategoryFilter = document.getElementById("legend-category-filter");
+      if (legendCategoryFilter) {
+        legendCategoryFilter.addEventListener("change", function () {
+          applyLegendCategoryFilter(this.value);
+        });
+      }
+
       function updateAxisRange() {
         if (plotlyGraphDiv._fullLayout && plotlyGraphDiv._fullLayout.xaxis) {
           xAxisRange = plotlyGraphDiv._fullLayout.xaxis.range;
@@ -1423,6 +1519,7 @@
       });
 
       plotlyGraphDiv.on("plotly_afterplot", function () {
+        snapshotLegendCategoryDefaults();
         updateAxisRange();
         updateSpectrogramPosition();
         refreshAxisGridButtons();

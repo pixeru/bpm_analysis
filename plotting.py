@@ -274,15 +274,13 @@ class Plotter:
 
     def _configure_layout(self):
         """Sets up the plot layout, titles, and axes with custom x-axis tick labels."""
-        plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
-
         self.fig.update_layout(
             template="plotly_dark",
-            title=dict(text=plot_title, y=0.98, yanchor="bottom"),
             dragmode="pan",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            margin=dict(t=160, b=100),
+            legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1),
+            margin=dict(t=80, b=100, l=100, r=10),
             hovermode="x unified",
+            autosize=True,
         )
 
         tick_positions_sec = np.linspace(0, self.time_axis_sec[-1], num=10)
@@ -493,6 +491,94 @@ class Plotter:
                     marker=dict(color="grey", symbol="x", size=6),
                     customdata=noise_peaks["customdata"],
                     hovertemplate=hovertemplate,
+                ),
+                secondary_y=False,
+            )
+
+        # Average S1 / S2 amplitude traces (3-point moving average), Analysis Data only
+        self._add_s1_s2_amplitude_traces(s1_peaks["indices"], s2_peaks["indices"], audio_envelope)
+
+    def _smooth_peak_amplitudes(self, amps: np.ndarray, window_size: int = 3) -> np.ndarray:
+        """Moving average over window_size points (current and adjacent). Boundaries use fewer points."""
+        n = len(amps)
+        if n == 0:
+            return amps
+        half = max(0, (window_size - 1) // 2)
+        smoothed = np.empty(n, dtype=float)
+        for i in range(n):
+            lo, hi = max(0, i - half), min(n, i + half + 1)
+            smoothed[i] = float(np.mean(amps[lo:hi]))
+        return smoothed
+
+    def _add_s1_s2_amplitude_traces(self, s1_indices, s2_indices, audio_envelope):
+        """Add line traces for Average S1, Average S2, and combined Average amplitude (S1+S2, 12-point window)."""
+        if s1_indices:
+            s1_idx = np.array(s1_indices)
+            s1_times_sec = s1_idx.astype(float) / self.sample_rate
+            s1_amps = audio_envelope[s1_idx]
+            s1_smooth = self._smooth_peak_amplitudes(s1_amps, window_size=3)
+            s1_times_dt = pd.to_datetime(
+                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in s1_times_sec]
+            )
+            self.fig.add_trace(
+                go.Scatter(
+                    x=s1_times_dt,
+                    y=s1_smooth,
+                    mode="lines",
+                    name="Average S1 amplitude",
+                    line=dict(color="#e36f6f", width=2, dash="dot"),
+                    visible=True,
+                ),
+                secondary_y=False,
+            )
+        if s2_indices:
+            s2_idx = np.array(s2_indices)
+            s2_times_sec = s2_idx.astype(float) / self.sample_rate
+            s2_amps = audio_envelope[s2_idx]
+            s2_smooth = self._smooth_peak_amplitudes(s2_amps, window_size=3)
+            s2_times_dt = pd.to_datetime(
+                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in s2_times_sec]
+            )
+            self.fig.add_trace(
+                go.Scatter(
+                    x=s2_times_dt,
+                    y=s2_smooth,
+                    mode="lines",
+                    name="Average S2 amplitude",
+                    line=dict(color="orange", width=2, dash="dot"),
+                    visible="legendonly",
+                ),
+                secondary_y=False,
+            )
+        # Combined S1+S2 average amplitude (6-point window, double the S1/S2 window)
+        if s1_indices or s2_indices:
+            times_sec = []
+            amps = []
+            if s1_indices:
+                s1_idx = np.array(s1_indices)
+                times_sec.extend((s1_idx.astype(float) / self.sample_rate).tolist())
+                amps.extend(audio_envelope[s1_idx].tolist())
+            if s2_indices:
+                s2_idx = np.array(s2_indices)
+                times_sec.extend((s2_idx.astype(float) / self.sample_rate).tolist())
+                amps.extend(audio_envelope[s2_idx].tolist())
+            times_sec = np.array(times_sec)
+            amps = np.array(amps)
+            order = np.argsort(times_sec)
+            times_sec = times_sec[order]
+            amps = amps[order]
+            combined_smooth = self._smooth_peak_amplitudes(amps, window_size=12)
+            times_dt = pd.to_datetime(
+                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in times_sec]
+            )
+            self.fig.add_trace(
+                go.Scatter(
+                    x=times_dt,
+                    y=combined_smooth,
+                    mode="lines",
+                    name="Average amplitude",
+                    line=dict(color="#aaa", width=2, dash="dot"),
+                    visible="legendonly",
                 ),
                 secondary_y=False,
             )
@@ -994,15 +1080,6 @@ class Plotter:
             font-family: 'Consolas', 'Monaco', monospace;
         }}
         
-        #audio-file-name {{
-            font-size: 10px;
-            color: #666;
-            margin-left: auto;
-            max-width: 300px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }}
 
         /* Labeling controls */
         #labeling-controls {{
@@ -1112,9 +1189,52 @@ class Plotter:
             flex: 1;
             position: relative;
             min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }}
+        
+        /* Chart toolbar - title, audio filename, legend filter */
+        #chart-toolbar {{
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 8px;
+            background: rgba(40, 40, 50, 0.6);
+            border-bottom: 1px solid #333;
+            font-size: 12px;
+        }}
+        #chart-toolbar .chart-toolbar-title {{
+            color: #aaa;
+            white-space: nowrap;
+        }}
+        #chart-toolbar .chart-toolbar-label {{
+            color: #aaa;
+            white-space: nowrap;
+            margin-left: auto;
+        }}
+        #chart-toolbar #audio-file-name {{
+            font-size: 12px;
+            color: #ccc;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }}
+        #legend-category-filter {{
+            padding: 2px 6px;
+            background: #2a2a35;
+            color: #ddd;
+            border: 1px solid #444;
+            border-radius: 3px;
+            font-size: 12px;
+            cursor: pointer;
+        }}
+        #legend-category-filter:hover {{
+            border-color: #666;
         }}
         
         #plotly-chart {{
+            flex: 1;
+            min-height: 0;
             width: 100%;
             height: 100%;
         }}
@@ -1243,7 +1363,6 @@ class Plotter:
                     <input type="file" id="import-labels-input" accept=".csv" style="display:none" />
                 </div>
                 <span id="total-time">{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}</span>
-                <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
             </div>
             <div id="timeline-scrubber">
                 <div id="timeline-ticks"></div>
@@ -1254,6 +1373,16 @@ class Plotter:
         
         <!-- Chart container - takes up remaining space -->
         <div id="chart-container">
+            <div id="chart-toolbar">
+                <span class="chart-toolbar-title">Heartbeat Analysis – </span>
+                <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
+                <label for="legend-category-filter" class="chart-toolbar-label">Show:</label>
+                <select id="legend-category-filter" title="Filter legend and visible traces by category">
+                    <option value="all">All</option>
+                    <option value="debug">Debug</option>
+                    <option value="analysis">Analysis Data</option>
+                </select>
+            </div>
             <div id="spectrogram-container">
                 <img id="spectrogram-image" class="hidden" src="{spectrogram_original_src}" alt="Spectrogram" />
             </div>
