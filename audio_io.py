@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple, List
 import numpy as np
 import pandas as pd
 from scipy.io import wavfile
-from scipy.signal import butter, filtfilt, welch, iirnotch, find_peaks
+from scipy.signal import butter, filtfilt, welch, iirnotch, find_peaks, hilbert
 import librosa
 
 try:
@@ -305,14 +305,18 @@ def preprocess_audio(
     if detected_hum is not None:
         logging.info("Detected and removed stationary hum at ~%.2f Hz.", detected_hum)
 
-    lowcut, highcut = 20, 150
+    # Bandpass for S1/S2 detection: 20–150 Hz is the typical PCG (phonocardiogram) range
+    # where first and second heart sounds have most of their energy.
+    # 20–60 Hz is the typical range for S1 detection.
+    # 60–200 Hz is the typical range for S2 detection.
+    lowcut, highcut = 20, 220
     nyquist = 0.5 * new_sample_rate
     low, high = lowcut / nyquist, highcut / nyquist
 
     if high >= 1.0:
         raise ValueError(f"Cannot create a {highcut}Hz filter. The sample rate of {new_sample_rate}Hz is too low.")
 
-    b, a = butter(2, [low, high], btype="band") # I've only tested this with a 2nd order filter. It's unclear if higher order filters are better.
+    b, a = butter(2, [low, high], btype="band")  # 2nd order; higher order not yet validated for this pipeline.
     audio_filtered = filtfilt(b, a, audio_downsampled)
 
     if save_debug_file:
@@ -349,9 +353,15 @@ def preprocess_audio(
     elif params["save_filtered_wav"] and not output_options.get("filtered_wav", True):
         logging.info("Skipping filtered audio WAV generation as requested.")
 
-    audio_abs = np.abs(audio_filtered)
-    window_size = new_sample_rate // 10
-    audio_envelope = pd.Series(audio_abs).rolling(window=window_size, min_periods=1, center=True).mean().values
+    # Hilbert envelope: magnitude of analytic signal for a sharper, more symmetric envelope
+    # than abs + rolling mean, which helps peak timing stability (e.g. for HRV).
+    analytic = hilbert(audio_filtered)
+    envelope_raw = np.abs(analytic).astype(np.float64)
+    # Light smoothing to reduce ripple (e.g. between S1 and S2) without smearing peaks.
+    smooth_window = max(1, new_sample_rate // 80)  # ~20 ms at 500 Hz
+    audio_envelope = pd.Series(envelope_raw).rolling(
+        window=smooth_window, min_periods=1, center=True
+    ).mean().values
 
     return audio_envelope, new_sample_rate
 

@@ -36,7 +36,7 @@ DEFAULT_PARAMS = {
     # Governs the initial identification of peaks and troughs in the audio envelope.
     # =================================================================================
     "min_peak_distance_sec": 0.1,        # I Adjusted This✔ Minimum time allowed between any two raw peaks.
-    "peak_prominence_quantile": 0.05,    # I Adjusted This✔ How much a spike must stand out to be considered a 'peak'.
+    "peak_prominence_quantile": 0.60,    # Min prominence = this quantile of envelope. Higher reduces false peaks (e.g. Hilbert ripple).
     "trough_prominence_quantile": 0.1,   # How much a dip must stand out to be considered a 'trough'.
 
     # =================================================================================

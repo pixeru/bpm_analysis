@@ -161,7 +161,12 @@ class Plotter:
 
         self._add_line_traces(time_axis_dt, audio_envelope, analysis_data)
         self._add_trough_markers(audio_envelope, analysis_data)
-        self._add_peak_traces(all_raw_peaks, analysis_data.get("beat_debug_info", {}), audio_envelope)
+        self._add_peak_traces(
+            all_raw_peaks,
+            analysis_data.get("beat_debug_info", {}),
+            audio_envelope,
+            analysis_data.get("trough_indices"),
+        )
         self._add_bpm_hrv_traces(
             final_metrics.get("smoothed_bpm"), analysis_data, final_metrics.get("windowed_hrv_df")
         )
@@ -384,7 +389,7 @@ class Plotter:
                 secondary_y=False,
             )
 
-    def _add_peak_traces(self, all_raw_peaks, debug_info, audio_envelope):
+    def _add_peak_traces(self, all_raw_peaks, debug_info, audio_envelope, trough_indices=None):
         """Adds S1, S2, and Noise peak markers to the plot with detailed hover info."""
         if getattr(self, "skip_detailed_debug_traces", False):
             logging.info("Skipping S1/S2/Noise peak markers for long file (optimization enabled).")
@@ -495,8 +500,10 @@ class Plotter:
                 secondary_y=False,
             )
 
-        # Average S1 / S2 amplitude traces (3-point moving average), Analysis Data only
-        self._add_s1_s2_amplitude_traces(s1_peaks["indices"], s2_peaks["indices"], audio_envelope)
+        # Average S1 / S2 contractility traces (prominence-based, 3-point moving average), Analysis Data only
+        self._add_s1_s2_amplitude_traces(
+            s1_peaks["indices"], s2_peaks["indices"], audio_envelope, trough_indices
+        )
 
     def _smooth_peak_amplitudes(self, amps: np.ndarray, window_size: int = 3) -> np.ndarray:
         """Moving average over window_size points (current and adjacent). Boundaries use fewer points."""
@@ -510,13 +517,21 @@ class Plotter:
             smoothed[i] = float(np.mean(amps[lo:hi]))
         return smoothed
 
-    def _add_s1_s2_amplitude_traces(self, s1_indices, s2_indices, audio_envelope):
-        """Add line traces for Average S1, Average S2, and combined Average amplitude (S1+S2, 12-point window)."""
+    def _add_s1_s2_amplitude_traces(self, s1_indices, s2_indices, audio_envelope, trough_indices=None):
+        """Add line traces for Average S1, S2, and combined contractility (prominence-based, smoothed)."""
+        from bpm_analysis import get_peak_prominence_details
+
+        troughs = np.array(trough_indices) if trough_indices is not None and len(trough_indices) > 0 else np.array([], dtype=np.intp)
+
+        def prominence_at(peak_idx):
+            details = get_peak_prominence_details(peak_idx, audio_envelope, troughs)
+            return details["prominence"]
+
         if s1_indices:
             s1_idx = np.array(s1_indices)
             s1_times_sec = s1_idx.astype(float) / self.sample_rate
-            s1_amps = audio_envelope[s1_idx]
-            s1_smooth = self._smooth_peak_amplitudes(s1_amps, window_size=3)
+            s1_prom = np.array([prominence_at(int(i)) for i in s1_idx])
+            s1_smooth = self._smooth_peak_amplitudes(s1_prom, window_size=3)
             s1_times_dt = pd.to_datetime(
                 [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in s1_times_sec]
             )
@@ -525,7 +540,7 @@ class Plotter:
                     x=s1_times_dt,
                     y=s1_smooth,
                     mode="lines",
-                    name="Average S1 amplitude",
+                    name="Average S1 contractility",
                     line=dict(color="#e36f6f", width=2, dash="dot"),
                     visible=True,
                 ),
@@ -534,8 +549,8 @@ class Plotter:
         if s2_indices:
             s2_idx = np.array(s2_indices)
             s2_times_sec = s2_idx.astype(float) / self.sample_rate
-            s2_amps = audio_envelope[s2_idx]
-            s2_smooth = self._smooth_peak_amplitudes(s2_amps, window_size=3)
+            s2_prom = np.array([prominence_at(int(i)) for i in s2_idx])
+            s2_smooth = self._smooth_peak_amplitudes(s2_prom, window_size=3)
             s2_times_dt = pd.to_datetime(
                 [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in s2_times_sec]
             )
@@ -544,30 +559,30 @@ class Plotter:
                     x=s2_times_dt,
                     y=s2_smooth,
                     mode="lines",
-                    name="Average S2 amplitude",
+                    name="Average S2 contractility",
                     line=dict(color="orange", width=2, dash="dot"),
                     visible="legendonly",
                 ),
                 secondary_y=False,
             )
-        # Combined S1+S2 average amplitude (6-point window, double the S1/S2 window)
+        # Combined S1+S2 average contractility (12-point window)
         if s1_indices or s2_indices:
             times_sec = []
-            amps = []
+            proms = []
             if s1_indices:
                 s1_idx = np.array(s1_indices)
                 times_sec.extend((s1_idx.astype(float) / self.sample_rate).tolist())
-                amps.extend(audio_envelope[s1_idx].tolist())
+                proms.extend([prominence_at(int(i)) for i in s1_idx])
             if s2_indices:
                 s2_idx = np.array(s2_indices)
                 times_sec.extend((s2_idx.astype(float) / self.sample_rate).tolist())
-                amps.extend(audio_envelope[s2_idx].tolist())
+                proms.extend([prominence_at(int(i)) for i in s2_idx])
             times_sec = np.array(times_sec)
-            amps = np.array(amps)
+            proms = np.array(proms)
             order = np.argsort(times_sec)
             times_sec = times_sec[order]
-            amps = amps[order]
-            combined_smooth = self._smooth_peak_amplitudes(amps, window_size=12)
+            proms = proms[order]
+            combined_smooth = self._smooth_peak_amplitudes(proms, window_size=12)
             times_dt = pd.to_datetime(
                 [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in times_sec]
             )
@@ -576,7 +591,7 @@ class Plotter:
                     x=times_dt,
                     y=combined_smooth,
                     mode="lines",
-                    name="Average amplitude",
+                    name="Average contractility",
                     line=dict(color="#aaa", width=2, dash="dot"),
                     visible="legendonly",
                 ),
