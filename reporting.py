@@ -184,29 +184,35 @@ class ReportGenerator:
 
     def _write_significant_changes(self, f, major_inclines, major_declines):
         """Writes the sections on sustained heart rate increases and decreases to the report file."""
-        f.write("## All Significant HR Changes\n\n### Exertion Periods (Sustained HR Increase)\n\n")
-        if major_inclines:
-            epoch = datetime.datetime.fromtimestamp(0)
-            for incline in major_inclines:
-                start_sec = (incline["start_time"] - epoch).total_seconds()
-                end_sec = (incline["end_time"] - epoch).total_seconds()
-                f.write(
-                    f"- **From {start_sec:.1f}s to {end_sec:.1f}s:** Duration={incline['duration_sec']:.1f}s, Change=`+{incline['bpm_increase']:.1f}` BPM\n"
-                )
-        else:
-            f.write("*No significant exertion periods detected.*\n")
+        epoch = datetime.datetime.fromtimestamp(0)
 
-        f.write("\n### Recovery Periods (Sustained HR Decrease)\n\n")
-        if major_declines:
-            epoch = datetime.datetime.fromtimestamp(0)
-            for decline in major_declines:
-                start_sec = (decline["start_time"] - epoch).total_seconds()
-                end_sec = (decline["end_time"] - epoch).total_seconds()
+        def _write_period_list(items, empty_msg, duration_key, change_key, change_prefix):
+            if not items:
+                f.write(empty_msg + "\n")
+                return
+            for item in items:
+                start_sec = (item["start_time"] - epoch).total_seconds()
+                end_sec = (item["end_time"] - epoch).total_seconds()
                 f.write(
-                    f"- **From {start_sec:.1f}s to {end_sec:.1f}s:** Duration={decline['duration_sec']:.1f}s, Change=`-{decline['bpm_decrease']:.1f}` BPM\n"
+                    f"- **From {start_sec:.1f}s to {end_sec:.1f}s:** Duration={item[duration_key]:.1f}s, Change=`{change_prefix}{item[change_key]:.1f}` BPM\n"
                 )
-        else:
-            f.write("*No significant recovery periods detected.*\n")
+
+        f.write("## All Significant HR Changes\n\n### Exertion Periods (Sustained HR Increase)\n\n")
+        _write_period_list(
+            major_inclines or [],
+            "*No significant exertion periods detected.*",
+            "duration_sec",
+            "bpm_increase",
+            "+",
+        )
+        f.write("\n### Recovery Periods (Sustained HR Decrease)\n\n")
+        _write_period_list(
+            major_declines or [],
+            "*No significant recovery periods detected.*",
+            "duration_sec",
+            "bpm_decrease",
+            "-",
+        )
         f.write("\n")
 
     def _write_heartbeat_data_table(self, f, smoothed_bpm, bpm_times):

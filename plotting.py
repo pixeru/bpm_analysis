@@ -2,9 +2,7 @@ import os
 import datetime
 import logging
 import csv
-import base64
 import shutil
-import io
 import json
 from typing import Dict, Optional, List, Any, Callable
 
@@ -42,8 +40,8 @@ class Plotter:
         self.audio_source_path = source_audio_path or file_name
         self.fig = make_subplots(specs=[[{"secondary_y": True}]])
         self.audio_duration_sec = None  # Will be set during plot_and_save
-        # Optional spectrogram image (original audio); filtered spectrograms are generated on demand.
-        self.spectrogram_base64: Optional[str] = None
+        # Optional spectrogram image filenames (saved in output dir); filtered generated on demand.
+        self.spectrogram_original_filename: Optional[str] = None
         self.bpm_axis_center: float = float(params.get("default_bpm_axis_center", 125))
         self.bpm_axis_span: float = float(params.get("bpm_axis_span", 150))
 
@@ -54,10 +52,10 @@ class Plotter:
         self._format_debug_entry: Callable[[Dict], List[str]] = format_debug_entry_func or (lambda entry: [])
         self._PeakType = peak_type_cls
 
-    def _generate_spectrogram_image(self, audio_path: str) -> Optional[str]:
+    def _generate_spectrogram_image(self, audio_path: str, output_path: str) -> Optional[str]:
         """
-        Generate a spectrogram image from the audio file and return as base64 PNG.
-        The spectrogram is rendered with a transparent background for overlay.
+        Generate a spectrogram image from the audio file and save as PNG to output_path.
+        Returns the basename of the saved file (for use in HTML/config), or None on failure.
         """
         try:
             # Load audio at a reasonable sample rate for spectrogram
@@ -70,7 +68,7 @@ class Plotter:
             # Compute mel spectrogram for better visual representation
             n_fft = 2048
             hop_length = 128
-            n_mels = 512
+            n_mels = 256  # Slightly smaller for reasonable file size
 
             # Generate mel spectrogram
             S = librosa.feature.melspectrogram(
@@ -80,10 +78,9 @@ class Plotter:
             # Convert to dB scale
             S_dB = librosa.power_to_db(S, ref=np.max)
 
-            # Calculate figure dimensions based on audio duration
+            # Calculate figure dimensions based on audio duration; cap width to limit file size
             duration = len(audio_data) / sr
-            # Width should be proportional to duration, height fixed
-            fig_width = max(20, duration / 10)  # Scale width with duration
+            fig_width = min(max(20, duration / 10), 80)
             fig_height = 6
 
             # Create figure with transparent background
@@ -112,26 +109,20 @@ class Plotter:
             plt.tight_layout(pad=0)
             plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
-            # Save to buffer as PNG with transparency
-            buf = io.BytesIO()
+            # Save to file as PNG with transparency (dpi 72 for smaller file size)
             fig.savefig(
-                buf,
+                output_path,
                 format="png",
                 transparent=True,
-                dpi=100,
+                dpi=72,
                 bbox_inches="tight",
                 pad_inches=0,
             )
-            buf.seek(0)
-
-            # Encode to base64
-            img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-
             plt.close(fig)
-            buf.close()
 
-            logging.info("Generated spectrogram image for background overlay")
-            return img_base64
+            basename = os.path.basename(output_path)
+            logging.info("Generated spectrogram image for background overlay: %s", basename)
+            return basename
 
         except Exception as e:
             logging.warning(f"Failed to generate spectrogram image: {e}")
@@ -155,9 +146,7 @@ class Plotter:
         # Only skip details if the recording is longer than the threshold; shorter files always show full detail.
         self.skip_detailed_debug_traces = optimize_long_plots and self.audio_duration_sec > long_threshold_sec
 
-        time_axis_dt = pd.to_datetime(
-            [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in self.time_axis_sec]
-        )
+        time_axis_dt = pd.to_datetime([self._seconds_to_datetime(t) for t in self.time_axis_sec])
 
         self._add_line_traces(time_axis_dt, audio_envelope, analysis_data)
         self._add_trough_markers(audio_envelope, analysis_data)
@@ -203,11 +192,12 @@ class Plotter:
                 self.spectrogram_enabled = output_options.get("spectrogram", True)
 
             # Generate spectrogram image for optional background overlay (original audio only).
-            # Filtered spectrograms are generated later in `_generate_custom_html` if needed.
+            # Filtered spectrograms are generated later in _generate_custom_html if needed.
             if self.spectrogram_enabled:
                 try:
-                    self.spectrogram_base64 = self._generate_spectrogram_image(
-                        self.audio_source_path or self.file_name
+                    spec_path = os.path.join(self.output_directory, f"{base_name}_spectrogram.png")
+                    self.spectrogram_original_filename = self._generate_spectrogram_image(
+                        self.audio_source_path or self.file_name, spec_path
                     )
                 except Exception as e:
                     logging.warning(f"Failed to generate original spectrogram: {e}")
@@ -294,9 +284,7 @@ class Plotter:
         tick_positions_sec = np.arange(0, duration_sec + 1e-6, tick_interval_sec, dtype=float)
         if tick_positions_sec.size > 0 and tick_positions_sec[-1] < duration_sec:
             tick_positions_sec = np.append(tick_positions_sec, duration_sec)
-        epoch = datetime.datetime.fromtimestamp(0)
-
-        tickvals = [epoch + datetime.timedelta(seconds=s) for s in tick_positions_sec]
+        tickvals = [self._seconds_to_datetime(float(s)) for s in tick_positions_sec]
         ticktext = [f"{int(s // 60):02d}:{int(s % 60):02d} ({s:.2f})" for s in tick_positions_sec]
 
         self.fig.update_xaxes(
@@ -385,7 +373,7 @@ class Plotter:
         trough_indices = analysis_data.get("trough_indices")
         if trough_indices is not None and trough_indices.size > 0:
             trough_times_dt = pd.to_datetime(
-                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in (trough_indices / self.sample_rate)]
+                [self._seconds_to_datetime(float(t)) for t in (trough_indices / self.sample_rate)]
             )
 
             self.fig.add_trace(
@@ -453,10 +441,7 @@ class Plotter:
 
         if s1_peaks["indices"]:
             times_dt = pd.to_datetime(
-                [
-                    datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t)
-                    for t in (np.array(s1_peaks["indices"]) / self.sample_rate)
-                ]
+                [self._seconds_to_datetime(float(t)) for t in (np.array(s1_peaks["indices"]) / self.sample_rate)]
             )
             self.fig.add_trace(
                 go.Scatter(
@@ -473,10 +458,7 @@ class Plotter:
 
         if s2_peaks["indices"]:
             times_dt = pd.to_datetime(
-                [
-                    datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t)
-                    for t in (np.array(s2_peaks["indices"]) / self.sample_rate)
-                ]
+                [self._seconds_to_datetime(float(t)) for t in (np.array(s2_peaks["indices"]) / self.sample_rate)]
             )
             self.fig.add_trace(
                 go.Scatter(
@@ -493,10 +475,7 @@ class Plotter:
 
         if noise_peaks["indices"]:
             times_dt = pd.to_datetime(
-                [
-                    datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t)
-                    for t in (np.array(noise_peaks["indices"]) / self.sample_rate)
-                ]
+                [self._seconds_to_datetime(float(t)) for t in (np.array(noise_peaks["indices"]) / self.sample_rate)]
             )
             self.fig.add_trace(
                 go.Scatter(
@@ -543,9 +522,7 @@ class Plotter:
             s1_times_sec = s1_idx.astype(float) / self.sample_rate
             s1_prom = np.array([prominence_at(int(i)) for i in s1_idx])
             s1_smooth = self._smooth_peak_amplitudes(s1_prom, window_size=3)
-            s1_times_dt = pd.to_datetime(
-                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in s1_times_sec]
-            )
+            s1_times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in s1_times_sec])
             self.fig.add_trace(
                 go.Scatter(
                     x=s1_times_dt,
@@ -562,9 +539,7 @@ class Plotter:
             s2_times_sec = s2_idx.astype(float) / self.sample_rate
             s2_prom = np.array([prominence_at(int(i)) for i in s2_idx])
             s2_smooth = self._smooth_peak_amplitudes(s2_prom, window_size=3)
-            s2_times_dt = pd.to_datetime(
-                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in s2_times_sec]
-            )
+            s2_times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in s2_times_sec])
             self.fig.add_trace(
                 go.Scatter(
                     x=s2_times_dt,
@@ -594,9 +569,7 @@ class Plotter:
             times_sec = times_sec[order]
             proms = proms[order]
             combined_smooth = self._smooth_peak_amplitudes(proms, window_size=12)
-            times_dt = pd.to_datetime(
-                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in times_sec]
-            )
+            times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in times_sec])
             self.fig.add_trace(
                 go.Scatter(
                     x=times_dt,
@@ -621,8 +594,7 @@ class Plotter:
 
         if "long_term_bpm_series" in analysis_data and not analysis_data["long_term_bpm_series"].empty:
             lt_series = analysis_data["long_term_bpm_series"]
-            start_datetime = datetime.datetime.fromtimestamp(0)
-            lt_times_dt = pd.to_datetime([start_datetime + datetime.timedelta(seconds=t) for t in lt_series.index])
+            lt_times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in lt_series.index])
             self.fig.add_trace(
                 go.Scatter(
                     x=lt_times_dt,
@@ -641,7 +613,7 @@ class Plotter:
             and "sdnn" in windowed_hrv_df
         ):
             hrv_times_dt = pd.to_datetime(
-                [datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=t) for t in windowed_hrv_df["time"]]
+                [self._seconds_to_datetime(float(t)) for t in windowed_hrv_df["time"]]
             )
             self.fig.add_trace(
                 go.Scatter(
@@ -657,7 +629,7 @@ class Plotter:
             )
 
     def _add_annotations_and_summary(self, smoothed_bpm, hrv_summary, hrr_stats, peak_recovery_stats):
-        """Adds min/max BPM annotations and the main summary box."""
+        """Adds min/max BPM annotations on the plot and builds plain-text summary for the HTML Analysis Summary modal."""
         if smoothed_bpm is not None and not smoothed_bpm.empty:
             max_bpm_val = smoothed_bpm.max()
             min_bpm_val = smoothed_bpm.min()
@@ -688,33 +660,22 @@ class Plotter:
                 yref="y2",
             )
 
+        # Build plain-text summary for HTML (Analysis Summary button popup); no longer drawn on plot.
+        summary_lines: List[str] = []
         if hrv_summary:
-            annotation_text = "<b>Analysis Summary</b><br>"
             if hrv_summary.get("avg_bpm") is not None:
-                annotation_text += (
-                    f"Avg/Min/Max BPM: {hrv_summary['avg_bpm']:.1f} / {hrv_summary['min_bpm']:.1f} / {hrv_summary['max_bpm']:.1f}<br>"
+                summary_lines.append(
+                    f"Avg/Min/Max BPM: {hrv_summary['avg_bpm']:.1f} / {hrv_summary['min_bpm']:.1f} / {hrv_summary['max_bpm']:.1f}"
                 )
             if hrr_stats and hrr_stats.get("hrr_value_bpm") is not None:
-                annotation_text += f"<b>1-Min HRR: {hrr_stats['hrr_value_bpm']:.1f} BPM Drop</b><br>"
+                summary_lines.append(f"1-Min HRR: {hrr_stats['hrr_value_bpm']:.1f} BPM Drop")
             if peak_recovery_stats and peak_recovery_stats.get("slope_bpm_per_sec") is not None:
-                annotation_text += f"<b>Peak Recovery Rate: {peak_recovery_stats['slope_bpm_per_sec']:.2f} BPM/sec</b><br>"
+                summary_lines.append(f"Peak Recovery Rate: {peak_recovery_stats['slope_bpm_per_sec']:.2f} BPM/sec")
             if hrv_summary.get("avg_rmssdc") is not None:
-                annotation_text += f"Avg. Corrected RMSSD: {hrv_summary['avg_rmssdc']:.2f}<br>"
+                summary_lines.append(f"Avg. Corrected RMSSD: {hrv_summary['avg_rmssdc']:.2f}")
             if hrv_summary.get("avg_sdnn") is not None:
-                annotation_text += f"Avg. Windowed SDNN: {hrv_summary['avg_sdnn']:.2f} ms"
-
-            self.fig.add_annotation(
-                text=annotation_text,
-                align="left",
-                showarrow=False,
-                xref="paper",
-                yref="paper",
-                x=0.02,
-                y=0.98,
-                bordercolor="black",
-                borderwidth=1,
-                bgcolor="rgba(255, 253, 231, 0.4)",
-            )
+                summary_lines.append(f"Avg. Windowed SDNN: {hrv_summary['avg_sdnn']:.2f} ms")
+        self.analysis_summary_text = "\n".join(summary_lines) if summary_lines else ""
 
     def _add_slope_traces(self, major_inclines, major_declines, peak_recovery_stats, peak_exertion_stats):
         """Adds traces for major exertion and recovery periods."""
@@ -879,28 +840,28 @@ class Plotter:
         audio_src_escaped = urllib.parse.quote(audio_src)
         filtered_audio_src_escaped = urllib.parse.quote(filtered_audio_src) if filtered_audio_src else ""
 
-        # Prepare spectrogram data (optional, per audio source)
+        # Prepare spectrogram filenames (PNGs saved in same directory as HTML; no embedding).
         spectrogram_original_src = ""
         spectrogram_filtered_src = ""
         spectrogram_available_original = "false"
         spectrogram_available_filtered = "false"
 
-        # Respect spectrogram-enabled flag when embedding/generating images.
         spectrogram_enabled = getattr(self, "spectrogram_enabled", True)
 
         if spectrogram_enabled:
             # Original spectrogram (precomputed in plot_and_save if possible)
-            if getattr(self, "spectrogram_base64", None):
-                spectrogram_original_src = f"data:image/png;base64,{self.spectrogram_base64}"
+            if getattr(self, "spectrogram_original_filename", None):
+                spectrogram_original_src = self.spectrogram_original_filename
                 spectrogram_available_original = "true"
             else:
-                # Fallback: try to generate on demand from the copied audio in the output directory
+                # Fallback: generate and save to file from the copied audio in the output directory
                 try:
                     if audio_src:
                         orig_audio_path_for_spec = os.path.join(self.output_directory, audio_src)
-                        spec_b64 = self._generate_spectrogram_image(orig_audio_path_for_spec)
-                        if spec_b64:
-                            spectrogram_original_src = f"data:image/png;base64,{spec_b64}"
+                        spec_path = os.path.join(self.output_directory, f"{base_name}_spectrogram.png")
+                        spec_name = self._generate_spectrogram_image(orig_audio_path_for_spec, spec_path)
+                        if spec_name:
+                            spectrogram_original_src = spec_name
                             spectrogram_available_original = "true"
                 except Exception as e:
                     logging.warning(f"Failed to generate on-demand original spectrogram: {e}")
@@ -908,14 +869,19 @@ class Plotter:
             # Filtered spectrogram (if filtered debug audio exists)
             if filtered_available:
                 try:
-                    spec_filtered_b64 = self._generate_spectrogram_image(filtered_debug_path)
-                    if spec_filtered_b64:
-                        spectrogram_filtered_src = f"data:image/png;base64,{spec_filtered_b64}"
+                    spec_filtered_path = os.path.join(
+                        self.output_directory, f"{base_name}_filtered_spectrogram.png"
+                    )
+                    spec_filtered_name = self._generate_spectrogram_image(
+                        filtered_debug_path, spec_filtered_path
+                    )
+                    if spec_filtered_name:
+                        spectrogram_filtered_src = spec_filtered_name
                         spectrogram_available_filtered = "true"
                 except Exception as e:
                     logging.warning(f"Failed to generate filtered spectrogram: {e}")
         else:
-            logging.info("Spectrogram generation disabled; no spectrogram images embedded in HTML.")
+            logging.info("Spectrogram generation disabled; no spectrogram images generated.")
 
         audio_source_options = ['<option value="original">Original Audio</option>']
         if filtered_available:
@@ -945,6 +911,7 @@ class Plotter:
                 "original": audio_file_name,
                 "filtered": filtered_debug_file_name if filtered_available else audio_file_name,
             },
+            "analysisSummary": getattr(self, "analysis_summary_text", "") or "",
         }
         config_json = json.dumps(config_payload)
 
@@ -1114,7 +1081,7 @@ class Plotter:
         }}
         
 
-        /* Labeling controls */
+        /* Labeling controls - aligned right for visual separation from playback/grid controls */
         #labeling-controls {{
             display: flex;
             align-items: center;
@@ -1122,6 +1089,7 @@ class Plotter:
             font-size: 11px;
             color: #aaa;
             flex-wrap: wrap;
+            margin-left: auto;
         }}
 
         #label-type-select {{
@@ -1325,21 +1293,6 @@ class Plotter:
             opacity: 0;
         }}
         
-        /* Audio error overlay */
-        #audio-error {{
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: #ff4757;
-            color: white;
-            padding: 20px;
-            border-radius: 5px;
-            display: none;
-            z-index: 2000;
-            font-family: monospace;
-        }}
-        
         /* Keyboard shortcuts hint */
         #shortcuts-hint {{
             position: fixed;
@@ -1359,6 +1312,64 @@ class Plotter:
             border-radius: 2px;
             margin: 0 1px;
             font-size: 9px;
+        }}
+
+        /* Analysis Summary modal */
+        #analysis-summary-overlay {{
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 3000;
+            align-items: center;
+            justify-content: center;
+        }}
+        #analysis-summary-overlay.visible {{
+            display: flex;
+        }}
+        #analysis-summary-modal {{
+            background: #1e1e2e;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 16px;
+            max-width: 90%;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        }}
+        #analysis-summary-modal h3 {{
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #00d4ff;
+        }}
+        #analysis-summary-text {{
+            width: 480px;
+            min-height: 120px;
+            max-height: 50vh;
+            padding: 10px;
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-family: Consolas, Monaco, monospace;
+            font-size: 12px;
+            resize: vertical;
+        }}
+        #analysis-summary-modal .modal-close {{
+            margin-top: 12px;
+            align-self: flex-end;
+            padding: 6px 14px;
+            background: #2a2a3a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }}
+        #analysis-summary-modal .modal-close:hover {{
+            background: #3a3a4a;
+            border-color: #00d4ff;
         }}
     </style>
 </head>
@@ -1381,6 +1392,7 @@ class Plotter:
                         <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
                     </div>
                     {audio_source_select_html}
+                    <button id="analysis-summary-btn" title="View analysis summary (copy-friendly)">📋 Analysis Summary</button>
                 </div>
                 <div id="grid-controls">
                     <span class="grid-label">Grid:</span>
@@ -1436,8 +1448,14 @@ class Plotter:
         Your browser does not support audio playback.
     </audio>
     
-    <!-- Audio error overlay -->
-    <div id="audio-error"></div>
+    <!-- Analysis Summary modal -->
+    <div id="analysis-summary-overlay" aria-hidden="true">
+        <div id="analysis-summary-modal">
+            <h3>Analysis Summary</h3>
+            <textarea id="analysis-summary-text" readonly placeholder="No summary data."></textarea>
+            <button type="button" class="modal-close" id="analysis-summary-close">Close</button>
+        </div>
+    </div>
     
     <!-- Keyboard shortcuts hint -->
     <div id="shortcuts-hint">

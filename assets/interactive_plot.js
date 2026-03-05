@@ -17,6 +17,7 @@
   const SPECTROGRAM_AVAILABLE = cfg.spectrogramAvailable || {};
   const AUDIO_SOURCES = cfg.audioSources || {};
   const AUDIO_LABELS = cfg.audioLabels || {};
+  const ANALYSIS_SUMMARY = typeof cfg.analysisSummary === "string" ? cfg.analysisSummary : "";
 
   // DOM Elements
   const audio = document.getElementById("audio-player");
@@ -44,11 +45,29 @@
   const downloadLabelsBtn = document.getElementById("download-labels-btn");
   const importLabelsBtn = document.getElementById("import-labels-btn");
   const importLabelsInput = document.getElementById("import-labels-input");
+  const analysisSummaryBtn = document.getElementById("analysis-summary-btn");
+  const analysisSummaryOverlay = document.getElementById("analysis-summary-overlay");
+  const analysisSummaryText = document.getElementById("analysis-summary-text");
+  const analysisSummaryClose = document.getElementById("analysis-summary-close");
 
   const DEFAULT_AUDIO_KEY = "original";
   let currentAudioKey = DEFAULT_AUDIO_KEY;
   if (audioFileNameEl) {
     audioFileNameEl.dataset.defaultName = audioFileNameEl.textContent || "";
+  }
+
+  function hasPlaybackAudio() {
+    if (!AUDIO_SOURCES || typeof AUDIO_SOURCES !== "object") return false;
+    const orig = AUDIO_SOURCES.original;
+    const filt = AUDIO_SOURCES.filtered;
+    return (
+      (typeof orig === "string" && orig.trim() !== "") ||
+      (typeof filt === "string" && filt.trim() !== "")
+    );
+  }
+
+  if (playBtn && !hasPlaybackAudio()) {
+    playBtn.title = "No WAV file available for playback";
   }
 
   let isPlaying = false;
@@ -61,6 +80,25 @@
   let editablePeaks = [];
   // Overlay Plotly traces for manual labels
   const manualLabelTraceIndices = { S1: null, S2: null, Noise: null };
+
+  /** Get numeric value at index from Plotly/array-like y data (handles _inputArray, bdata, etc.). */
+  function getNumericFromArrayLike(yContainer, index) {
+    if (!yContainer || typeof index !== "number" || index < 0) return null;
+    const tryAt = (src) => {
+      if (!src || typeof src.length !== "number" || src.length <= index) return null;
+      const v = src[index];
+      const num = typeof v === "number" ? v : parseFloat(v);
+      return Number.isFinite(num) ? num : null;
+    };
+    return (
+      tryAt(yContainer) ||
+      tryAt(yContainer._inputArray) ||
+      tryAt(yContainer.bdata) ||
+      tryAt(yContainer.data) ||
+      tryAt(yContainer.values) ||
+      null
+    );
+  }
 
   const logAudioSource = () => {
     if (!audio) return;
@@ -248,6 +286,7 @@
   // Play/Pause toggle
   function togglePlay() {
     if (!audio) return;
+    if (!hasPlaybackAudio()) return; // no WAV for playback; warning is on play button tooltip
     if (isPlaying) {
       audio.pause();
       if (playBtn) {
@@ -301,8 +340,11 @@
     spectrogramBtn.classList.toggle("active", isSpectrogramVisible);
     spectrogramImage.classList.toggle("hidden", !isSpectrogramVisible);
     if (isSpectrogramVisible) {
+      spectrogramImage.style.opacity = spectrogramOpacity ? spectrogramOpacity.value : "0.4";
       updateSpectrogramSourceForCurrentAudio();
       updateSpectrogramPosition();
+    } else {
+      spectrogramImage.style.removeProperty("opacity");
     }
   }
 
@@ -383,11 +425,14 @@
     }
   }
 
-  // Update spectrogram opacity
+  // Update spectrogram opacity (only when spectrogram is toggled on; slider must not make it visible when off)
   function updateSpectrogramOpacity(value) {
-    if (spectrogramImage) {
-      spectrogramImage.style.opacity = value;
+    if (!spectrogramImage) return;
+    if (!isSpectrogramVisible) {
+      spectrogramImage.style.removeProperty("opacity");
+      return;
     }
+    spectrogramImage.style.opacity = value;
   }
 
   // Update spectrogram position and scale based on current view
@@ -454,6 +499,35 @@
   if (spectrogramOpacity) {
     spectrogramOpacity.addEventListener("input", (e) => {
       updateSpectrogramOpacity(parseFloat(e.target.value));
+    });
+  }
+
+  function openAnalysisSummaryModal() {
+    if (analysisSummaryText) {
+      analysisSummaryText.value = ANALYSIS_SUMMARY || "No summary data available.";
+    }
+    if (analysisSummaryOverlay) {
+      analysisSummaryOverlay.classList.add("visible");
+      analysisSummaryOverlay.setAttribute("aria-hidden", "false");
+    }
+  }
+
+  function closeAnalysisSummaryModal() {
+    if (analysisSummaryOverlay) {
+      analysisSummaryOverlay.classList.remove("visible");
+      analysisSummaryOverlay.setAttribute("aria-hidden", "true");
+    }
+  }
+
+  if (analysisSummaryBtn) {
+    analysisSummaryBtn.addEventListener("click", openAnalysisSummaryModal);
+  }
+  if (analysisSummaryClose) {
+    analysisSummaryClose.addEventListener("click", closeAnalysisSummaryModal);
+  }
+  if (analysisSummaryOverlay) {
+    analysisSummaryOverlay.addEventListener("click", (e) => {
+      if (e.target === analysisSummaryOverlay) closeAnalysisSummaryModal();
     });
   }
 
@@ -661,49 +735,14 @@
         if (!xVal) continue;
         const tSec = (new Date(xVal).getTime() - EPOCH.getTime()) / 1000;
 
-        // Capture the y-value at this peak so we can reliably round-trip it
-        // in CSV exports. Plotly's underlying array may be a typed/ndarray-like
-        // object with numeric data stored on _inputArray or bdata.
+        // Capture the y-value at this peak so we can reliably round-trip it in CSV exports.
         let yVal = null;
         try {
           if (trace && trace.y) {
-            const yContainer = trace.y;
-
-            const tryArrayLike = (src) => {
-              if (!src) return null;
-              if (typeof src.length === "number" && src.length > i) {
-                const v = src[i];
-                const num =
-                  typeof v === "number" ? v : parseFloat(v);
-                return Number.isFinite(num) ? num : null;
-              }
-              return null;
-            };
-
-            // 1) Direct array-like access
-            yVal = tryArrayLike(yContainer);
-            // 2) Common internal fields used by Plotly/ndarray wrappers
-            if (yVal === null) {
-              yVal =
-                tryArrayLike(yContainer._inputArray) ||
-                tryArrayLike(yContainer.bdata) ||
-                tryArrayLike(yContainer.data) ||
-                tryArrayLike(yContainer.values);
-            }
+            yVal = getNumericFromArrayLike(trace.y, i);
           }
         } catch (e) {
-          // TODO: keep this log handy while we verify y extraction, remove if stable.
-          // eslint-disable-next-line no-console
-          // console.warn(
-          //   "[manual-labels] buildEditablePeaks: error reading y for peak",
-          //   {
-          //     traceIndex,
-          //     name,
-          //     i,
-          //     error: String(e),
-          //     yType: trace && trace.y && typeof trace.y,
-          //   }
-          // );
+          // ignore extraction errors
         }
 
         editablePeaks.push({
@@ -884,28 +923,7 @@
             ? plotlyGraphDiv.data[p.traceIndex]
             : null;
         if (baseTrace && baseTrace.y) {
-          const yContainer = baseTrace.y;
-          const tryArrayLike = (src) => {
-            if (!src) return null;
-            if (
-              typeof src.length === "number" &&
-              src.length > p.pointIndex
-            ) {
-              const v = src[p.pointIndex];
-              const num =
-                typeof v === "number" ? v : parseFloat(v);
-              return Number.isFinite(num) ? num : null;
-            }
-            return null;
-          };
-
-          yVal =
-            tryArrayLike(yContainer) ||
-            tryArrayLike(yContainer._inputArray) ||
-            tryArrayLike(yContainer.bdata) ||
-            tryArrayLike(yContainer.data) ||
-            tryArrayLike(yContainer.values) ||
-            yVal;
+          yVal = getNumericFromArrayLike(baseTrace.y, p.pointIndex) ?? yVal;
         }
 
         // 3) Fallback: sample from the Audio Envelope trace at this time
@@ -1096,28 +1114,7 @@
         plotlyGraphDiv.data[p.traceIndex].y
       ) {
         const baseTrace = plotlyGraphDiv.data[p.traceIndex];
-        const yContainer = baseTrace.y;
-        const tryArrayLike = (src) => {
-          if (!src) return null;
-          if (
-            typeof src.length === "number" &&
-            src.length > p.pointIndex
-          ) {
-            const v = src[p.pointIndex];
-            const num =
-              typeof v === "number" ? v : parseFloat(v);
-            return Number.isFinite(num) ? num : null;
-          }
-          return null;
-        };
-
-        yPlot =
-          tryArrayLike(yContainer) ||
-          tryArrayLike(yContainer._inputArray) ||
-          tryArrayLike(yContainer.bdata) ||
-          tryArrayLike(yContainer.data) ||
-          tryArrayLike(yContainer.values) ||
-          yPlot;
+        yPlot = getNumericFromArrayLike(baseTrace.y, p.pointIndex) ?? yPlot;
       } else {
         // Fallback for robustness: sample from Audio Envelope at this time.
         try {
@@ -1381,23 +1378,6 @@
       }
 
       console.error("❌ Audio Error:", error_msg, "Code:", audio.error && audio.error.code);
-
-      const errorDiv = document.getElementById("audio-error");
-      if (!errorDiv) return;
-      const attempted =
-        AUDIO_SOURCES[currentAudioKey] || AUDIO_SOURCES[DEFAULT_AUDIO_KEY] || "";
-      errorDiv.innerHTML = `
-                <strong>Audio Playback Error</strong><br><br>
-                ${error_msg}<br><br>
-                <strong>File attempted:</strong> ${decodeURIComponent(attempted)}<br>
-                <strong>Solution:</strong> Ensure the audio file is in the same folder as this HTML file.<br>
-                Press F12 and check the Console for more details.
-            `;
-      errorDiv.style.display = "block";
-
-      setTimeout(() => {
-        errorDiv.style.display = "none";
-      }, 10000);
     });
 
     // Debug: log audio load status
@@ -1425,8 +1405,14 @@
 
   // Keyboard shortcuts
   document.addEventListener("keydown", (e) => {
-    // Don't trigger if typing in an input
-    if (e.target && e.target.tagName === "INPUT") return;
+    // Don't trigger if typing in an input or textarea
+    if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+
+    if (e.code === "Escape" && analysisSummaryOverlay && analysisSummaryOverlay.classList.contains("visible")) {
+      closeAnalysisSummaryModal();
+      e.preventDefault();
+      return;
+    }
 
     switch (e.code) {
       case "Space":
