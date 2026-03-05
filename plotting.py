@@ -286,16 +286,25 @@ class Plotter:
             margin=dict(t=80, b=100, l=100, r=10),
             hovermode="x unified",
             autosize=True,
+            uirevision="layout-stable",
         )
 
-        tick_positions_sec = np.linspace(0, self.time_axis_sec[-1], num=10)
+        duration_sec = float(self.time_axis_sec[-1])
+        tick_interval_sec = 30
+        tick_positions_sec = np.arange(0, duration_sec + 1e-6, tick_interval_sec, dtype=float)
+        if tick_positions_sec.size > 0 and tick_positions_sec[-1] < duration_sec:
+            tick_positions_sec = np.append(tick_positions_sec, duration_sec)
         epoch = datetime.datetime.fromtimestamp(0)
 
         tickvals = [epoch + datetime.timedelta(seconds=s) for s in tick_positions_sec]
         ticktext = [f"{int(s // 60):02d}:{int(s % 60):02d} ({s:.2f})" for s in tick_positions_sec]
 
         self.fig.update_xaxes(
-            title_text="Time", tickvals=tickvals, ticktext=ticktext, hoverformat="%M:%S.%L"
+            title_text="Time",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            hoverformat="%M:%S.%L",
+            automargin=False,
         )
 
         # Use the audio envelope trace, if present, to scale the amplitude axis.
@@ -318,6 +327,7 @@ class Plotter:
             secondary_y=False,
             range=[0, robust_upper_limit * amplitude_scale],
             showgrid=False,
+            automargin=False,
         )
         half_span = self.bpm_axis_span / 2.0
         min_bpm = max(self.bpm_axis_center - half_span, 5)
@@ -327,6 +337,7 @@ class Plotter:
             secondary_y=True,
             range=[min_bpm, max_bpm],
             autorange=False,
+            automargin=False,
         )
 
     def _add_line_traces(self, time_axis_dt: pd.Series, audio_envelope: np.ndarray, analysis_data: Dict):
@@ -360,7 +371,7 @@ class Plotter:
                     x=plot_time_axis_dt,
                     y=plot_noise_floor.values,
                     name="Dynamic Noise Floor",
-                    line=dict(color="green", dash="dot", width=1.5),
+                    line=dict(color="green", width=1.5),
                     hovertemplate="Noise Floor: %{y:.4f}<extra></extra>",
                 ),
                 secondary_y=False,
@@ -541,7 +552,7 @@ class Plotter:
                     y=s1_smooth,
                     mode="lines",
                     name="Average S1 contractility",
-                    line=dict(color="#e36f6f", width=2, dash="dot"),
+                    line=dict(color="#e36f6f", width=2),
                     visible=True,
                 ),
                 secondary_y=False,
@@ -560,7 +571,7 @@ class Plotter:
                     y=s2_smooth,
                     mode="lines",
                     name="Average S2 contractility",
-                    line=dict(color="orange", width=2, dash="dot"),
+                    line=dict(color="orange", width=2),
                     visible="legendonly",
                 ),
                 secondary_y=False,
@@ -592,7 +603,7 @@ class Plotter:
                     y=combined_smooth,
                     mode="lines",
                     name="Average contractility",
-                    line=dict(color="#aaa", width=2, dash="dot"),
+                    line=dict(color="#aaa", width=2),
                     visible="legendonly",
                 ),
                 secondary_y=False,
@@ -617,7 +628,7 @@ class Plotter:
                     x=lt_times_dt,
                     y=lt_series.values,
                     name="BPM Trend (Belief)",
-                    line=dict(color="orange", width=2, dash="dot"),
+                    line=dict(color="orange", width=2),
                     visible="legendonly",
                 ),
                 secondary_y=True,
@@ -715,7 +726,7 @@ class Plotter:
                         x=[incline["start_time"], incline["end_time"]],
                         y=[incline["start_bpm"], incline["end_bpm"]],
                         mode="lines",
-                        line=dict(color="purple", width=4, dash="dash"),
+                        line=dict(color="purple", width=4),
                         name="Exertion",
                         legendgroup="Exertion",
                         showlegend=(i == 0),
@@ -734,7 +745,7 @@ class Plotter:
                         x=[decline["start_time"], decline["end_time"]],
                         y=[decline["start_bpm"], decline["end_bpm"]],
                         mode="lines",
-                        line=dict(color="#2ca02c", width=4, dash="dash"),
+                        line=dict(color="#2ca02c", width=4),
                         name="Recovery",
                         legendgroup="Recovery",
                         showlegend=(i == 0),
@@ -752,7 +763,7 @@ class Plotter:
                     x=[stats["start_time"], stats["end_time"]],
                     y=[stats["start_bpm"], stats["end_bpm"]],
                     mode="lines",
-                    line=dict(color="#ff69b4", width=5, dash="solid"),
+                    line=dict(color="#ff69b4", width=5),
                     name="Peak Recovery Slope",
                     legendgroup="Steepest Slopes",
                     visible="legendonly",
@@ -769,7 +780,7 @@ class Plotter:
                     x=[stats["start_time"], stats["end_time"]],
                     y=[stats["start_bpm"], stats["end_bpm"]],
                     mode="lines",
-                    line=dict(color="#9d32a8", width=5, dash="solid"),
+                    line=dict(color="#9d32a8", width=5),
                     name="Peak Exertion Slope",
                     legendgroup="Steepest Slopes",
                     visible="legendonly",
@@ -809,7 +820,7 @@ class Plotter:
                     mode="lines+markers",
                     name="Trapezoid Artifacts",
                     marker=dict(symbol="circle-open", size=8, color="#ffd166"),
-                    line=dict(color="#ffd166", dash="dot", width=2),
+                    line=dict(color="#ffd166", width=2),
                     customdata=customdata,
                     hovertemplate="%{customdata}<extra></extra>",
                     legendgroup="Trapezoid Artifacts",
@@ -818,7 +829,14 @@ class Plotter:
                 secondary_y=True,
             )
 
-    def _generate_custom_html(self, plotly_html: str, plot_title: str, base_name: str) -> str:
+    def _generate_custom_html(
+        self,
+        plotly_html: str,
+        plot_title: str,
+        base_name: str,
+        *,
+        pipeline_steps_html: str = "",
+    ) -> str:
         """
         Generates custom HTML with audio player, timeline scrubber, and synchronized playhead.
         Fixes audio path issues and adds debugging capabilities.
@@ -1247,13 +1265,18 @@ class Plotter:
             border-color: #666;
         }}
         
-        #plotly-chart {{
+        .plotly-chart-wrapper {{
+            position: relative;
             flex: 1;
             min-height: 0;
             width: 100%;
+        }}
+
+        #plotly-chart {{
+            width: 100%;
             height: 100%;
         }}
-        
+
         #plotly-chart > div {{
             width: 100% !important;
             height: 100% !important;

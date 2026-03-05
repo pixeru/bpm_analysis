@@ -138,7 +138,7 @@ DEFAULT_PARAMS = {
     "hrv_window_size_beats": 40,             # Sliding window size (in beats) for HRV calculation.
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
-    "plot_downsample_factor": 1,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
+    "plot_downsample_factor": 2,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
 
     # --- 7.2. Long Plot Optimization ---
     # When enabled, very long recordings can skip detailed debug traces in the HTML plot
