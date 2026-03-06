@@ -148,7 +148,7 @@ class Plotter:
 
         time_axis_dt = pd.to_datetime([seconds_to_datetime(t) for t in self.time_axis_sec])
 
-        self._add_line_traces(time_axis_dt, audio_envelope, analysis_data)
+        self._add_line_traces(time_axis_dt, audio_envelope, analysis_data, all_raw_peaks)
         self._add_trough_markers(audio_envelope, analysis_data)
         self._add_peak_traces(
             all_raw_peaks,
@@ -332,9 +332,16 @@ class Plotter:
             automargin=False,
         )
 
-    def _add_line_traces(self, time_axis_dt: pd.Series, audio_envelope: np.ndarray, analysis_data: Dict):
+    def _add_line_traces(
+        self,
+        time_axis_dt: pd.Series,
+        audio_envelope: np.ndarray,
+        analysis_data: Dict,
+        all_raw_peaks: Optional[np.ndarray] = None,
+    ):
         """Adds audio envelope and noise floor traces. Downsampling (plot_downsample_factor) applies only here
-        to these large arrays; contractility, BPM, HRV and markers are never downsampled."""
+        to these large arrays; contractility, BPM, HRV and markers are never downsampled.
+        Note: Do not use dashed lines (dash=...) for line traces—they cause noticeable lag in the plot."""
         if getattr(self, "skip_detailed_debug_traces", False):
             logging.info("Skipping audio envelope and noise floor traces for long file (optimization enabled).")
             return
@@ -367,9 +374,99 @@ class Plotter:
                     name="Dynamic Noise Floor",
                     line=dict(color="green", width=1.5),
                     hovertemplate="Noise Floor: %{y:.4f}<extra></extra>",
+                    visible="legendonly",
                 ),
                 secondary_y=False,
             )
+
+        # S1/S2 band energy (continuous) and proportion at peaks (what the algorithm uses).
+        s1_band = analysis_data.get("s1_band")
+        s2_band = analysis_data.get("s2_band")
+        s1_low = self.params.get("s1_band_low_hz", 20)
+        s1_high = self.params.get("s1_band_high_hz", 60)
+        s2_low = self.params.get("s2_band_low_hz", 60)
+        s2_high = self.params.get("s2_band_high_hz", 200)
+        if (
+            s1_band is not None
+            and s2_band is not None
+            and len(s1_band) == len(audio_envelope)
+            and len(s2_band) == len(audio_envelope)
+        ):
+            # Continuous band energy traces (raw envelope in each band; may appear temporally smeared).
+            plot_s1_band = s1_band[::factor] if factor > 1 and len(s1_band) >= factor else s1_band
+            plot_s2_band = s2_band[::factor] if factor > 1 and len(s2_band) >= factor else s2_band
+            self.fig.add_trace(
+                go.Scatter(
+                    x=plot_time_axis_dt,
+                    y=plot_s1_band,
+                    name=f"S1 band energy ({s1_low:.0f}-{s1_high:.0f} Hz)",
+                    line=dict(color="darkorange", width=1.2),
+                    hovertemplate="S1 band: %{y:.4f}<extra></extra>",
+                    visible="legendonly",
+                ),
+                secondary_y=False,
+            )
+            self.fig.add_trace(
+                go.Scatter(
+                    x=plot_time_axis_dt,
+                    y=plot_s2_band,
+                    name=f"S2 band energy ({s2_low:.0f}-{s2_high:.0f} Hz)",
+                    line=dict(color="purple", width=1.2),
+                    hovertemplate="S2 band: %{y:.4f}<extra></extra>",
+                    visible="legendonly",
+                ),
+                secondary_y=False,
+            )
+        if (
+            s1_band is not None
+            and s2_band is not None
+            and len(s1_band) == len(audio_envelope)
+            and len(s2_band) == len(audio_envelope)
+            and all_raw_peaks is not None
+            and len(all_raw_peaks) > 0
+        ):
+            eps = 1e-9
+            total = s1_band + s2_band + eps
+            s1_proportion = s1_band / total
+            s2_proportion = s2_band / total
+            scale = float(np.max(plot_envelope)) if len(plot_envelope) > 0 else 1.0
+            if scale < 1e-9:
+                scale = 1.0
+            # Sample at peak indices only (same as pairing logic)
+            peak_indices = np.asarray(all_raw_peaks)
+            in_bounds = (peak_indices >= 0) & (peak_indices < len(s1_proportion))
+            peak_indices = peak_indices[in_bounds]
+            if len(peak_indices) > 0:
+                s1_at_peaks = s1_proportion[peak_indices] * scale
+                s2_at_peaks = s2_proportion[peak_indices] * scale
+                peak_times_sec = peak_indices.astype(float) / self.sample_rate
+                peak_times_dt = pd.to_datetime([seconds_to_datetime(float(t)) for t in peak_times_sec])
+                self.fig.add_trace(
+                    go.Scatter(
+                        x=peak_times_dt,
+                        y=s1_at_peaks,
+                        mode="markers",
+                        name=f"S1 proportion at peaks ({s1_low:.0f}-{s1_high:.0f} Hz)",
+                        marker=dict(color="darkorange", size=6, symbol="triangle-up"),
+                        hovertemplate="S1 proportion: %{customdata:.3f}<extra></extra>",
+                        customdata=s1_proportion[peak_indices],
+                        visible="legendonly",
+                    ),
+                    secondary_y=False,
+                )
+                self.fig.add_trace(
+                    go.Scatter(
+                        x=peak_times_dt,
+                        y=s2_at_peaks,
+                        mode="markers",
+                        name=f"S2 proportion at peaks ({s2_low:.0f}-{s2_high:.0f} Hz)",
+                        marker=dict(color="purple", size=6, symbol="triangle-down"),
+                        hovertemplate="S2 proportion: %{customdata:.3f}<extra></extra>",
+                        customdata=s2_proportion[peak_indices],
+                        visible="legendonly",
+                    ),
+                    secondary_y=False,
+                )
 
     def _add_trough_markers(self, audio_envelope: np.ndarray, analysis_data: Dict):
         """Adds trough markers to the plot using original full-resolution data for accuracy."""
@@ -465,7 +562,7 @@ class Plotter:
 
         hovertemplate = "%{customdata}<extra></extra>"
         for name, peaks, color, symbol, size in (
-            ("S1 Beats", s1_peaks, "#e36f6f", "diamond", 8),
+            ("S1 Beats", s1_peaks, "#e36f6f", "circle", 8),
             ("S2 Beats", s2_peaks, "orange", "circle", 6),
             ("Noise/Rejected", noise_peaks, "grey", "x", 6),
         ):
@@ -550,7 +647,7 @@ class Plotter:
             t_centers, mean_proms = self._average_prominence_by_time_segment(times_sec, proms, segment_sec)
             if len(t_centers) > 0:
                 self._add_prominence_line_trace(
-                    t_centers, mean_proms, "Average S1 contractility", "#e36f6f", True, window_size=1
+                    t_centers, mean_proms, "Average S1 contractility", "#e36f6f", "legendonly", window_size=1
                 )
         if s2_indices:
             s2_idx = np.array(s2_indices)

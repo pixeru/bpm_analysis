@@ -16,6 +16,12 @@ DEFAULT_PARAMS = {
     "downsample_factor": 300,     # Factor to reduce sample rate. Higher = faster processing, less detail.
     "save_filtered_wav": True,    # If True, saves a .wav file of the filtered audio for debugging.
 
+    # Main preprocessing: target sample rate and bandpass (single wide band before envelope); typical PCG range for S1/S2.
+    "preprocess_target_sample_rate": 550,   # Resample to this Hz for analysis; lower = faster, less detail.
+    "preprocess_bandpass_low_hz": 5.0,
+    "preprocess_bandpass_high_hz": 250.0,
+    "preprocess_bandpass_order": 2,   # Butterworth order; higher order not yet validated for this pipeline.
+
     "enable_hum_removal": True,           # Detect and notch narrow low-frequency hums if present
     "hum_psd_window_sec": 4.0,            # PSD window length (seconds) for hum detection
     "hum_min_freq_hz": 40.0,              # Min frequency of narrow-band hum to consider
@@ -25,6 +31,17 @@ DEFAULT_PARAMS = {
     "hum_notch_q": 35.0,                  # Q factor, Higher = narrower notch (try 35-40 for sharp hums)
 
     "envelope_smooth_window_ms": 40,      # Rolling window (ms) for smoothing Hilbert envelope after abs(analytic). Matches common PCG practice (e.g. 50 ms).
+
+    # --- Multi-band S1 vs S2 (spectral fingerprint) ---
+    "enable_multiband_s1_s2": True,      # Use S1-band vs S2-band energy to adjust pairing confidence.
+    "s1_band_low_hz": 20.0,             # S1 typical range 20–60 Hz.
+    "s1_band_high_hz": 60.0,
+    "s2_band_low_hz": 170.0,             # S2 typical range 60–200 Hz.
+    "s2_band_high_hz": 250.0,
+    "multiband_boost_max": 0.2,         # Max confidence boost when band energies support S1–S2.
+    "multiband_penalty_max": 0.15,      # Max confidence penalty when bands suggest wrong order.
+    "multiband_peak_window_ms": 130.0,   # Time window (ms) centered on each peak; covers whole beat. Converted to samples using sample rate.
+    "multiband_gaussian_sigma_ms": 25.0, # Gaussian sigma (ms) for weighting; typically window/4 so weight falls off by edges. Used for Gaussian-weighted sum of band energy.
 
     # =================================================================================
     # 2. Signal Feature Detection
@@ -85,6 +102,7 @@ DEFAULT_PARAMS = {
     "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
     "contractility_penalty_strength": 0.35,  # Strength of the contractility penalty.
     "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
+    "recovery_phase_min_peak_bpm": 110,      # Only enable recovery-phase adjust if preliminary peak BPM >= this (avoids activating when BPM stays low).
 
     # --- 4.4. Interval-Based Confidence Penalty ---
     "interval_penalty_start_factor": 1.0,     # Penalty begins when interval > (max_interval * this value).
@@ -135,6 +153,7 @@ DEFAULT_PARAMS = {
     "enable_hrv_frequency_domain": True,     # If True, compute Lomb-Scargle LF/HF and optional global VLF/LF/HF.
     "hrv_global_min_duration_sec": 300.0,   # Only compute global spectrum when recording duration >= this (5 min).
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
+    # In plotting.py: avoid dashed lines (dash=...) for line traces—they cause noticeable lag.
     "plot_downsample_factor": 4,             # Downsample only large traces: Audio Envelope and Dynamic Noise Floor (keep 1 of every N points). Does NOT apply to Average S1/S2 contractility, BPM, HRV, or markers.
     "contractility_average_window_sec": 1.0, # Time to average S1/S2 contractility plot: Used in: long-term (contractility vs BPM), short-term (S1 vs inhale/exhale)
 

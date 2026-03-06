@@ -193,14 +193,33 @@ def split_wav_to_mono_channels(file_path: str, output_directory: str) -> List[st
     return channel_paths
 
 
+def _compute_band_envelope(
+    audio: np.ndarray, sample_rate: int, low_hz: float, high_hz: float, smooth_window: int
+) -> np.ndarray:
+    """Bandpass filter, Hilbert envelope, and rolling mean for one frequency band."""
+    nyquist = 0.5 * sample_rate
+    low = max(1e-6, low_hz / nyquist)
+    high = min(1.0 - 1e-6, high_hz / nyquist)
+    if low >= high:
+        return np.zeros_like(audio, dtype=np.float64)
+    b, a = butter(2, [low, high], btype="band")
+    filtered = filtfilt(b, a, audio)
+    analytic = hilbert(filtered)
+    envelope_raw = np.abs(analytic).astype(np.float64)
+    envelope = pd.Series(envelope_raw).rolling(
+        window=smooth_window, min_periods=1, center=True
+    ).mean().values
+    return envelope
+
+
 def preprocess_audio(
     file_path: str, params: Dict, output_directory: str, output_options: Optional[Dict] = None
-) -> Tuple[np.ndarray, int]:
+) -> Tuple[np.ndarray, int, Optional[Dict[str, np.ndarray]]]:
     if output_options is None:
         output_options = DEFAULT_OUTPUT_OPTIONS.copy()
 
     save_debug_file = params["save_filtered_wav"] and output_options.get("filtered_wav", True)
-    target_sample_rate = 500 # I had to use a lower sample rate for optimization reasons
+    target_sample_rate = int(params.get("preprocess_target_sample_rate", 500))
 
     try:
         # Preserve historical behavior: simple mono mix of all channels.
@@ -216,18 +235,17 @@ def preprocess_audio(
     if detected_hum is not None:
         logging.info("Detected and removed stationary hum at ~%.2f Hz.", detected_hum)
 
-    # Bandpass for S1/S2 detection: 20–150 Hz is the typical PCG (phonocardiogram) range
-    # where first and second heart sounds have most of their energy.
-    # 20–60 Hz is the typical range for S1 detection.
-    # 60–200 Hz is the typical range for S2 detection.
-    lowcut, highcut = 20, 220
+    # Bandpass for S1/S2 detection: typical PCG range where first and second heart sounds have most energy.
+    lowcut = float(params.get("preprocess_bandpass_low_hz", 20.0))
+    highcut = float(params.get("preprocess_bandpass_high_hz", 220.0))
+    order = int(params.get("preprocess_bandpass_order", 2))
     nyquist = 0.5 * new_sample_rate
     low, high = lowcut / nyquist, highcut / nyquist
 
     if high >= 1.0:
         raise ValueError(f"Cannot create a {highcut}Hz filter. The sample rate of {new_sample_rate}Hz is too low.")
 
-    b, a = butter(2, [low, high], btype="band")  # 2nd order; higher order not yet validated for this pipeline.
+    b, a = butter(order, [low, high], btype="band")
     audio_filtered = filtfilt(b, a, audio_downsampled)
 
     if save_debug_file:
@@ -275,5 +293,21 @@ def preprocess_audio(
         window=smooth_window, min_periods=1, center=True
     ).mean().values
 
-    return audio_envelope, new_sample_rate
+    # Multi-band S1 vs S2: separate envelopes for S1-band (e.g. 20–60 Hz) and S2-band (e.g. 60–200 Hz).
+    band_envelopes = None
+    if params.get("enable_multiband_s1_s2", True):
+        s1_low = float(params.get("s1_band_low_hz", 20.0))
+        s1_high = float(params.get("s1_band_high_hz", 60.0))
+        s2_low = float(params.get("s2_band_low_hz", 60.0))
+        s2_high = float(params.get("s2_band_high_hz", 200.0))
+        band_envelopes = {
+            "s1_band": _compute_band_envelope(
+                audio_filtered, new_sample_rate, s1_low, s1_high, smooth_window
+            ),
+            "s2_band": _compute_band_envelope(
+                audio_filtered, new_sample_rate, s2_low, s2_high, smooth_window
+            ),
+        }
+
+    return audio_envelope, new_sample_rate, band_envelopes
 

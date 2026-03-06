@@ -233,6 +233,63 @@ We can identify the following parameters for S1/S2 sounds
 - Energy envelope shape (attack/decay)
 
 
+### Multi-band S1 vs S2 (implemented)
+
+This feature uses the **spectral difference** between S1 and S2 (S1 tends to have more energy in the lower band, S2 in the higher band) to adjust pairing confidence. It does not change which peaks are detected; it only helps decide whether two consecutive peaks should be labeled as S1–S2.
+
+#### Purpose
+
+- Exploit the fact that **S1** has more energy in roughly **20–60 Hz** and **S2** in **60–200 Hz** (configurable).
+- For each candidate S1–S2 pair, compute “how much S1-band vs S2-band” each peak has; if the first peak is more S1-like and the second more S2-like, **boost** confidence; if the pattern is reversed, **penalize**.
+- The rest of the pipeline (prominence, intervals, contractility) is unchanged; multiband is an extra adjustment.
+
+#### Config parameters (`config.py`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enable_multiband_s1_s2` | `True` | Turn the multiband adjustment on/off. |
+| `s1_band_low_hz` | `20.0` | S1 band lower cutoff (Hz). |
+| `s1_band_high_hz` | `60.0` | S1 band upper cutoff (Hz). |
+| `s2_band_low_hz` | `60.0` | S2 band lower cutoff (Hz). |
+| `s2_band_high_hz` | `200.0` | S2 band upper cutoff (Hz). |
+| `multiband_boost_max` | `0.12` | Max confidence **increase** when band energies support S1–S2. |
+| `multiband_penalty_max` | `0.15` | Max confidence **decrease** when bands suggest wrong order. |
+| `multiband_peak_window_ms` | `100.0` | Time window (ms) centered on each peak when sampling band energy; covers the whole beat. |
+| `multiband_gaussian_sigma_ms` | `25.0` | Gaussian σ (ms) for weighting; typically window/4 so weight falls off by the edges. |
+
+Main preprocessing (same signal that is bandpassed for the main envelope) also has:
+
+- `preprocess_target_sample_rate` — e.g. 500 Hz.
+- `preprocess_bandpass_low_hz` / `preprocess_bandpass_high_hz` — wide band (e.g. 20–220 Hz) before any band splitting.
+
+#### Signal flow
+
+1. **Preprocessing (`audio_io.py`)**
+   - Load audio, optional hum removal, then **one wide bandpass** (e.g. 20–220 Hz) → Hilbert envelope → rolling mean → **main envelope** (used for peak detection).
+   - If `enable_multiband_s1_s2` is True, the **same** bandpassed signal is passed through two extra bandpasses:
+     - **S1 band**: `s1_band_low_hz`–`s1_band_high_hz` → Hilbert → same rolling mean → `s1_band` (one value per sample).
+     - **S2 band**: `s2_band_low_hz`–`s2_band_high_hz` → Hilbert → same rolling mean → `s2_band`.
+   - So we get two full-length “band energy” time series, aligned with the main envelope.
+
+2. **Pairing (`bpm_analysis.py`, `PairingEngine.attempt_pair`)**
+   - For each candidate **S1 peak** and **S2 peak** (two consecutive detected peaks):
+     - **Window**: Centered on the peak, length = `multiband_peak_window_ms` (e.g. 100 ms), converted to an odd number of samples.
+     - **Gaussian weighting**: σ = `multiband_gaussian_sigma_ms` in samples. Weights = exp(−0.5·(offset/σ)²), normalized to sum to 1 over the window.
+     - **Band “energy”** for that peak = **Gaussian-weighted sum** of the band envelope over the window (discrete integral under the Gaussian). So we use the whole beat, with the center of the peak weighted highest.
+   - Four numbers: `e_s1_at_first`, `e_s2_at_first`, `e_s1_at_second`, `e_s2_at_second`.
+   - **Consistency ratio**:  
+     `(e_s1_at_first × e_s2_at_second) / (e_s2_at_first × e_s1_at_second)`.  
+     If &gt; 1, the first peak is relatively more S1-like and the second more S2-like → bands support the pair. If &lt; 1, the pattern is reversed.
+   - **Adjustment**: If consistency ≥ 1.2 → add up to `multiband_boost_max` to confidence; if ≤ 0.85 → subtract up to `multiband_penalty_max`; otherwise leave confidence unchanged.
+
+The ratio is **scale-invariant**: overall loudness or level of the beat does not change the consistency, only the relative S1-band vs S2-band content at each peak.
+
+#### Visualization (`plotting.py`)
+
+- **S1 band energy** / **S2 band energy**: Continuous traces of the raw band envelopes (may appear temporally smeared due to narrow-band filtering). Legend-only by default.
+- **S1 proportion at peaks** / **S2 proportion at peaks**: Scatter points **only at detected peak times**, showing S1/(S1+S2) and S2/(S1+S2) at those indices (scaled for display). This is what the algorithm effectively uses (relative band content at peaks). Triangles: S1 proportion = triangle-up, S2 proportion = triangle-down. Legend-only by default.
+
+So: continuous band energy for context; proportion-at-peaks for how the pairing logic “sees” the data, without the lag of the full band curves.
 
 
 ### I still need to research:

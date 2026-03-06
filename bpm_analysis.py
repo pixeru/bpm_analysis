@@ -261,12 +261,14 @@ class PairingEngine:
         params: Dict,
         peak_bpm_time_sec: Optional[float],
         recovery_end_time_sec: Optional[float],
+        band_envelopes: Optional[Dict[str, np.ndarray]] = None,
     ) -> None:
         self.audio_envelope = audio_envelope
         self.sample_rate = sample_rate
         self.params = params
         self.peak_bpm_time_sec = peak_bpm_time_sec
         self.recovery_end_time_sec = recovery_end_time_sec
+        self.band_envelopes = band_envelopes
 
     def attempt_pair(
         self,
@@ -371,6 +373,53 @@ class PairingEngine:
                         f"\n- Absolute S1 Prominence Penalty: {s1_prominence:.3f} < {min_ratio:.1f}× reference "
                         f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
                     )
+
+        # --- Multi-band S1 vs S2: spectral fingerprint adjustment ---
+        if self.params.get("enable_multiband_s1_s2", True) and self.band_envelopes is not None:
+            s1_band = self.band_envelopes.get("s1_band")
+            s2_band = self.band_envelopes.get("s2_band")
+            if s1_band is not None and s2_band is not None:
+                n = len(self.audio_envelope)
+                window_ms = float(self.params.get("multiband_peak_window_ms", 100.0))
+                sigma_ms = float(self.params.get("multiband_gaussian_sigma_ms", 25.0))
+                window_samples = max(1, int(round(window_ms * 0.001 * self.sample_rate)))
+                if window_samples % 2 == 0:
+                    window_samples += 1
+                half = (window_samples - 1) // 2
+                half = min(half, n // 2)
+                sigma_samp = max(1e-6, sigma_ms * 0.001 * self.sample_rate)
+
+                def _gaussian_weighted_energy(band_arr: np.ndarray, peak_idx: int) -> float:
+                    lo = max(0, peak_idx - half)
+                    hi = min(n, peak_idx + half + 1)
+                    slice_len = hi - lo
+                    if slice_len <= 0:
+                        return 0.0
+                    offsets = np.arange(lo, hi, dtype=np.float64) - float(peak_idx)
+                    weights = np.exp(-0.5 * (offsets / sigma_samp) ** 2)
+                    weights /= weights.sum()
+                    return float(np.sum(weights * band_arr[lo:hi]))
+
+                e_s1_at_first = _gaussian_weighted_energy(s1_band, s1_candidate_idx)
+                e_s2_at_first = _gaussian_weighted_energy(s2_band, s1_candidate_idx)
+                e_s1_at_second = _gaussian_weighted_energy(s1_band, s2_candidate_idx)
+                e_s2_at_second = _gaussian_weighted_energy(s2_band, s2_candidate_idx)
+                eps = 1e-9
+                # For correct S1–S2: first peak should have more S1-band, second more S2-band.
+                # consistency > 1 means bands support this pair; < 1 means bands suggest wrong order.
+                consistency = (e_s1_at_first * e_s2_at_second) / (e_s2_at_first * e_s1_at_second + eps)
+                boost_max = self.params.get("multiband_boost_max", 0.12)
+                penalty_max = self.params.get("multiband_penalty_max", 0.15)
+                if consistency >= 1.2:
+                    delta = min(boost_max, (consistency - 1.0) * 0.5)
+                    confidence = min(1.0, confidence + delta)
+                    reason += f"\n- Multiband: S1/S2 bands support pair (ratio {consistency:.2f}) → +{delta:.2f}"
+                elif consistency <= 0.85:
+                    delta = min(penalty_max, (1.0 - consistency) * 0.5)
+                    confidence = max(0.0, confidence - delta)
+                    reason += f"\n- Multiband: S1/S2 bands oppose pair (ratio {consistency:.2f}) → −{delta:.2f}"
+                else:
+                    reason += f"\n- Multiband: S1/S2 bands neutral (ratio {consistency:.2f})"
 
         # --- Other adjustments (stability, ratio history, etc.) ---
         confidence, other_reason = _apply_other_pairing_adjustments(
@@ -661,7 +710,8 @@ class PeakClassifier:
     def __init__(self, audio_envelope: np.ndarray, sample_rate: int, params: Dict,
                  start_bpm_hint: Optional[float], precomputed_noise_floor: pd.Series,
                  precomputed_troughs: np.ndarray, peak_bpm_time_sec: Optional[float],
-                 recovery_end_time_sec: Optional[float]):
+                 recovery_end_time_sec: Optional[float],
+                 band_envelopes: Optional[Dict[str, np.ndarray]] = None):
 
         self.audio_envelope = audio_envelope
         self.sample_rate = sample_rate
@@ -671,7 +721,8 @@ class PeakClassifier:
 
         # Helper components that encapsulate specific decision logic.
         self.pairing_engine = PairingEngine(
-            audio_envelope, sample_rate, params, peak_bpm_time_sec, recovery_end_time_sec
+            audio_envelope, sample_rate, params, peak_bpm_time_sec, recovery_end_time_sec,
+            band_envelopes=band_envelopes,
         )
         self.lookahead_skipper = LookaheadSkipper(
             audio_envelope, sample_rate, params, self.pairing_engine
@@ -2065,19 +2116,32 @@ def calculate_hrr(smoothed_bpm_series: pd.Series, interval_sec: int = 60) -> Opt
             'interval_sec': interval_sec}
 
 def find_recovery_phase(bpm_series: pd.Series, bpm_times_sec: np.ndarray, params: Dict) -> Tuple[Optional[float], Optional[float]]:
-    """Analyzes a preliminary BPM series to find the peak heart rate and define the subsequent recovery phase window."""
+    """Analyzes a preliminary BPM series to find the peak heart rate and define the subsequent recovery phase window.
+    Returns (None, None) if BPM stays low (no exertion/recovery), so recovery-phase adjust is not applied."""
     if bpm_times_sec is None or len(bpm_times_sec) < 2:
         logging.warning("Not enough preliminary beats to determine a recovery phase.")
         return None, None
-    peak_time_sec = bpm_times_sec[np.argmax(bpm_series.to_numpy())]
+    bpm_values = bpm_series.to_numpy()
+    peak_idx = np.argmax(bpm_values)
+    peak_bpm = float(bpm_values[peak_idx])
+    min_peak_bpm = params.get("recovery_phase_min_peak_bpm", 95.0)
+    if peak_bpm < min_peak_bpm:
+        logging.info(
+            f"Recovery phase not used: peak BPM in preliminary pass is {peak_bpm:.1f} (below {min_peak_bpm:.0f}). "
+            "BPM remains low throughout — no exertion/recovery assumed."
+        )
+        return None, None
+    peak_time_sec = float(bpm_times_sec[peak_idx])
     recovery_end_time_sec = peak_time_sec + params.get("recovery_phase_duration_sec", 120.0)
-    logging.info(f"Peak BPM detected in preliminary pass at {peak_time_sec:.2f}s. High-contractility state defined until {recovery_end_time_sec:.2f}s.")
+    logging.info(f"Peak BPM detected in preliminary pass at {peak_time_sec:.2f}s ({peak_bpm:.1f} BPM). High-contractility state defined until {recovery_end_time_sec:.2f}s.")
     return peak_time_sec, recovery_end_time_sec
 
 # --- Main Analysis Pipeline (Orchestrator) ---
 def _run_preliminary_pass(audio_envelope: np.ndarray, sample_rate: int, params: Dict,
                           noise_floor: pd.Series, troughs: np.ndarray,
-                          start_bpm_hint: Optional[float]) -> Tuple[float, Optional[float], Optional[float]]:
+                          start_bpm_hint: Optional[float],
+                          band_envelopes: Optional[Dict[str, np.ndarray]] = None,
+                          ) -> Tuple[float, Optional[float], Optional[float]]:
     """
     Runs a high-confidence first pass to estimate global BPM and find the recovery phase.
     """
@@ -2088,7 +2152,7 @@ def _run_preliminary_pass(audio_envelope: np.ndarray, sample_rate: int, params: 
 
     # Use the classifier for a high-confidence dry run
     classifier = PeakClassifier(audio_envelope, sample_rate, params_pass_1, start_bpm_hint,
-                                noise_floor, troughs, None, None)
+                                noise_floor, troughs, None, None, band_envelopes)
     anchor_beats, _, _ = classifier.classify_peaks()
 
     global_bpm_estimate = None
@@ -2531,20 +2595,28 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
     logging.info(f"--- Processing file: {os.path.basename(original_file_path)} ---")
 
     # STAGE 1: Initialization
-    audio_envelope, sample_rate = preprocess_audio(wav_file_path, params, output_directory, output_options)
+    preprocess_result = preprocess_audio(wav_file_path, params, output_directory, output_options)
+    audio_envelope = preprocess_result[0]
+    sample_rate = preprocess_result[1]
+    band_envelopes = preprocess_result[2] if len(preprocess_result) > 2 else None
     noise_floor, troughs = _calculate_dynamic_noise_floor(audio_envelope, sample_rate, params)
 
     start_bpm, peak_time, recovery_time = _run_preliminary_pass(
-        audio_envelope, sample_rate, params, noise_floor, troughs, start_bpm_hint
+        audio_envelope, sample_rate, params, noise_floor, troughs, start_bpm_hint, band_envelopes
     )
 
     # STAGE 3: Main Analysis, now informed by the preliminary pass
     logging.info("--- STAGE 3: Running Main Analysis Pass ---")
     classifier = PeakClassifier(
         audio_envelope, sample_rate, params, start_bpm,
-        noise_floor, troughs, peak_time, recovery_time
+        noise_floor, troughs, peak_time, recovery_time, band_envelopes
     )
     s1_peaks, all_raw_peaks, analysis_data = classifier.classify_peaks()
+
+    # Attach band envelopes to analysis_data for plotting (S1/S2 band debug traces)
+    if band_envelopes is not None:
+        analysis_data["s1_band"] = band_envelopes.get("s1_band")
+        analysis_data["s2_band"] = band_envelopes.get("s2_band")
 
     # STAGE 4 & 5: Correction and Refinement
     final_peaks, analysis_data = _refine_and_correct_peaks(

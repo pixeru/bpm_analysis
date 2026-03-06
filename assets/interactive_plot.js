@@ -809,7 +809,7 @@
     const traces = [
       {
         name: "Manual S1",
-        marker: { color: "#ff4d4d", size: 10, symbol: "diamond-open" },
+        marker: { color: "#ff4d4d", size: 10, symbol: "circle-open" },
         x: [],
         y: [],
         ...commonOpts,
