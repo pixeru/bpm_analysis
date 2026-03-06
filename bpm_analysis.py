@@ -1587,13 +1587,24 @@ def _lombscargle_band_powers(
         logging.warning("Lomb-Scargle: lombscargle() failed: %s", e)
         return None
     # Task Force bands: VLF 0.003–0.04, LF 0.04–0.15, HF 0.15–0.40 Hz
+    # With normalize=True the periodogram is dimensionless; scale by RR variance to get power in ms² (Task Force convention).
     vlf_mask = (freqs >= 0.003) & (freqs < 0.04)
     lf_mask = (freqs >= 0.04) & (freqs < 0.15)
     hf_mask = (freqs >= 0.15) & (freqs <= 0.40)
-    vlf_power = float(np.trapz(periodogram[vlf_mask], freqs[vlf_mask])) if np.any(vlf_mask) else 0.0
-    lf_power = float(np.trapz(periodogram[lf_mask], freqs[lf_mask])) if np.any(lf_mask) else 0.0
-    hf_power = float(np.trapz(periodogram[hf_mask], freqs[hf_mask])) if np.any(hf_mask) else 0.0
-    total_power = vlf_power + lf_power + hf_power
+    raw_vlf = float(np.trapz(periodogram[vlf_mask], freqs[vlf_mask])) if np.any(vlf_mask) else 0.0
+    raw_lf = float(np.trapz(periodogram[lf_mask], freqs[lf_mask])) if np.any(lf_mask) else 0.0
+    raw_hf = float(np.trapz(periodogram[hf_mask], freqs[hf_mask])) if np.any(hf_mask) else 0.0
+    raw_total = raw_vlf + raw_lf + raw_hf
+    var_rr = float(np.var(rr_ms))
+    if raw_total > 1e-20 and var_rr > 0:
+        scale = var_rr / raw_total
+        vlf_power = raw_vlf * scale
+        lf_power = raw_lf * scale
+        hf_power = raw_hf * scale
+        total_power = var_rr
+    else:
+        vlf_power, lf_power, hf_power = raw_vlf, raw_lf, raw_hf
+        total_power = raw_total
     lf_hf_ratio = (lf_power / hf_power) if hf_power > 0 else 0.0
     out = {
         "lf_power": lf_power,
@@ -1701,6 +1712,15 @@ def calculate_global_hrv_frequency(
     band_powers = _lombscargle_band_powers(times_sec, rr_ms, include_vlf=True)
     if band_powers is None:
         return None
+    logging.info(
+        "Global HRV spectrum (%.1f min): VLF=%.2f, LF=%.2f, HF=%.2f ms² ; total=%.2f ms² ; LF/HF=%.2f",
+        duration_sec / 60.0,
+        band_powers.get("vlf_power", 0),
+        band_powers["lf_power"],
+        band_powers["hf_power"],
+        band_powers["total_power"],
+        band_powers["lf_hf_ratio"],
+    )
     return {
         "vlf_power": band_powers["vlf_power"],
         "lf_power": band_powers["lf_power"],

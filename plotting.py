@@ -333,7 +333,8 @@ class Plotter:
         )
 
     def _add_line_traces(self, time_axis_dt: pd.Series, audio_envelope: np.ndarray, analysis_data: Dict):
-        """Adds downsampled audio envelope and noise floor traces for performance."""
+        """Adds audio envelope and noise floor traces. Downsampling (plot_downsample_factor) applies only here
+        to these large arrays; contractility, BPM, HRV and markers are never downsampled."""
         if getattr(self, "skip_detailed_debug_traces", False):
             logging.info("Skipping audio envelope and noise floor traces for long file (optimization enabled).")
             return
@@ -341,9 +342,10 @@ class Plotter:
         plot_envelope = audio_envelope
         plot_noise_floor = analysis_data.get("dynamic_noise_floor_series")
 
+        # Downsample only envelope and noise floor for performance; other traces (contractility, BPM, HRV) use full data
         factor = self.params.get("plot_downsample_factor", 5)
         if factor > 1 and len(audio_envelope) >= factor:
-            logging.info(f"Downsampling line traces by a factor of {factor} for plotting.")
+            logging.info(f"Downsampling envelope and noise floor by factor {factor} for plotting.")
             plot_time_axis_dt = time_axis_dt[::factor]
             plot_envelope = audio_envelope[::factor]
             if plot_noise_floor is not None and not plot_noise_floor.empty:
@@ -473,10 +475,30 @@ class Plotter:
                     audio_envelope, hovertemplate,
                 )
 
-        # Average S1 / S2 contractility traces (prominence-based, 3-point moving average), Analysis Data only
+        # Average S1 / S2 contractility traces (prominence-based, averaged over time segments), Analysis Data only
         self._add_s1_s2_amplitude_traces(
             s1_peaks["indices"], s2_peaks["indices"], audio_envelope, trough_indices
         )
+
+    def _average_prominence_by_time_segment(
+        self, times_sec: np.ndarray, proms: np.ndarray, segment_sec: float
+    ) -> tuple:
+        """Bin prominence by fixed-duration time segments; return (segment_center_times, mean_prominence)."""
+        times_sec = np.asarray(times_sec, dtype=float)
+        proms = np.asarray(proms, dtype=float)
+        if len(times_sec) == 0 or len(proms) == 0 or len(times_sec) != len(proms):
+            return np.array([]), np.array([])
+        t_min, t_max = float(np.min(times_sec)), float(np.max(times_sec))
+        t0 = np.floor(t_min / segment_sec) * segment_sec
+        segment_centers = []
+        segment_means = []
+        while t0 <= t_max:
+            mask = (times_sec >= t0) & (times_sec < t0 + segment_sec)
+            if np.any(mask):
+                segment_centers.append(t0 + segment_sec / 2.0)
+                segment_means.append(float(np.mean(proms[mask])))
+            t0 += segment_sec
+        return np.array(segment_centers), np.array(segment_means)
 
     def _smooth_peak_amplitudes(self, amps: np.ndarray, window_size: int = 3) -> np.ndarray:
         """Moving average over window_size points (current and adjacent). Boundaries use fewer points."""
@@ -491,9 +513,9 @@ class Plotter:
         return smoothed
 
     def _add_prominence_line_trace(
-        self, times_sec, proms, name, color, visible, window_size=3
+        self, times_sec, proms, name, color, visible, window_size=1
     ):
-        """Add one prominence-based contractility line trace (smoothed)."""
+        """Add one prominence-based contractility line trace. Use window_size=1 for pre-averaged (e.g. time-segment) data."""
         proms = np.asarray(proms, dtype=float)
         smoothed = self._smooth_peak_amplitudes(proms, window_size=window_size)
         times_dt = pd.to_datetime([seconds_to_datetime(float(t)) for t in times_sec])
@@ -510,9 +532,11 @@ class Plotter:
         )
 
     def _add_s1_s2_amplitude_traces(self, s1_indices, s2_indices, audio_envelope, trough_indices=None):
-        """Add line traces for Average S1, S2, and combined contractility (prominence-based, smoothed)."""
+        """Add line traces for Average S1, S2, and combined contractility (prominence-based, averaged over time segments).
+        Uses a fixed-duration segment (default 2 s) so trends reflect: long-term contractility vs BPM; short-term S1 vs inhale/exhale."""
         from bpm_analysis import get_peak_prominence_details
 
+        segment_sec = float(self.params.get("contractility_average_window_sec", 2.0))
         troughs = np.array(trough_indices) if trough_indices is not None and len(trough_indices) > 0 else np.array([], dtype=np.intp)
 
         def prominence_at(peak_idx):
@@ -523,16 +547,20 @@ class Plotter:
             s1_idx = np.array(s1_indices)
             times_sec = s1_idx.astype(float) / self.sample_rate
             proms = np.array([prominence_at(int(i)) for i in s1_idx])
-            self._add_prominence_line_trace(
-                times_sec, proms, "Average S1 contractility", "#e36f6f", True, window_size=3
-            )
+            t_centers, mean_proms = self._average_prominence_by_time_segment(times_sec, proms, segment_sec)
+            if len(t_centers) > 0:
+                self._add_prominence_line_trace(
+                    t_centers, mean_proms, "Average S1 contractility", "#e36f6f", True, window_size=1
+                )
         if s2_indices:
             s2_idx = np.array(s2_indices)
             times_sec = s2_idx.astype(float) / self.sample_rate
             proms = np.array([prominence_at(int(i)) for i in s2_idx])
-            self._add_prominence_line_trace(
-                times_sec, proms, "Average S2 contractility", "orange", "legendonly", window_size=3
-            )
+            t_centers, mean_proms = self._average_prominence_by_time_segment(times_sec, proms, segment_sec)
+            if len(t_centers) > 0:
+                self._add_prominence_line_trace(
+                    t_centers, mean_proms, "Average S2 contractility", "orange", "legendonly", window_size=1
+                )
         if s1_indices or s2_indices:
             times_sec = []
             proms = []
@@ -544,10 +572,11 @@ class Plotter:
                 proms.extend([prominence_at(int(i)) for i in idx])
             times_sec = np.array(times_sec)
             proms = np.array(proms)
-            order = np.argsort(times_sec)
-            self._add_prominence_line_trace(
-                times_sec[order], proms[order], "Average contractility", "#aaa", "legendonly", window_size=12
-            )
+            t_centers, mean_proms = self._average_prominence_by_time_segment(times_sec, proms, segment_sec)
+            if len(t_centers) > 0:
+                self._add_prominence_line_trace(
+                    t_centers, mean_proms, "Average contractility", "#aaa", "legendonly", window_size=1
+                )
 
     def _add_bpm_hrv_traces(self, smoothed_bpm, analysis_data, windowed_hrv_df):
         """Adds BPM, BPM trend, and HRV traces."""
@@ -658,7 +687,7 @@ class Plotter:
             global_freq = hrv_summary.get("global_freq") if hrv_summary else None
             if global_freq:
                 summary_lines.append(
-                    f"VLF/LF/HF (global, ms²): {global_freq.get('vlf_power', 0):.1f} / {global_freq.get('lf_power', 0):.1f} / {global_freq.get('hf_power', 0):.1f} ; LF/HF: {global_freq.get('lf_hf_ratio', 0):.2f}"
+                    f"VLF/LF/HF (global, ms²): {global_freq.get('vlf_power', 0):.2f} / {global_freq.get('lf_power', 0):.2f} / {global_freq.get('hf_power', 0):.2f} ; LF/HF: {global_freq.get('lf_hf_ratio', 0):.2f}"
                 )
         self.analysis_summary_text = "\n".join(summary_lines) if summary_lines else ""
 

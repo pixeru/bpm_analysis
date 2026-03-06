@@ -32,7 +32,7 @@ DEFAULT_PARAMS = {
     # =================================================================================
     "min_peak_distance_sec": 0.1,        # I Adjusted This✔ Minimum time allowed between any two raw peaks.
     "peak_prominence_quantile": 0.60,    # Min prominence = this quantile of envelope. Higher reduces false peaks (e.g. Hilbert ripple).
-    "trough_prominence_quantile": 0.1,   # How much a dip must stand out to be considered a 'trough'.
+    "trough_prominence_quantile": 0.3,   # How much a dip must stand out to be considered a 'trough'.
 
     # =================================================================================
     # 3. Noise Estimation & Rejection
@@ -83,7 +83,7 @@ DEFAULT_PARAMS = {
     # We should test the contractility model with different values for these params to determine the best values for the dataset I have on hand.
     "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
     "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
-    "contractility_penalty_strength": 0.30,  # I adjusted this✔ Strength of the contractility penalty.
+    "contractility_penalty_strength": 0.35,  # Strength of the contractility penalty.
     "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
 
     # --- 4.4. Interval-Based Confidence Penalty ---
@@ -135,7 +135,8 @@ DEFAULT_PARAMS = {
     "enable_hrv_frequency_domain": True,     # If True, compute Lomb-Scargle LF/HF and optional global VLF/LF/HF.
     "hrv_global_min_duration_sec": 300.0,   # Only compute global spectrum when recording duration >= this (5 min).
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
-    "plot_downsample_factor": 2,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
+    "plot_downsample_factor": 4,             # Downsample only large traces: Audio Envelope and Dynamic Noise Floor (keep 1 of every N points). Does NOT apply to Average S1/S2 contractility, BPM, HRV, or markers.
+    "contractility_average_window_sec": 1.0, # Time to average S1/S2 contractility plot: Used in: long-term (contractility vs BPM), short-term (S1 vs inhale/exhale)
 
     # --- 7.2. Long Plot Optimization ---
     # When enabled, very long recordings can skip detailed debug traces in the HTML plot

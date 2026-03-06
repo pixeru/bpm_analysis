@@ -226,13 +226,6 @@ aspectRatio: "56.25"
 > I've done this intentionally as a band aid fix. I wanted more labeling but I must acknowledge that many peaks are being labeled correctly because the algorithm is simply making a lucky guess
 
 
-> [!think]
-> research
-> - [mel-spectrogram](https://www.youtube.com/watch?v=9GHCiiDLHQ4&t=280s)
-> - Wavelet Scalogram
-> - 
-> 
-
 We can identify the following parameters for S1/S2 sounds
 - Spectral centroid trajectory
 - Bandwidth evolution
@@ -242,10 +235,17 @@ We can identify the following parameters for S1/S2 sounds
 
 
 
+### I still need to research:
+- **[Lomb–Scargle periodogram](https://archive.physionet.org/physiotools/lomb/lomb.html)** for HRV calculation to obtain frequency-domain data such as VLF, LF, HF, LF/HF ratio
+	- FFT assumes evenly spaced samples, R–R (beat-to-beat) data is inherently uneven. 
+	- (SDNN/RMSSD is time domain data)
+	- Caveats:
+		- Shorter segments: frequency-domain measures become less reliable; minimum lengths in the literature are often ~4–5 minutes for stable VLF/LF/HF; HF can still be usable down to ~10 s; LF is more reliable with at least ~30–60 s.
+- [mel-spectrogram](https://www.youtube.com/watch?v=9GHCiiDLHQ4&t=280s)
+- Wavelet Scalogram
 
 
-
-
+we should probably give a warning message for which metrics are unreliable depending on file length 
 
 
 
@@ -957,7 +957,9 @@ Regarding The idea of contractile force, what if we could display how hard the h
 Nah but that depends on how the audio is recorded. just because S1 is louder than S2 in this recording, doesn't specifically mean that the heart is contracting strongly. 
 but there must be a positive correlation with total audio amplitude and contractile force. obviously heart contractility correlates with bpm, but my idea is to further identify when the contractility of the heart is seemingly misaligned with bpm. Such as Post-Exercise S1 Dominance as documented previously. 
 
-
+I've added `Average S1 contractility`, `Average S2 contractility` , and `Average contractility` traces to the plot. They just take the location of the S1 peaks etc, to make a graph. I averaged over time to give it a bit of smoothing. 
+The idea is to visualize how contractility (S1/S2 prominence) changes as BPM increases or decreases over the recording (e.g. exercise and recovery). This allows us to observe how S1 contractility remains high after exercise despite BPM decreasing. 
+Contractility can also be used to visualize RSA.
 
 
 
