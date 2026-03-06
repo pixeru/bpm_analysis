@@ -32,3 +32,6 @@ build/
 # Binary packages
 *.exe
 *.pkg
+
+# Other Files
+ui_settings.json
