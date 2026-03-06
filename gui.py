@@ -17,6 +17,7 @@ from ttkbootstrap.constants import *
 from config import DEFAULT_PARAMS
 from dataclasses import dataclass
 from enum import Enum, auto
+from time_utils import timestamp_str
 
 class UIMessageType(Enum):
     STATUS = auto()
@@ -27,6 +28,20 @@ class UIMessageType(Enum):
 class UIMessage:
     type: UIMessageType
     data: any = None
+
+# Order and labels for output file checkboxes; first 8 in 2-column grid, 9th full width.
+OUTPUT_FILE_OPTIONS = (
+    ("output_html", "Heart Rate Graph (HTML File)"),
+    ("output_png", "Plot PNG (auto-export)"),
+    ("output_csv", "CSV Data"),
+    ("output_spectrogram", "HTML Spectrogram"),
+    ("output_summary", "Summary Report"),
+    ("output_debug", "Debug Report"),
+    ("output_filtered_wav", "Filtered Audio WAV"),
+    ("output_bpm_text", "BPM Time Text"),
+    ("output_regression_log", "Regression testing output log (Markdown)"),
+)
+
 
 class BPMApp:
     def __init__(self, root):
@@ -106,29 +121,23 @@ class BPMApp:
         output_frame = ttk.LabelFrame(main_frame, text="Output Files", padding="10")
         output_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
 
-        # Output file checkboxes
-        ttk.Checkbutton(output_frame, text="Heart Rate Graph (HTML File)", variable=self.output_html, 
-                       command=self._update_output_status).grid(row=0, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Plot PNG (auto-export)", variable=self.output_png,
-                       command=self._update_output_status).grid(row=0, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="CSV Data", variable=self.output_csv,
-                       command=self._update_output_status).grid(row=1, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="HTML Spectrogram", variable=self.output_spectrogram,
-                       command=self._update_output_status).grid(row=1, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Summary Report", variable=self.output_summary,
-                       command=self._update_output_status).grid(row=2, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Debug Report", variable=self.output_debug,
-                       command=self._update_output_status).grid(row=2, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="Filtered Audio WAV", variable=self.output_filtered_wav,
-                       command=self._update_output_status).grid(row=3, column=0, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(output_frame, text="BPM Time Text", variable=self.output_bpm_text,
-                       command=self._update_output_status).grid(row=3, column=1, sticky="w", padx=(0, 20))
-        ttk.Checkbutton(
-            output_frame,
-            text="Regression testing output log (Markdown)",
-            variable=self.output_regression_log,
-            command=self._update_output_status,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 20))
+        # Output file checkboxes (driven from OUTPUT_FILE_OPTIONS)
+        def on_output_change(*args):
+            self._update_output_status()
+            self.save_ui_settings()
+
+        for i, (var_name, label) in enumerate(OUTPUT_FILE_OPTIONS):
+            var = getattr(self, var_name)
+            ttk.Checkbutton(
+                output_frame, text=label, variable=var, command=self._update_output_status
+            ).grid(
+                row=i // 2 if i < 8 else 4,
+                column=0 if i >= 8 else i % 2,
+                columnspan=2 if i >= 8 else 1,
+                sticky="w",
+                padx=(0, 20),
+            )
+            var.trace("w", on_output_change)
 
         # Long-plot optimization option (does not change output type counts)
         ttk.Checkbutton(
@@ -155,23 +164,10 @@ class BPMApp:
         # Output status label
         self.output_status_label = ttk.Label(output_frame, text="", font=("TkDefaultFont", 9))
         self.output_status_label.grid(row=8, column=0, columnspan=2, pady=(5, 0))
-        
-        # Bind output option changes to update status and save settings
-        def on_output_change(*args):
-            self._update_output_status()
-            self.save_ui_settings()
-        
-        self.output_html.trace('w', on_output_change)
-        self.output_png.trace('w', on_output_change)
-        self.output_csv.trace('w', on_output_change)
-        self.output_summary.trace('w', on_output_change)
-        self.output_debug.trace('w', on_output_change)
-        self.output_filtered_wav.trace('w', on_output_change)
-        self.output_bpm_text.trace('w', on_output_change)
-        self.output_spectrogram.trace('w', on_output_change)
-        self.output_regression_log.trace('w', on_output_change)
-        self.output_to_input_dir.trace('w', lambda *args: self.save_ui_settings())
-        self.optimize_long_plots.trace('w', lambda *args: self.save_ui_settings())
+
+        # Bind non-output-type options to save only (no status label update)
+        self.output_to_input_dir.trace("w", lambda *args: self.save_ui_settings())
+        self.optimize_long_plots.trace("w", lambda *args: self.save_ui_settings())
 
         # Action Buttons
         btn_frame = ttk.Frame(main_frame)
@@ -296,97 +292,50 @@ class BPMApp:
         except (TypeError, ValueError):
             return None
 
+    _SETTINGS_VAR_KEYS = (
+        'process_all_channels', 'verbose_console_logging',
+        'output_html', 'output_png', 'output_csv', 'output_summary', 'output_debug',
+        'output_filtered_wav', 'output_bpm_text', 'output_spectrogram', 'output_regression_log',
+        'optimize_long_plots', 'output_to_input_dir',
+    )
+
     def save_ui_settings(self):
         """Save current UI settings to a JSON file."""
-        # Don't save during initialization when loading settings
         if self._loading_settings:
             return
         try:
-            settings = {
-                'starting_bpm': self.bpm_entry.get().strip(),
-                'process_all_channels': self.process_all_channels.get(),
-                'verbose_console_logging': self.verbose_console_logging.get(),
-                'output_html': self.output_html.get(),
-                'output_png': self.output_png.get(),
-                'output_csv': self.output_csv.get(),
-                'output_summary': self.output_summary.get(),
-                'output_debug': self.output_debug.get(),
-                'output_filtered_wav': self.output_filtered_wav.get(),
-                'output_bpm_text': self.output_bpm_text.get(),
-                'output_spectrogram': self.output_spectrogram.get(),
-                'output_regression_log': self.output_regression_log.get(),
-                'optimize_long_plots': self.optimize_long_plots.get(),
-                'output_to_input_dir': self.output_to_input_dir.get(),
-                'last_files': self.current_files if self.current_files else []
-            }
+            settings = {k: getattr(self, k).get() for k in self._SETTINGS_VAR_KEYS}
+            settings['starting_bpm'] = self.bpm_entry.get().strip()
+            settings['last_files'] = self.current_files if self.current_files else []
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=4)
         except Exception as e:
-            # Silently fail - don't interrupt user workflow
-            print(f"Warning: Could not save UI settings: {e}")
+            logging.warning("Could not save UI settings: %s", e)
 
     def load_ui_settings(self):
         """Load UI settings from a JSON file if it exists."""
         if not os.path.exists(self.settings_file):
             return
-        
-        self._loading_settings = True  # Prevent saving during load
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
-            
-            # Load starting BPM
-            if 'starting_bpm' in settings and settings['starting_bpm']:
+            if settings.get('starting_bpm'):
                 self.bpm_entry.delete(0, tk.END)
                 self.bpm_entry.insert(0, settings['starting_bpm'])
-            
-            # Load output options
-            if 'process_all_channels' in settings:
-                self.process_all_channels.set(settings['process_all_channels'])
-            if 'verbose_console_logging' in settings:
-                self.verbose_console_logging.set(settings['verbose_console_logging'])
-            if 'output_html' in settings:
-                self.output_html.set(settings['output_html'])
-            if 'output_png' in settings:
-                self.output_png.set(settings['output_png'])
-            if 'output_csv' in settings:
-                self.output_csv.set(settings['output_csv'])
-            if 'output_summary' in settings:
-                self.output_summary.set(settings['output_summary'])
-            if 'output_debug' in settings:
-                self.output_debug.set(settings['output_debug'])
-            if 'output_filtered_wav' in settings:
-                self.output_filtered_wav.set(settings['output_filtered_wav'])
-            if 'output_bpm_text' in settings:
-                self.output_bpm_text.set(settings['output_bpm_text'])
-            if 'output_spectrogram' in settings:
-                self.output_spectrogram.set(settings['output_spectrogram'])
-            if 'output_regression_log' in settings:
-                self.output_regression_log.set(settings['output_regression_log'])
-            if 'optimize_long_plots' in settings:
-                self.optimize_long_plots.set(settings['optimize_long_plots'])
-            if 'output_to_input_dir' in settings:
-                self.output_to_input_dir.set(settings['output_to_input_dir'])
-            
-            # Load last used files (only if they still exist)
-            if 'last_files' in settings and settings['last_files']:
-                existing_files = []
-                for file_path in settings['last_files']:
-                    if os.path.exists(file_path):
-                        existing_files.append(file_path)
-                
-                if existing_files:
-                    self.current_files = existing_files
-                    label_text = f"{len(self.current_files)} files loaded from previous session"
-                    self.file_label.config(text=label_text)
+            for k in self._SETTINGS_VAR_KEYS:
+                if k in settings:
+                    getattr(self, k).set(settings[k])
+            if settings.get('last_files'):
+                existing = [p for p in settings['last_files'] if os.path.exists(p)]
+                if existing:
+                    self.current_files = existing
+                    self.file_label.config(text=f"{len(self.current_files)} files loaded from previous session")
                     self.analyze_btn.config(state=tk.NORMAL)
                     self._update_status(f"Loaded {len(self.current_files)} files from previous session.")
-                
         except Exception as e:
-            # Silently fail - just use defaults
-            print(f"Warning: Could not load UI settings: {e}")
+            logging.warning("Could not load UI settings: %s", e)
         finally:
-            self._loading_settings = False  # Re-enable saving
+            self._loading_settings = False
 
     def open_last_html(self):
         """Find and open the most recently generated HTML report file."""
@@ -417,7 +366,7 @@ class BPMApp:
         html_files.sort(reverse=True)
         most_recent_file = html_files[0][1]
         
-        # Open the file with the system's default application
+        # Open the file with the system's default application and close the application
         try:
             if platform.system() == 'Windows':
                 os.startfile(most_recent_file)
@@ -426,6 +375,7 @@ class BPMApp:
             else:  # Linux and others
                 subprocess.run(['xdg-open', most_recent_file])
             self._update_status(f"Opened: {os.path.basename(most_recent_file)}")
+            # Close the application after opening the HTML file
             self.root.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"Could not open HTML file: {e}")
@@ -524,9 +474,7 @@ class BPMApp:
                 try:
                     with open(regression_log_path, "w", encoding="utf-8") as log_file:
                         log_file.write("# Regression Testing Output Log\n")
-                        log_file.write(
-                            f"*Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n"
-                        )
+                        log_file.write(f"*Generated on: {timestamp_str()}*\n\n")
                 except Exception as e:
                     logging.error("Failed to initialize regression testing output log: %s", e)
                     regression_log_path = None

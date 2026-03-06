@@ -72,10 +72,7 @@ from ttkbootstrap.constants import *
 
 from scipy.interpolate import interp1d
 
-
-def _seconds_to_datetime(seconds):
-    """Elapsed seconds since epoch -> timezone-naive datetime (matches bpm_analysis/plotting)."""
-    return datetime.datetime.fromtimestamp(0) + datetime.timedelta(seconds=seconds)
+from time_utils import timestamp_str, seconds_to_datetime
 
 
 # ---------- Core analysis functions ----------
@@ -167,7 +164,7 @@ def merge_bool_runs(times, mask, allowed_gap=5.0):
             gap_duration = times[gap_end] - times[gap_start]
             if gap_duration <= allowed_gap:
                 # merge across the gap
-                j = gap_end + 0  # continue from next True
+                j = gap_end  # continue from next True
                 continue
             else:
                 # stop run at last True before gap
@@ -657,7 +654,7 @@ class HRAnalyzerApp:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         
         # Convert time to datetime for consistent formatting with bpm_analysis.py
-        time_axis_dt = pd.to_datetime([_seconds_to_datetime(t) for t in times])
+        time_axis_dt = pd.to_datetime([seconds_to_datetime(t) for t in times])
         
         # Add main BPM trace with styling matching bpm_analysis.py
         fig.add_trace(go.Scatter(
@@ -670,7 +667,7 @@ class HRAnalyzerApp:
         
         # Add slopes as secondary axis with matching styling
         if 'dbpm_dt' in derived_df.columns:
-            slope_times_dt = pd.to_datetime([_seconds_to_datetime(t) for t in derived_df['time_seconds']])
+            slope_times_dt = pd.to_datetime([seconds_to_datetime(t) for t in derived_df['time_seconds']])
             fig.add_trace(go.Scatter(
                 x=slope_times_dt, 
                 y=derived_df['dbpm_dt'],
@@ -684,9 +681,9 @@ class HRAnalyzerApp:
             s = p['start_time']; e = p['end_time']; pk = p['peak_time']
             
             # Convert times to datetime for consistency
-            s_dt = _seconds_to_datetime(s)
-            e_dt = _seconds_to_datetime(e)
-            pk_dt = _seconds_to_datetime(pk)
+            s_dt = seconds_to_datetime(s)
+            e_dt = seconds_to_datetime(e)
+            pk_dt = seconds_to_datetime(pk)
             
             # Add shaded rectangle with better styling
             fig.add_vrect(x0=s_dt, x1=e_dt, fillcolor="rgba(255, 182, 193, 0.3)", opacity=0.3, layer="below", line_width=0)
@@ -739,7 +736,7 @@ class HRAnalyzerApp:
                 )
 
         # Configure layout to match bpm_analysis.py style
-        plot_title = f"HR Reactivity Analysis - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        plot_title = f"HR Reactivity Analysis - {timestamp_str()}"
         
         fig.update_layout(
             template="plotly_dark", 
@@ -752,7 +749,7 @@ class HRAnalyzerApp:
 
         # Configure X-axis with datetime formatting like bpm_analysis.py
         tick_positions_sec = np.linspace(0, times.iloc[-1], num=10)
-        tickvals = [_seconds_to_datetime(s) for s in tick_positions_sec]
+        tickvals = [seconds_to_datetime(s) for s in tick_positions_sec]
         ticktext = [f"{int(s // 60):02d}:{int(s % 60):02d} ({s:.2f})" for s in tick_positions_sec]
 
         fig.update_xaxes(
@@ -774,8 +771,8 @@ class HRAnalyzerApp:
             min_bpm_time = times.iloc[hr.idxmin()]
             
             # Convert to datetime for consistency
-            max_bpm_time_dt = _seconds_to_datetime(max_bpm_time)
-            min_bpm_time_dt = _seconds_to_datetime(min_bpm_time)
+            max_bpm_time_dt = seconds_to_datetime(max_bpm_time)
+            min_bpm_time_dt = seconds_to_datetime(min_bpm_time)
             
             # Add annotation for the maximum BPM
             fig.add_annotation(

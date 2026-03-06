@@ -1,5 +1,4 @@
 {
-    "starting_bpm": "",
     "process_all_channels": false,
     "verbose_console_logging": false,
     "output_html": true,
@@ -9,11 +8,12 @@
     "output_debug": false,
     "output_filtered_wav": true,
     "output_bpm_text": false,
-    "output_spectrogram": true,
+    "output_spectrogram": false,
     "output_regression_log": false,
     "optimize_long_plots": false,
     "output_to_input_dir": false,
+    "starting_bpm": "",
     "last_files": [
-        "C:/Users/WXP/Documents/GitHub/bpm_analysis/inputs/Difficulty 1/\u8fd0\u52a8\u540e\u8d85\u6fc0\u70c8\u7684\u5fc3\u8df3\u58f0\uff08158~192bpm\uff09\u8bc4\u8bba\u533a\u6709\u5fc3\u7387\u5206\u6790.mp4"
+        "C:/Users/WXP/Documents/GitHub/bpm_analysis/inputs/Difficulty 1/Control.wav"
     ]
 }

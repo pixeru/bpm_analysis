@@ -2,6 +2,8 @@ import os
 import logging
 from typing import Dict, Optional, Tuple, List
 
+from config import DEFAULT_OUTPUT_OPTIONS
+
 import numpy as np
 import pandas as pd
 from scipy.io import wavfile
@@ -13,15 +15,6 @@ try:
 except ImportError:
     logging.warning("Pydub library not found. Install with 'pip install pydub'.")
     AudioSegment = None
-
-try:
-    import pyPCG
-    import pyPCG.preprocessing as preproc
-    PYPCG_AVAILABLE = True
-except ImportError:
-    logging.warning("pyPCG-toolbox not installed. Install with: pip install pyPCG-toolbox")
-    PYPCG_AVAILABLE = False
-    preproc = None
 
 
 def _detect_and_remove_stationary_hum(
@@ -53,10 +46,6 @@ def _detect_and_remove_stationary_hum(
         window_sec = float(params.get("hum_psd_window_sec", 4.0))
         nperseg = int(sample_rate * window_sec)
         nperseg = max(256, min(len(audio_data), nperseg))
-
-        if nperseg > len(audio_data):
-            nperseg = len(audio_data)
-
         freqs, psd = welch(audio_data, fs=sample_rate, nperseg=nperseg)
     except Exception as e:
         logging.warning("Hum detection skipped (PSD computation failed): %s", e)
@@ -204,87 +193,11 @@ def split_wav_to_mono_channels(file_path: str, output_directory: str) -> List[st
     return channel_paths
 
 
-def _apply_pypcg_denoising(audio_data: np.ndarray, sample_rate: int, params: Dict) -> np.ndarray:
-    """Apply pyPCG denoising with tunable strength."""
-    if params.get("denoising_method") is None or not PYPCG_AVAILABLE:
-        return audio_data
-
-    try:
-        sig = pyPCG.pcg_signal(audio_data, sample_rate)
-        method = params["denoising_method"]
-
-        if method.startswith("wavelet"):
-            import pywt
-
-            wt_family = params.get("wt_family", "coif4")
-            wt_level = params.get("wt_level", 5)
-
-            coeffs = pywt.wavedec(sig.data, wt_family, level=wt_level)
-
-            if method == "wavelet_auto":
-                thresholded_coeffs = []
-                for i, coeff in enumerate(coeffs):
-                    if i == 0:
-                        thresholded_coeffs.append(coeff)
-                        continue
-
-                    mad = np.median(np.abs(coeff - np.median(coeff)))
-                    sigma = mad / 0.6745
-                    tau = sigma * np.sqrt(2) * params.get("wavelet_threshold_multiplier", 1.0)
-
-                    thresholded_coeffs.append(pywt.threshold(coeff, tau, mode="soft"))
-            else:  # wavelet_manual
-                manual_th = params.get("wavelet_threshold", 0.2)
-                thresholded_coeffs = [
-                    coeff if i == 0 else pywt.threshold(coeff, manual_th * np.max(np.abs(coeff)))
-                    for i, coeff in enumerate(coeffs)
-                ]
-
-            denoised_data = pywt.waverec(thresholded_coeffs, wt_family)
-            logging.info(
-                "✓ Applied wavelet denoising (family=%s, level=%s, multiplier=%s)",
-                wt_family,
-                wt_level,
-                params.get("wavelet_threshold_multiplier", 1.0),
-            )
-            return denoised_data
-
-        elif method == "emd_savgol":
-            denoised = preproc.emd_denoise_savgol(
-                sig, window=params.get("emd_window", 10), poly=params.get("emd_poly", 3)
-            )
-            logging.info(
-                "✓ Applied EMD denoising (window=%s, poly=%s)",
-                params.get("emd_window"),
-                params.get("emd_poly"),
-            )
-            return denoised.data
-
-        else:
-            logging.warning("Unknown denoising method: %s", method)
-            return audio_data
-
-    except ImportError as e:
-        logging.error("❌ pyPCG-toolbox not installed. Install with: pip install pyPCG-toolbox")
-        logging.error("Import error: %s", e)
-        return audio_data
-    except Exception as e:
-        logging.error("❌ Denoising failed: %s", e)
-        return audio_data
-
-
 def preprocess_audio(
     file_path: str, params: Dict, output_directory: str, output_options: Optional[Dict] = None
 ) -> Tuple[np.ndarray, int]:
     if output_options is None:
-        output_options = {
-            "html": True,
-            "csv": True,
-            "summary": True,
-            "debug": True,
-            "settings": True,
-            "filtered_wav": True,
-        }
+        output_options = DEFAULT_OUTPUT_OPTIONS.copy()
 
     save_debug_file = params["save_filtered_wav"] and output_options.get("filtered_wav", True)
     target_sample_rate = 500 # I had to use a lower sample rate for optimization reasons
@@ -295,8 +208,6 @@ def preprocess_audio(
     except Exception as e:
         logging.error("Librosa failed to load file: %s", e)
         raise
-
-    audio_downsampled = _apply_pypcg_denoising(audio_downsampled, new_sample_rate, params)
 
     # Optional adaptive hum removal (e.g., ~50–70 Hz mains / equipment hum)
     audio_downsampled, detected_hum = _detect_and_remove_stationary_hum(
@@ -357,8 +268,9 @@ def preprocess_audio(
     # than abs + rolling mean, which helps peak timing stability (e.g. for HRV).
     analytic = hilbert(audio_filtered)
     envelope_raw = np.abs(analytic).astype(np.float64)
-    # Light smoothing to reduce ripple (e.g. between S1 and S2) without smearing peaks.
-    smooth_window = max(1, new_sample_rate // 80)  # ~20 ms at 500 Hz
+    # Smoothing to reduce ripple (e.g. between S1 and S2); window in ms from config (default 50 ms).
+    smooth_ms = params.get("envelope_smooth_window_ms", 50)
+    smooth_window = max(1, int(smooth_ms * new_sample_rate / 1000))
     audio_envelope = pd.Series(envelope_raw).rolling(
         window=smooth_window, min_periods=1, center=True
     ).mean().values

@@ -561,8 +561,32 @@
   // Traces that appear in both Debug and Analysis Data views
   const LEGEND_IN_BOTH_NAMES = new Set(["Average BPM"]);
 
+  // In Analysis Data view, y-axis range is set to (max amplitude of visible analysis traces) * this factor.
+  const ANALYSIS_VIEW_Y_RANGE_MULTIPLIER = 5;
+
   let legendCategoryInitialState = null;
   let signalAxisRangeDefault = null;
+
+  /** Returns max Y value from traces that are visible in Analysis Data view and use the primary y-axis. */
+  function getMaxYFromAnalysisTraces() {
+    if (!plotlyGraphDiv || !plotlyGraphDiv.data) return 0;
+    let maxY = 0;
+    for (let ti = 0; ti < plotlyGraphDiv.data.length; ti++) {
+      const tr = plotlyGraphDiv.data[ti];
+      const name = (tr.name || "").trim();
+      const isDebug = LEGEND_DEBUG_NAMES.has(name);
+      const inBoth = LEGEND_IN_BOTH_NAMES.has(name);
+      if (isDebug && !inBoth) continue;
+      if (tr.yaxis && tr.yaxis !== "y") continue;
+      const ySrc = tr.y || tr._inputArray || tr.bdata || tr.data || tr.values;
+      const len = ySrc && typeof ySrc.length === "number" ? ySrc.length : 0;
+      for (let i = 0; i < len; i++) {
+        const v = getNumericFromArrayLike(ySrc, i);
+        if (v !== null && Number.isFinite(v)) maxY = Math.max(maxY, v);
+      }
+    }
+    return maxY;
+  }
 
   function snapshotLegendCategoryDefaults() {
     if (!plotlyGraphDiv || !plotlyGraphDiv.data || legendCategoryInitialState) return;
@@ -623,9 +647,15 @@
     }
     Plotly.restyle(plotlyGraphDiv, { visible: visibility, showlegend: showlegend });
 
-    // In Analysis Data view, scale signal (y) axis to 0–1 for visibility; restore default otherwise
+    // In Analysis Data view, set signal (y) axis to 10× max amplitude of visible analysis traces; restore default otherwise
     if (plotlyGraphDiv._fullLayout && plotlyGraphDiv._fullLayout.yaxis) {
-      const range = value === "analysis" ? [0, 1] : signalAxisRangeDefault;
+      let range;
+      if (value === "analysis") {
+        const maxY = getMaxYFromAnalysisTraces();
+        range = [0, Math.max(maxY * ANALYSIS_VIEW_Y_RANGE_MULTIPLIER, 1)];
+      } else {
+        range = signalAxisRangeDefault;
+      }
       if (range && Array.isArray(range) && range.length === 2) {
         Plotly.relayout(plotlyGraphDiv, { "yaxis.range": range });
       }
@@ -651,14 +681,7 @@
   function getEnvelopePointAtTime(timeSec) {
     if (!plotlyGraphDiv || !plotlyGraphDiv.data) return null;
     const idx = findTraceIndexByName("Audio Envelope");
-    if (idx === null) {
-      // TODO: remove this guard log if we never see missing envelope traces in production.
-      // eslint-disable-next-line no-console
-      // console.warn(
-      //   "[manual-labels] No 'Audio Envelope' trace found; cannot derive y from envelope."
-      // );
-      return null;
-    }
+    if (idx === null) return null;
 
     const tr = plotlyGraphDiv.data[idx];
     if (!tr || !tr.x || !tr.y) return null;
@@ -702,12 +725,6 @@
       if (!Number.isFinite(num)) return null;
       yVal = num;
     } catch (e) {
-      // TODO: uncomment this if we ever need to debug envelope sampling again.
-      // eslint-disable-next-line no-console
-      // console.warn(
-      //   "[manual-labels] getEnvelopePointAtTime: error reading y",
-      //   { idx, bestI, error: String(e), yType: tr && tr.y && typeof tr.y }
-      // );
       return null;
     }
 
@@ -756,70 +773,6 @@
       }
     });
 
-    // TODO: remove this chunk once we are confident in the data extraction; keeps the old debugging logic for now.
-    // try {
-    //   console.log(
-    //     "[manual-labels] buildEditablePeaks: editablePeaks.length=",
-    //     editablePeaks.length
-    //   );
-    //   if (editablePeaks.length > 0) {
-    //     console.log(
-    //       "[manual-labels] First 5 peaks:",
-    //       editablePeaks.slice(0, 5).map((p) => ({
-    //         t: p.timeSec,
-    //         baseLabel: p.baseLabel,
-    //         manualLabel: p.manualLabel,
-    //         traceIndex: p.traceIndex,
-    //         pointIndex: p.pointIndex,
-    //         yVal: p.yVal,
-    //       }))
-    //     );
-    //   }
-    //   if (plotlyGraphDiv && plotlyGraphDiv.data) {
-    //     console.log(
-    //       "[manual-labels] Trace summary:",
-    //       plotlyGraphDiv.data.map((tr, idx) => {
-    //         let yLen = undefined;
-    //         let yType = undefined;
-    //         let ySample = undefined;
-    //         let yKeys = undefined;
-    //         let innerSample = undefined;
-    //         try {
-    //           if (tr && tr.y) {
-    //             yType = typeof tr.y;
-    //             yKeys = Object.keys(tr.y);
-    //             if (typeof tr.y.length === "number") {
-    //               yLen = tr.y.length;
-    //             }
-    //             if (tr.y && tr.y[0] !== undefined) {
-    //               ySample = [tr.y[0], tr.y[1]];
-    //             }
-    //             if (tr.y.data && tr.y.data[0] !== undefined) {
-    //               innerSample = [tr.y.data[0], tr.y.data[1]];
-    //             } else if (tr.y.values && tr.y.values[0] !== undefined) {
-    //               innerSample = [tr.y.values[0], tr.y.values[1]];
-    //             }
-    //           }
-    //         } catch (e) {
-    //           ySample = `error: ${String(e)}`;
-    //         }
-    //         return {
-    //           idx,
-    //           name: tr && tr.name,
-    //           hasY: !!(tr && tr.y),
-    //           yType,
-    //           yLen,
-    //           yKeys,
-    //           ySample,
-    //           innerSample,
-    //           type: tr && tr.type,
-    //         };
-    //       })
-    //     );
-    //   }
-    // } catch (e) {
-    //   // ignore logging errors
-    // }
     // Dim the original classifier markers slightly so manual overlays stand out.
     if (baseTraceIndices.size > 0) {
       Plotly.restyle(
@@ -968,15 +921,6 @@
         }
       }
     });
-
-    if (unknownLabels.size) {
-      // TODO: keep this warning available during manual label experimentation; remove once labels are always canonical.
-      // eslint-disable-next-line no-console
-      // console.warn(
-      //   "[manual-labels] Some peaks have manualLabel values that are not recognized as S1/S2/Noise and will not be drawn:",
-      //   Array.from(unknownLabels)
-      // );
-    }
 
     Plotly.restyle(
       plotlyGraphDiv,
@@ -1129,22 +1073,7 @@
 
       const safeY = Number.isFinite(yPlot) ? yPlot : "";
 
-      if (!Number.isFinite(yPlot)) {
-        missingYCount++;
-        if (missingYCount <= 5) {
-          // TODO: logging for missing y is only needed during debugging.
-          // eslint-disable-next-line no-console
-          // console.warn("[manual-labels] downloadLabelsCsv: missing y for peak", {
-          //   idxInSorted: idx,
-          //   timeSec: p.timeSec,
-          //   baseLabel: p.baseLabel,
-          //   manualLabel: p.manualLabel,
-          //   traceIndex: p.traceIndex,
-          //   pointIndex: p.pointIndex,
-          //   yVal: p.yVal,
-          // });
-        }
-      }
+      if (!Number.isFinite(yPlot)) missingYCount++;
 
       return [
         Number.isFinite(t) ? t.toFixed(3) : "",
@@ -1155,14 +1084,6 @@
       ].join(",");
     });
     const csvContent = header + lines.join("\n");
-
-    if (missingYCount > 0) {
-      // TODO: remove this summary warning once exports are stable; keep it if we need to re-investigate.
-      // eslint-disable-next-line no-console
-      // console.warn(
-      //   `[manual-labels] downloadLabelsCsv: y_plot could not be determined for ${missingYCount} peaks (see earlier warnings for details).`
-      // );
-    }
 
     const blob = new Blob([csvContent], {
       type: "text/csv;charset=utf-8;",
@@ -1265,11 +1186,6 @@
     });
 
     if (updatedCount > 0) {
-      // TODO: keep this log for the next iteration; remove if we never need the confirmation.
-      // eslint-disable-next-line no-console
-      // console.log(
-      //   `[manual-labels] Imported labels: updated ${updatedCount} existing peaks (round-trip by time_sec).`
-      // );
       refreshManualLabelTraces();
       // Ensure manual trace legends are visible and base S1/S2/Noise traces go to legendonly.
       const showManualTraces = Object.values(manualLabelTraceIndices).filter(

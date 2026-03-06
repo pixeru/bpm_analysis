@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, lombscargle
 import datetime
 import logging
 import sys
@@ -12,11 +12,10 @@ from enum import Enum
 import csv
 
 from audio_io import preprocess_audio
+from config import DEFAULT_OUTPUT_OPTIONS
 
 # INSTRUCTIONS FOR AI: 
-# Do not remove any debugging code unless specified by the user
-# try to avoid further abstracting my code
-# try to avoid further segmenting my code
+# Do not remove debugging code unless specified by the user
 # Do not over-engineer a solution, keep it simple
 
 # --- Enums and Global Helpers ---
@@ -182,13 +181,6 @@ def _simple_label_from_debug(entry: Any) -> str:
 from plotting import Plotter
 from reporting import ReportGenerator
 
-
-# --- Setup Professional Logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [%(levelname)s] - %(message)s',
-    stream=sys.stdout
-)
 
 # --- Audio Conversion (requires pydub/ffmpeg) ---
 try:
@@ -1565,10 +1557,60 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
 
     return np.array(sorted(final_s1_peaks)), corrected_debug_info, corrections_made
 
+
+def _lombscargle_band_powers(
+    times_sec: np.ndarray, rr_ms: np.ndarray, include_vlf: bool = False
+) -> Optional[Dict[str, float]]:
+    """
+    Compute power in Task Force bands (VLF, LF, HF) via Lomb-Scargle periodogram.
+    times_sec: start time of each RR interval (same length as rr_ms).
+    rr_ms: RR intervals in milliseconds.
+    Returns dict with lf_power, hf_power, total_power, lf_hf_ratio; if include_vlf, also vlf_power (ms²).
+    """
+    if len(times_sec) < 10 or len(rr_ms) < 10:
+        logging.debug(
+            "Lomb-Scargle: skipping (too few points): len(times_sec)=%d, len(rr_ms)=%d",
+            len(times_sec), len(rr_ms),
+        )
+        return None
+    if len(times_sec) != len(rr_ms):
+        logging.warning(
+            "Lomb-Scargle: length mismatch (times_sec=%d, rr_ms=%d). Check window slice.",
+            len(times_sec), len(rr_ms),
+        )
+        return None
+    freqs = np.linspace(0.001, 0.5, 1000)
+    angular_freqs = 2.0 * np.pi * freqs
+    try:
+        periodogram = lombscargle(times_sec, rr_ms, angular_freqs, normalize=True)
+    except Exception as e:
+        logging.warning("Lomb-Scargle: lombscargle() failed: %s", e)
+        return None
+    # Task Force bands: VLF 0.003–0.04, LF 0.04–0.15, HF 0.15–0.40 Hz
+    vlf_mask = (freqs >= 0.003) & (freqs < 0.04)
+    lf_mask = (freqs >= 0.04) & (freqs < 0.15)
+    hf_mask = (freqs >= 0.15) & (freqs <= 0.40)
+    vlf_power = float(np.trapz(periodogram[vlf_mask], freqs[vlf_mask])) if np.any(vlf_mask) else 0.0
+    lf_power = float(np.trapz(periodogram[lf_mask], freqs[lf_mask])) if np.any(lf_mask) else 0.0
+    hf_power = float(np.trapz(periodogram[hf_mask], freqs[hf_mask])) if np.any(hf_mask) else 0.0
+    total_power = vlf_power + lf_power + hf_power
+    lf_hf_ratio = (lf_power / hf_power) if hf_power > 0 else 0.0
+    out = {
+        "lf_power": lf_power,
+        "hf_power": hf_power,
+        "total_power": total_power,
+        "lf_hf_ratio": lf_hf_ratio,
+    }
+    if include_vlf:
+        out["vlf_power"] = vlf_power
+    return out
+
+
 def calculate_windowed_hrv(s1_peaks: np.ndarray, sample_rate: int, params: Dict) -> pd.DataFrame:
     """ Calculates HRV metrics using R-R intervals based on changing heart rate """
     window_size_beats = params['hrv_window_size_beats']
     step_size_beats = params['hrv_step_size_beats']
+    enable_freq = params.get("enable_hrv_frequency_domain", False)
 
     # First, calculate all R-R intervals from the S1 peaks
     if len(s1_peaks) < window_size_beats:
@@ -1600,12 +1642,40 @@ def calculate_windowed_hrv(s1_peaks: np.ndarray, sample_rate: int, params: Dict)
         # Calculate the average BPM within this specific window
         window_bpm = 60 / mean_rr_sec if mean_rr_sec > 0 else 0
 
-        results.append({
+        row = {
             'time': window_mid_time,
             'rmssdc': rmssdc,
             'sdnn': sdnn,
             'bpm': window_bpm
-        })
+        }
+        if enable_freq:
+            # Interval start times for this window (one per RR: peak i starts interval 0, ..., peak i+window_size_beats-1 starts last)
+            window_times_sec = s1_times_sec[i : i + window_size_beats]
+            band_powers = _lombscargle_band_powers(window_times_sec, window_rr_ms, include_vlf=False)
+            if band_powers is not None:
+                row["lf_power"] = band_powers["lf_power"]
+                row["hf_power"] = band_powers["hf_power"]
+                row["total_power"] = band_powers["total_power"]
+                row["lf_hf_ratio"] = band_powers["lf_hf_ratio"]
+            else:
+                row["lf_power"] = np.nan
+                row["hf_power"] = np.nan
+                row["total_power"] = np.nan
+                row["lf_hf_ratio"] = np.nan
+        results.append(row)
+
+    if enable_freq and results:
+        freq_ok = sum(1 for r in results if "lf_hf_ratio" in r and not np.isnan(r["lf_hf_ratio"]))
+        if freq_ok == 0:
+            logging.warning(
+                "Windowed HRV frequency: all %d windows had no valid Lomb-Scargle result (check logs above for length mismatch or lombscargle errors).",
+                len(results),
+            )
+        elif freq_ok < len(results):
+            logging.info(
+                "Windowed HRV frequency: %d/%d windows had valid LF/HF; %d had NaN.",
+                freq_ok, len(results), len(results) - freq_ok,
+            )
 
     if not results:
         logging.warning("Could not perform windowed HRV analysis. Recording may be too short or have too few beats.")
@@ -1613,6 +1683,31 @@ def calculate_windowed_hrv(s1_peaks: np.ndarray, sample_rate: int, params: Dict)
 
     logging.info(f"Beat-based windowed HRV analysis complete. Generated {len(results)} data points.")
     return pd.DataFrame(results)
+
+
+def calculate_global_hrv_frequency(
+    s1_peaks: np.ndarray, sample_rate: int, params: Dict
+) -> Optional[Dict[str, float]]:
+    """Compute one Lomb-Scargle spectrum over the full recording. Returns VLF/LF/HF (ms²) and LF/HF when duration >= hrv_global_min_duration_sec."""
+    if len(s1_peaks) < 2:
+        return None
+    rr_sec = np.diff(s1_peaks) / float(sample_rate)
+    rr_ms = rr_sec * 1000.0
+    times_sec = s1_peaks[:-1] / float(sample_rate)
+    duration_sec = float(times_sec[-1] - times_sec[0]) + (rr_sec[-1] if len(rr_sec) else 0)
+    min_duration = params.get("hrv_global_min_duration_sec", 300.0)
+    if duration_sec < min_duration or len(rr_ms) < 20:
+        return None
+    band_powers = _lombscargle_band_powers(times_sec, rr_ms, include_vlf=True)
+    if band_powers is None:
+        return None
+    return {
+        "vlf_power": band_powers["vlf_power"],
+        "lf_power": band_powers["lf_power"],
+        "hf_power": band_powers["hf_power"],
+        "total_power": band_powers["total_power"],
+        "lf_hf_ratio": band_powers["lf_hf_ratio"],
+    }
 
 def calculate_bpm_series(peaks: np.ndarray, sample_rate: int, params: Dict) -> Tuple[pd.Series, np.ndarray]:
     """Calculates and smooths the final BPM series from S1 peaks."""
@@ -2049,6 +2144,10 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     metrics['peak_recovery_stats'] = find_peak_recovery_rate(metrics['smoothed_bpm'])
     metrics['peak_exertion_stats'] = find_peak_exertion_rate(metrics['smoothed_bpm'])
     metrics['windowed_hrv_df'] = calculate_windowed_hrv(final_peaks, sample_rate, params)
+    if params.get("enable_hrv_frequency_domain", False):
+        metrics['hrv_global_freq'] = calculate_global_hrv_frequency(final_peaks, sample_rate, params)
+    else:
+        metrics['hrv_global_freq'] = None
 
     hrv_summary_stats = {}
     if not metrics['smoothed_bpm'].empty:
@@ -2058,6 +2157,20 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     if not metrics['windowed_hrv_df'].empty:
         hrv_summary_stats['avg_rmssdc'] = metrics['windowed_hrv_df']['rmssdc'].mean()
         hrv_summary_stats['avg_sdnn'] = metrics['windowed_hrv_df']['sdnn'].mean()
+        if params.get("enable_hrv_frequency_domain", False) and "lf_hf_ratio" in metrics['windowed_hrv_df'].columns:
+            wdf = metrics['windowed_hrv_df']
+            hrv_summary_stats['avg_lf_power'] = wdf['lf_power'].mean()
+            hrv_summary_stats['avg_hf_power'] = wdf['hf_power'].mean()
+            avg_lf_hf = wdf['lf_hf_ratio'].mean()
+            hrv_summary_stats['avg_lf_hf_ratio'] = avg_lf_hf
+            if np.isnan(avg_lf_hf):
+                valid = wdf['lf_hf_ratio'].notna().sum()
+                logging.warning(
+                    "Avg. LF/HF (windowed) is NaN: %d/%d windows had valid lf_hf_ratio. See earlier logs for Lomb-Scargle failures.",
+                    int(valid), len(wdf),
+                )
+    if metrics.get('hrv_global_freq') is not None:
+        hrv_summary_stats['global_freq'] = metrics['hrv_global_freq']
     metrics['hrv_summary'] = hrv_summary_stats
 
     return metrics
@@ -2455,16 +2568,7 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
 
     # Set default output options if none provided
     if output_options is None:
-        output_options = {
-            'html': True,
-            'png': False,
-            'csv': True,
-            'summary': True,
-            'debug': True,
-            'filtered_wav': True,
-            'bpm_text': False,
-            'spectrogram': True,
-        }
+        output_options = DEFAULT_OUTPUT_OPTIONS.copy()
 
     plotly_figure = None
     

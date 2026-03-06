@@ -8,7 +8,6 @@ def main():
     Initializes and runs the BPM Analysis GUI.
     This is the main entry point for the application.
     """
-    # Configure logging for the entire application
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - [%(levelname)s] - %(message)s',

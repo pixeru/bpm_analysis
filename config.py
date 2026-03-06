@@ -16,13 +16,6 @@ DEFAULT_PARAMS = {
     "downsample_factor": 300,     # Factor to reduce sample rate. Higher = faster processing, less detail.
     "save_filtered_wav": True,    # If True, saves a .wav file of the filtered audio for debugging.
 
-    # pyPCG denoising, I never managed to get this to work well, so I'm not using it for now. I should probably remove this
-    'denoising_method': None,  # None, 'wavelet_auto', 'emd_savgol' emd_savgol is more agressive
-    'wt_family': 'db8',
-    'wt_level': 7,
-    'emd_window': 40,
-    'emd_poly': 2,
-    'wavelet_threshold': None,            # None for auto, or float (0.0-1.0)
     "enable_hum_removal": True,           # Detect and notch narrow low-frequency hums if present
     "hum_psd_window_sec": 4.0,            # PSD window length (seconds) for hum detection
     "hum_min_freq_hz": 40.0,              # Min frequency of narrow-band hum to consider
@@ -30,6 +23,8 @@ DEFAULT_PARAMS = {
     "hum_min_prominence_db": 8.0,         # Minimum prominence (dB) above local median to trigger notch
     "hum_min_prominence_over_second_db": 3.0,  # Gap over next peak before trusting detection
     "hum_notch_q": 35.0,                  # Q factor, Higher = narrower notch (try 35-40 for sharp hums)
+
+    "envelope_smooth_window_ms": 40,      # Rolling window (ms) for smoothing Hilbert envelope after abs(analytic). Matches common PCG practice (e.g. 50 ms).
 
     # =================================================================================
     # 2. Signal Feature Detection
@@ -88,7 +83,7 @@ DEFAULT_PARAMS = {
     # We should test the contractility model with different values for these params to determine the best values for the dataset I have on hand.
     "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
     "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
-    "contractility_penalty_strength": 0.35,  # Strength of the contractility penalty.
+    "contractility_penalty_strength": 0.30,  # I adjusted this✔ Strength of the contractility penalty.
     "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
 
     # --- 4.4. Interval-Based Confidence Penalty ---
@@ -137,6 +132,8 @@ DEFAULT_PARAMS = {
     "output_smoothing_window_sec": 5,        # Time window (seconds) for smoothing the final BPM curve for display.
     "hrv_window_size_beats": 40,             # Sliding window size (in beats) for HRV calculation.
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
+    "enable_hrv_frequency_domain": True,     # If True, compute Lomb-Scargle LF/HF and optional global VLF/LF/HF.
+    "hrv_global_min_duration_sec": 300.0,   # Only compute global spectrum when recording duration >= this (5 min).
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
     "plot_downsample_factor": 2,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
 
@@ -155,4 +152,18 @@ DEFAULT_PARAMS = {
     "trapezoid_baseline_tolerance_bpm": 5.0,    # Allowed BPM difference between pre- and post-artifact baseline.
     "trapezoid_min_jump_bpm": 3.0,              # Minimum BPM jump from baseline to plateau median.
     "trapezoid_min_fall_delta_bpm": 3.0,        # Minimum absolute BPM drop across the fall edge (start vs end of fall).
+}
+
+# Single source of truth for pipeline output toggles (used when output_options is None).
+# GUI and analyze_wav_file use this; add new options here and in gui get_output_options/checkboxes.
+DEFAULT_OUTPUT_OPTIONS = {
+    "html": True,
+    "png": False,
+    "csv": True,
+    "summary": True,
+    "debug": True,
+    "filtered_wav": True,
+    "bpm_text": False,
+    "spectrogram": True,
+    "regression_log": False,
 }

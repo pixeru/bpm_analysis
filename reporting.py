@@ -1,16 +1,24 @@
 import os
-import datetime
 import logging
+import datetime
 from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
 from bpm_analysis import _get_peak_type_from_debug, format_debug_entry
+from time_utils import timestamp_str
 
 
 class ReportGenerator:
     """Handles the creation of text-based analysis reports."""
+
+    _LOG_METRICS = (
+        ("Raw Amp", "amp", ".3f"),
+        ("Noise Floor", "noise_floor", ".3f"),
+        ("Average BPM (Smoothed)", "smoothed_bpm", ".1f"),
+        ("Long-Term BPM (Belief)", "lt_bpm", ".1f"),
+    )
 
     def __init__(self, file_name: str, output_directory: str):
         self.file_name = file_name
@@ -95,12 +103,12 @@ class ReportGenerator:
             left_index=True,
             right_index=True,
             direction="nearest",
-            tolerance=pd.Timedelta(seconds=0.5).total_seconds(),
+            tolerance=0.5,
         )
 
     def _write_log_events(self, log_file, merged_df):
         log_file.write(f"# Chronological Debug Log for {os.path.basename(self.file_name)}\n")
-        log_file.write(f"Analysis performed on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        log_file.write(f"Analysis performed on: {timestamp_str()}\n\n")
 
         for row in merged_df.itertuples(name="LogEvent"):
             log_file.write(f"## Time: `{row.Index:.4f}s`\n")
@@ -119,29 +127,16 @@ class ReportGenerator:
                     for ln in formatted_lines:
                         log_file.write(f"{ln}\n")
 
-            metric_values = {
-                "Raw Amp": getattr(row, "amp", None),
-                "Noise Floor": getattr(row, "noise_floor", None),
-                "Average BPM (Smoothed)": getattr(row, "smoothed_bpm", None),
-                "Long-Term BPM (Belief)": getattr(row, "lt_bpm", None),
-            }
-            metric_formats = {
-                "Raw Amp": "{value:.3f}",
-                "Noise Floor": "{value:.3f}",
-                "Average BPM (Smoothed)": "{value:.1f}",
-                "Long-Term BPM (Belief)": "{value:.1f}",
-            }
-            for name, value in metric_values.items():
+            for name, attr, fmt in self._LOG_METRICS:
+                value = getattr(row, attr, None)
                 if pd.notna(value):
-                    fmt = metric_formats.get(name, "{value}")
-                    formatted = fmt.format(value=value)
-                    log_file.write(f"- **{name}**: `{formatted}`\n")
+                    log_file.write(f"- **{name}**: `{value:{fmt}}`\n")
 
             log_file.write("\n\n")
 
     def _write_summary_header(self, f):
         f.write(f"# Analysis Report for: {os.path.basename(self.file_name)}\n")
-        f.write(f"*Generated on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
+        f.write(f"*Generated on: {timestamp_str()}*\n\n")
 
     def _write_overall_summary(self, f, hrv_summary, hrr_stats):
         """Writes the main summary table to the markdown report file."""
@@ -154,6 +149,14 @@ class ReportGenerator:
                 f.write(f"| **Avg. Corrected RMSSD** | {hrv_summary['avg_rmssdc']:.2f} |\n")
             if hrv_summary.get("avg_sdnn") is not None:
                 f.write(f"| **Avg. Windowed SDNN** | {hrv_summary['avg_sdnn']:.2f} ms |\n")
+            if hrv_summary.get("avg_lf_hf_ratio") is not None:
+                f.write(f"| **Avg. Windowed LF/HF Ratio** | {hrv_summary['avg_lf_hf_ratio']:.2f} |\n")
+            global_freq = hrv_summary.get("global_freq")
+            if global_freq:
+                f.write(f"| **VLF Power (global, ms²)** | {global_freq.get('vlf_power', 0):.2f} |\n")
+                f.write(f"| **LF Power (global, ms²)** | {global_freq.get('lf_power', 0):.2f} |\n")
+                f.write(f"| **HF Power (global, ms²)** | {global_freq.get('hf_power', 0):.2f} |\n")
+                f.write(f"| **LF/HF Ratio (global)** | {global_freq.get('lf_hf_ratio', 0):.2f} |\n")
         if hrr_stats and hrr_stats.get("hrr_value_bpm") is not None:
             f.write(f"| **1-Minute HRR** | {hrr_stats['hrr_value_bpm']:.1f} BPM Drop |\n")
         f.write("\n")

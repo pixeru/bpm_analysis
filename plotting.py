@@ -1,6 +1,6 @@
 import os
-import datetime
 import logging
+from time_utils import seconds_to_datetime
 import csv
 import shutil
 import json
@@ -146,7 +146,7 @@ class Plotter:
         # Only skip details if the recording is longer than the threshold; shorter files always show full detail.
         self.skip_detailed_debug_traces = optimize_long_plots and self.audio_duration_sec > long_threshold_sec
 
-        time_axis_dt = pd.to_datetime([self._seconds_to_datetime(t) for t in self.time_axis_sec])
+        time_axis_dt = pd.to_datetime([seconds_to_datetime(t) for t in self.time_axis_sec])
 
         self._add_line_traces(time_axis_dt, audio_envelope, analysis_data)
         self._add_trough_markers(audio_envelope, analysis_data)
@@ -180,7 +180,11 @@ class Plotter:
         output_html_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.html")
         output_png_path = os.path.join(self.output_directory, f"{base_name}_bpm_plot.png")
         plot_title = f"Heartbeat Analysis - {os.path.basename(self.file_name)}"
-        plot_config = {"scrollZoom": True, "toImageButtonOptions": {"filename": plot_title, "format": "png", "scale": 2}}
+        plot_config = {
+            "scrollZoom": True,
+            "toImageButtonOptions": {"filename": plot_title, "format": "png", "scale": 2},
+            "showTips": False,
+        }
 
         html_requested = True if output_options is None else output_options.get("html", True)
         png_requested = False if output_options is None else output_options.get("png", False)
@@ -284,7 +288,7 @@ class Plotter:
         tick_positions_sec = np.arange(0, duration_sec + 1e-6, tick_interval_sec, dtype=float)
         if tick_positions_sec.size > 0 and tick_positions_sec[-1] < duration_sec:
             tick_positions_sec = np.append(tick_positions_sec, duration_sec)
-        tickvals = [self._seconds_to_datetime(float(s)) for s in tick_positions_sec]
+        tickvals = [seconds_to_datetime(float(s)) for s in tick_positions_sec]
         ticktext = [f"{int(s // 60):02d}:{int(s % 60):02d} ({s:.2f})" for s in tick_positions_sec]
 
         self.fig.update_xaxes(
@@ -373,7 +377,7 @@ class Plotter:
         trough_indices = analysis_data.get("trough_indices")
         if trough_indices is not None and trough_indices.size > 0:
             trough_times_dt = pd.to_datetime(
-                [self._seconds_to_datetime(float(t)) for t in (trough_indices / self.sample_rate)]
+                [seconds_to_datetime(float(t)) for t in (trough_indices / self.sample_rate)]
             )
 
             self.fig.add_trace(
@@ -387,6 +391,26 @@ class Plotter:
                 ),
                 secondary_y=False,
             )
+
+    def _add_peak_marker_trace(
+        self, indices, customdata, name, color, symbol, size, audio_envelope, hovertemplate
+    ):
+        """Add a single Scatter trace for peak markers (S1, S2, or Noise)."""
+        times_dt = pd.to_datetime(
+            [seconds_to_datetime(float(t)) for t in (np.array(indices) / self.sample_rate)]
+        )
+        self.fig.add_trace(
+            go.Scatter(
+                x=times_dt,
+                y=audio_envelope[indices],
+                mode="markers",
+                name=name,
+                marker=dict(color=color, symbol=symbol, size=size),
+                customdata=customdata,
+                hovertemplate=hovertemplate,
+            ),
+            secondary_y=False,
+        )
 
     def _add_peak_traces(self, all_raw_peaks, debug_info, audio_envelope, trough_indices=None):
         """Adds S1, S2, and Noise peak markers to the plot with detailed hover info."""
@@ -438,57 +462,16 @@ class Plotter:
                 noise_peaks["customdata"].append(hover_text)
 
         hovertemplate = "%{customdata}<extra></extra>"
-
-        if s1_peaks["indices"]:
-            times_dt = pd.to_datetime(
-                [self._seconds_to_datetime(float(t)) for t in (np.array(s1_peaks["indices"]) / self.sample_rate)]
-            )
-            self.fig.add_trace(
-                go.Scatter(
-                    x=times_dt,
-                    y=audio_envelope[s1_peaks["indices"]],
-                    mode="markers",
-                    name="S1 Beats",
-                    marker=dict(color="#e36f6f", size=8, symbol="diamond"),
-                    customdata=s1_peaks["customdata"],
-                    hovertemplate=hovertemplate,
-                ),
-                secondary_y=False,
-            )
-
-        if s2_peaks["indices"]:
-            times_dt = pd.to_datetime(
-                [self._seconds_to_datetime(float(t)) for t in (np.array(s2_peaks["indices"]) / self.sample_rate)]
-            )
-            self.fig.add_trace(
-                go.Scatter(
-                    x=times_dt,
-                    y=audio_envelope[s2_peaks["indices"]],
-                    mode="markers",
-                    name="S2 Beats",
-                    marker=dict(color="orange", symbol="circle", size=6),
-                    customdata=s2_peaks["customdata"],
-                    hovertemplate=hovertemplate,
-                ),
-                secondary_y=False,
-            )
-
-        if noise_peaks["indices"]:
-            times_dt = pd.to_datetime(
-                [self._seconds_to_datetime(float(t)) for t in (np.array(noise_peaks["indices"]) / self.sample_rate)]
-            )
-            self.fig.add_trace(
-                go.Scatter(
-                    x=times_dt,
-                    y=audio_envelope[noise_peaks["indices"]],
-                    mode="markers",
-                    name="Noise/Rejected",
-                    marker=dict(color="grey", symbol="x", size=6),
-                    customdata=noise_peaks["customdata"],
-                    hovertemplate=hovertemplate,
-                ),
-                secondary_y=False,
-            )
+        for name, peaks, color, symbol, size in (
+            ("S1 Beats", s1_peaks, "#e36f6f", "diamond", 8),
+            ("S2 Beats", s2_peaks, "orange", "circle", 6),
+            ("Noise/Rejected", noise_peaks, "grey", "x", 6),
+        ):
+            if peaks["indices"]:
+                self._add_peak_marker_trace(
+                    peaks["indices"], peaks["customdata"], name, color, symbol, size,
+                    audio_envelope, hovertemplate,
+                )
 
         # Average S1 / S2 contractility traces (prominence-based, 3-point moving average), Analysis Data only
         self._add_s1_s2_amplitude_traces(
@@ -507,6 +490,25 @@ class Plotter:
             smoothed[i] = float(np.mean(amps[lo:hi]))
         return smoothed
 
+    def _add_prominence_line_trace(
+        self, times_sec, proms, name, color, visible, window_size=3
+    ):
+        """Add one prominence-based contractility line trace (smoothed)."""
+        proms = np.asarray(proms, dtype=float)
+        smoothed = self._smooth_peak_amplitudes(proms, window_size=window_size)
+        times_dt = pd.to_datetime([seconds_to_datetime(float(t)) for t in times_sec])
+        self.fig.add_trace(
+            go.Scatter(
+                x=times_dt,
+                y=smoothed,
+                mode="lines",
+                name=name,
+                line=dict(color=color, width=2),
+                visible=visible,
+            ),
+            secondary_y=False,
+        )
+
     def _add_s1_s2_amplitude_traces(self, s1_indices, s2_indices, audio_envelope, trough_indices=None):
         """Add line traces for Average S1, S2, and combined contractility (prominence-based, smoothed)."""
         from bpm_analysis import get_peak_prominence_details
@@ -519,67 +521,32 @@ class Plotter:
 
         if s1_indices:
             s1_idx = np.array(s1_indices)
-            s1_times_sec = s1_idx.astype(float) / self.sample_rate
-            s1_prom = np.array([prominence_at(int(i)) for i in s1_idx])
-            s1_smooth = self._smooth_peak_amplitudes(s1_prom, window_size=3)
-            s1_times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in s1_times_sec])
-            self.fig.add_trace(
-                go.Scatter(
-                    x=s1_times_dt,
-                    y=s1_smooth,
-                    mode="lines",
-                    name="Average S1 contractility",
-                    line=dict(color="#e36f6f", width=2),
-                    visible=True,
-                ),
-                secondary_y=False,
+            times_sec = s1_idx.astype(float) / self.sample_rate
+            proms = np.array([prominence_at(int(i)) for i in s1_idx])
+            self._add_prominence_line_trace(
+                times_sec, proms, "Average S1 contractility", "#e36f6f", True, window_size=3
             )
         if s2_indices:
             s2_idx = np.array(s2_indices)
-            s2_times_sec = s2_idx.astype(float) / self.sample_rate
-            s2_prom = np.array([prominence_at(int(i)) for i in s2_idx])
-            s2_smooth = self._smooth_peak_amplitudes(s2_prom, window_size=3)
-            s2_times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in s2_times_sec])
-            self.fig.add_trace(
-                go.Scatter(
-                    x=s2_times_dt,
-                    y=s2_smooth,
-                    mode="lines",
-                    name="Average S2 contractility",
-                    line=dict(color="orange", width=2),
-                    visible="legendonly",
-                ),
-                secondary_y=False,
+            times_sec = s2_idx.astype(float) / self.sample_rate
+            proms = np.array([prominence_at(int(i)) for i in s2_idx])
+            self._add_prominence_line_trace(
+                times_sec, proms, "Average S2 contractility", "orange", "legendonly", window_size=3
             )
-        # Combined S1+S2 average contractility (12-point window)
         if s1_indices or s2_indices:
             times_sec = []
             proms = []
-            if s1_indices:
-                s1_idx = np.array(s1_indices)
-                times_sec.extend((s1_idx.astype(float) / self.sample_rate).tolist())
-                proms.extend([prominence_at(int(i)) for i in s1_idx])
-            if s2_indices:
-                s2_idx = np.array(s2_indices)
-                times_sec.extend((s2_idx.astype(float) / self.sample_rate).tolist())
-                proms.extend([prominence_at(int(i)) for i in s2_idx])
+            for indices in (s1_indices or [], s2_indices or []):
+                if not indices:
+                    continue
+                idx = np.array(indices)
+                times_sec.extend((idx.astype(float) / self.sample_rate).tolist())
+                proms.extend([prominence_at(int(i)) for i in idx])
             times_sec = np.array(times_sec)
             proms = np.array(proms)
             order = np.argsort(times_sec)
-            times_sec = times_sec[order]
-            proms = proms[order]
-            combined_smooth = self._smooth_peak_amplitudes(proms, window_size=12)
-            times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in times_sec])
-            self.fig.add_trace(
-                go.Scatter(
-                    x=times_dt,
-                    y=combined_smooth,
-                    mode="lines",
-                    name="Average contractility",
-                    line=dict(color="#aaa", width=2),
-                    visible="legendonly",
-                ),
-                secondary_y=False,
+            self._add_prominence_line_trace(
+                times_sec[order], proms[order], "Average contractility", "#aaa", "legendonly", window_size=12
             )
 
     def _add_bpm_hrv_traces(self, smoothed_bpm, analysis_data, windowed_hrv_df):
@@ -594,7 +561,7 @@ class Plotter:
 
         if "long_term_bpm_series" in analysis_data and not analysis_data["long_term_bpm_series"].empty:
             lt_series = analysis_data["long_term_bpm_series"]
-            lt_times_dt = pd.to_datetime([self._seconds_to_datetime(float(t)) for t in lt_series.index])
+            lt_times_dt = pd.to_datetime([seconds_to_datetime(float(t)) for t in lt_series.index])
             self.fig.add_trace(
                 go.Scatter(
                     x=lt_times_dt,
@@ -613,7 +580,7 @@ class Plotter:
             and "sdnn" in windowed_hrv_df
         ):
             hrv_times_dt = pd.to_datetime(
-                [self._seconds_to_datetime(float(t)) for t in windowed_hrv_df["time"]]
+                [seconds_to_datetime(float(t)) for t in windowed_hrv_df["time"]]
             )
             self.fig.add_trace(
                 go.Scatter(
@@ -627,6 +594,17 @@ class Plotter:
                 ),
                 secondary_y=True,
             )
+            if "lf_hf_ratio" in windowed_hrv_df.columns:
+                self.fig.add_trace(
+                    go.Scatter(
+                        x=hrv_times_dt,
+                        y=windowed_hrv_df["lf_hf_ratio"],
+                        name="LF/HF (windowed)",
+                        line=dict(color="yellow", width=2),
+                        visible="legendonly",
+                    ),
+                    secondary_y=True,
+                )
 
     def _add_annotations_and_summary(self, smoothed_bpm, hrv_summary, hrr_stats, peak_recovery_stats):
         """Adds min/max BPM annotations on the plot and builds plain-text summary for the HTML Analysis Summary modal."""
@@ -675,6 +653,13 @@ class Plotter:
                 summary_lines.append(f"Avg. Corrected RMSSD: {hrv_summary['avg_rmssdc']:.2f}")
             if hrv_summary.get("avg_sdnn") is not None:
                 summary_lines.append(f"Avg. Windowed SDNN: {hrv_summary['avg_sdnn']:.2f} ms")
+            if hrv_summary.get("avg_lf_hf_ratio") is not None:
+                summary_lines.append(f"Avg. LF/HF (windowed): {hrv_summary['avg_lf_hf_ratio']:.2f}")
+            global_freq = hrv_summary.get("global_freq") if hrv_summary else None
+            if global_freq:
+                summary_lines.append(
+                    f"VLF/LF/HF (global, ms²): {global_freq.get('vlf_power', 0):.1f} / {global_freq.get('lf_power', 0):.1f} / {global_freq.get('hf_power', 0):.1f} ; LF/HF: {global_freq.get('lf_hf_ratio', 0):.2f}"
+                )
         self.analysis_summary_text = "\n".join(summary_lines) if summary_lines else ""
 
     def _add_slope_traces(self, major_inclines, major_declines, peak_recovery_stats, peak_exertion_stats):
@@ -751,11 +736,6 @@ class Plotter:
                 )
             )
 
-    def _seconds_to_datetime(self, seconds: float) -> datetime.datetime:
-        """Converts elapsed seconds since epoch to timezone-naive datetime."""
-        epoch = datetime.datetime.fromtimestamp(0)
-        return epoch + datetime.timedelta(seconds=seconds)
-
     def _add_trapezoid_shapes(self, trapezoids: Optional[List[Dict]]):
         """Draws trapezoid outlines and markers for detected HR artifacts."""
         if not trapezoids:
@@ -768,7 +748,7 @@ class Plotter:
                 ("Start of fall", trap["t_start_fall"], trap["bpm_start_fall"]),
                 ("End of fall", trap["t_end_fall"], trap["bpm_end_fall"]),
             ]
-            x_times = [self._seconds_to_datetime(t) for _, t, _ in event_sequence]
+            x_times = [seconds_to_datetime(t) for _, t, _ in event_sequence]
             y_values = [bpm for _, _, bpm in event_sequence]
             customdata = [
                 f"<b>{label}</b><br>{t:.3f}s<br>{bpm:.1f} BPM" for label, t, bpm in event_sequence
