@@ -25,40 +25,45 @@ All tunable parameters for the `bpm_analysis.py` engine are located in `config.p
 The parameters are organized into logical categories for easier navigation and tuning.
 - Multi-Format Audio Support: Accepts most common media files such as WAV, MP3, M4A, MOV, by converting them to .wav format for analysis.
 
-All tunable parameters for the `bpm_analysis.py` engine are located in `config.py`
-The parameters are organized into logical categories for easier navigation and tuning.
-- Multi-Format Audio Support: Accepts most common media files such as WAV, MP3, M4A, MOV, by converting them to .wav format for analysis.
-
 ## Dependencies
 To run this script, you will need Python and the following libraries:
-- **`numpy`**
-- **`pandas`**
-- **`scipy`**
-- **`plotly`**
-- **`ttkbootstrap`**
-- **`pydub`**
-- **`soxr`**
+- **`numpy`**, **`pandas`**, **`scipy`**, **`plotly`**, **`ttkbootstrap`**, **`pydub`**
 - **`librosa`** (handles audio loading and resampling)
+- **`soxr`** (improves resampling quality when used with librosa)
+- **`matplotlib`** (used for spectrogram and plotting)
+- **`kaleido`** (required for exporting Plotly graphs to PNG)
 - **`PyWavelets`** (provides the `pywt` module used for wavelet denoising)
 - **`pyPCG-toolbox`** (enables optional, tunable pyPCG denoising; the feature is only active when you configure `denoising_method` in `config.py`)
 
-**Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
+You will also need **FFmpeg** installed and accessible in your system's PATH for `pydub` to function correctly. Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html).
 
-**Install FFmpeg:** Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html "null").
-You will also need **FFmpeg** installed and accessible in your system's PATH for `pydub` to function correctly.
+On Windows, ensure you have [Microsoft Visual C++ Redistributable Latest supported v14](https://aka.ms/vc14/vc_redist.x64.exe) (for Visual Studio 2017–2026).
 
-- Double check to make sure you have [Microsoft Visual C++ Redistributable Latest supported v14](https://aka.ms/vc14/vc_redist.x64.exe) (for Visual Studio 2017–2026)
+## Installation
+
+**1. Clone or download this repository, then open a terminal in the project directory.**
+
+**2. (Recommended) Install all dependencies from the requirements file:**
+```bash
+pip install -r requirements.txt
+```
+
+Alternatively, install only the core dependencies manually:
+```bash
+pip install numpy pandas scipy plotly ttkbootstrap pydub librosa soxr matplotlib PyWavelets kaleido
+```
 
 ## How to Run
-**Install Dependencies:**
-```
-pip install numpy pandas scipy plotly ttkbootstrap pydub librosa PyWavelets pyPCG-toolbox
-```
-**Run the Script via cmd prompt from the same directory:**
-```
+
+From the project directory in a terminal:
+```bash
 python main.py
 ```
-Tip: you can rename the file to main.pyw to avoid using cmd prompt. Just double click it to launch like a .exe file
+Or use the windowless launcher:
+```bash
+python main.pyw
+```
+Tip: You can double-click `main.pyw` to launch the app without opening a command prompt.
 
 
 

@@ -44,10 +44,14 @@ OUTPUT_FILE_OPTIONS = (
 
 
 class BPMApp:
+    # Minimum window size when auto-sized or resized by user
+    MIN_WIDTH = 420
+    MIN_HEIGHT = 380
+
     def __init__(self, root):
         self.root = root
         self.root.title("Heartbeat BPM Analyzer")
-        self.root.geometry("800x660")
+        self.root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
         self.style = ttkb.Style(theme='minty')
         self.current_files = []
         self.params = DEFAULT_PARAMS.copy()
@@ -58,11 +62,13 @@ class BPMApp:
         self.load_ui_settings()
         self._loading_settings = False  # Re-enable saving after load
         self.root.after(100, self.process_log_queue)
+        self.root.after(150, self._fit_window_to_content)
         self._find_initial_audio_file()
 
     def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.grid(row=0, column=0, sticky="nsew")
+        self.main_frame = ttk.Frame(self.root, padding="20")
+        self.main_frame.grid(row=0, column=0, sticky="nsew")
+        main_frame = self.main_frame
 
         # File selection
         file_frame = ttk.LabelFrame(main_frame, text="Audio File(s)", padding=10)
@@ -190,6 +196,18 @@ class BPMApp:
         param_frame.columnconfigure(1, weight=1)
         output_frame.columnconfigure(0, weight=1)
         output_frame.columnconfigure(1, weight=1)
+
+    def _fit_window_to_content(self):
+        """Resize the window to fit the current content (all visible elements)."""
+        self.root.update_idletasks()
+        req_w = self.main_frame.winfo_reqwidth()
+        req_h = self.main_frame.winfo_reqheight()
+        # Add margin for window decorations and padding
+        margin_w = 50
+        margin_h = 50
+        w = max(self.MIN_WIDTH, req_w + margin_w)
+        h = max(self.MIN_HEIGHT, req_h + margin_h)
+        self.root.geometry(f"{w}x{h}")
 
     def process_log_queue(self):
         try:

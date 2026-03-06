@@ -1,4 +1,4 @@
-bpy==5.0.0
+# Main app dependencies (Blender BPM tool scripts use Blender's built-in Python/bpy; no pip install needed)
 dash==3.3.0
 librosa==0.11.0
 numpy==2.3.5
