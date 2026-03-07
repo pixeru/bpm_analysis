@@ -100,19 +100,28 @@ DEFAULT_PARAMS = {
     "penalty_amount_max": 0.30,             # Subtractive confidence penalty for a "bad" pair in an unstable section.
     "forward_look_drop_threshold": 0.4,     # If next peak < 60% of S2, it's suspicious
     "forward_look_max_penalty": 0.4,        # Max penalty for this scenario
-    "s2_s1_ratio_low_bpm": 1.6,             # I adjusted this✔ to 1.6 because at low BPM, allows S2 to be up to 1.6x S1 strength before penalty.
-    "s2_s1_ratio_high_bpm": 1.2,            # I adjusted this✔ At high BPM, expects S2 to be no more than 1.2x S1 strength.
-    # We should test the contractility model with different values for these params to determine the best values for the dataset I have on hand.
-    "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
-    "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
-    "contractility_penalty_strength": 0.3,  # Strength of the contractility penalty.
-    "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
+    # Contractility: S1/S2 prominence ratio. Expected from history (past N pairs) or BPM power-curve fallback.
+    "contractility_expected_use_history": True,   # If True, expected S1/S2 = mean of last N accepted pairs; else BPM power curve.
+    "contractility_expected_history_count": 8,   # Number of past S1/S2 ratios to average.
+    "contractility_expected_history_min": 1,      # Min history length before using average (else BPM fallback).
+    # BPM fallback: power curve expected_ratio = low + (high - low) * ((BPM - bpm_min) / (bpm_max - bpm_min)) ** exponent.
+    "contractility_bpm_min": 60,                 # BPM at which ratio = low_ratio.
+    "contractility_bpm_max": 200,                # BPM at which ratio = high_ratio.
+    "contractility_low_ratio": 0.9,              # Expected S1/S2 at bpm_min (rest).
+    "contractility_high_ratio": 6.0,             # Expected S1/S2 at bpm_max (high exertion).
+    "contractility_power_exponent": 0.5,         # <1: steep rise at low BPM then flatter (contractility kicks in early).
+    # Deviation-based curve: |actual − expected|; inside band = boost, outside = penalty ramp.
+    "contractility_zero_crossing_fraction": 0.2,  # Band half-width = expected × this; inside → boost, outside → penalty.
+    "contractility_boost_max": 0.15,              # Max multiplicative boost at expected: confidence *= (1 + boost).
+    "contractility_penalty_max": 0.30,             # Max multiplicative penalty when far outside band.
+    "contractility_penalty_ramp_fraction": 0.4,   # Ramp width = expected × this; penalty reaches max over this distance beyond band.
+    "recovery_phase_duration_sec": 120,      # Duration (seconds) of the high-contractility state after peak BPM.
     "recovery_phase_min_peak_bpm": 110,      # Only enable recovery-phase adjust if preliminary peak BPM >= this (avoids activating when BPM stays low).
 
     # --- 4.4. V-Shaped Interval: boost near expected, penalty outside ---
     # Linear boost from 0 at expected±zero_crossing to max at expected; linear penalty outside that band.
     "interval_v_penalty_max": 0.75,              # Max penalty (multiplicative) at ramp ends.
-    "interval_v_boost_max": 0.10,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
+    "interval_v_boost_max": 0.2,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
     "interval_zero_crossing_fraction": 0.2,      # Fraction of expected where effect crosses zero: boost zone [expected*(1±this)].
     "interval_v_short_ramp_end_fraction": 0.2,  # Left: below this fraction of expected → hard reject; ramp from here up to left zero-crossing.
     "interval_v_long_ramp_end_fraction": 2.0,   # Right: ramp from right zero-crossing to this × expected → full penalty.

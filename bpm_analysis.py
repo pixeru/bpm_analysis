@@ -243,6 +243,7 @@ class AnalysisState:
     loop_idx: int = 0
     pairing_ratio_override: Optional[float] = None
     s1_s2_interval_history: List[float] = field(default_factory=list)  # Last N accepted S1-S2 intervals (sec) for expected-S1-S2
+    s1_s2_contractility_history: List[float] = field(default_factory=list)  # Last N accepted S1/S2 prominence ratios for expected contractility
 
 
 class PairingEngine:
@@ -294,10 +295,14 @@ class PairingEngine:
         intervals = calculate_bpm_intervals(bpm, self.params)
         history = getattr(state, "s1_s2_interval_history", []) or []
         n_use = self.params.get("s1_s2_expected_history_count", 10)
-        min_history = self.params.get("s1_s2_expected_history_min", 1)
-        use_history = self.params.get("s1_s2_expected_use_history", True) and len(history) >= min_history
+        # Use BPM-based expected until queue is at least half the window (e.g. first 5 of 10); then use history.
+        min_for_history = max(1, n_use // 2)
+        use_history = self.params.get("s1_s2_expected_use_history", True) and len(history) >= min_for_history
         if use_history:
-            expected_s1_s2 = float(np.mean(history[-n_use:]))
+            arr = np.array(history[-n_use:])
+            if len(arr) > 2:
+                arr = np.sort(arr)[1:-1]  # drop highest and lowest to reduce outlier impact
+            expected_s1_s2 = float(np.mean(arr))
             expected_s1_s2_source = f"past {len(history[-n_use:])} pairs"
         else:
             expected_s1_s2 = intervals["s1_s2_nominal"]
@@ -359,6 +364,7 @@ class PairingEngine:
             s2_prominence,
             bpm,
             self.params,
+            state=state,
         )
         reason += contractility_reason
 
@@ -731,6 +737,27 @@ def _append_s1_s2_interval(state: AnalysisState, interval_sec: float, params: Di
         state.s1_s2_interval_history = state.s1_s2_interval_history[-n_keep:]
 
 
+def _append_s1_s2_contractility(
+    state: AnalysisState,
+    s1_idx: int,
+    s2_idx: int,
+    audio_envelope: np.ndarray,
+    trough_indices: np.ndarray,
+    sample_rate: int,
+    params: Dict,
+) -> None:
+    """Append an accepted pair's S1/S2 prominence ratio to history for expected contractility."""
+    s1_details = get_peak_prominence_details(s1_idx, audio_envelope, trough_indices, sample_rate)
+    s2_details = get_peak_prominence_details(s2_idx, audio_envelope, trough_indices, sample_rate)
+    s1_prom = s1_details["prominence"]
+    s2_prom = s2_details["prominence"]
+    ratio = s1_prom / (s2_prom + 1e-9)
+    state.s1_s2_contractility_history.append(ratio)
+    n_keep = params.get("contractility_expected_history_count", 10)
+    if len(state.s1_s2_contractility_history) > n_keep:
+        state.s1_s2_contractility_history = state.s1_s2_contractility_history[-n_keep:]
+
+
 def _get_recent_s1_prominences_for_state(
     state: AnalysisState,
     audio_envelope: np.ndarray,
@@ -943,6 +970,9 @@ class PeakClassifier:
 
             self.state.candidate_beats.append(s1_idx)
             _append_s1_s2_interval(self.state, (s2_idx - s1_idx) / self.sample_rate, self.params)
+            _append_s1_s2_contractility(
+                self.state, s1_idx, s2_idx, self.audio_envelope, self.state.trough_indices, self.sample_rate, self.params
+            )
             self.state.beat_debug_info[s1_idx] = {
                 "peak_type": PeakType.S1_PAIRED.value,
                 "sections": s1_sections,
@@ -981,6 +1011,9 @@ class PeakClassifier:
         if is_paired:
             self.state.candidate_beats.append(current_peak_idx)
             _append_s1_s2_interval(self.state, (next_peak_idx - current_peak_idx) / self.sample_rate, self.params)
+            _append_s1_s2_contractility(
+                self.state, current_peak_idx, next_peak_idx, self.audio_envelope, self.state.trough_indices, self.sample_rate, self.params
+            )
             pairing_lines = [
                 line.strip().lstrip('- ')
                 for line in reason.strip().split("\n")
@@ -1088,7 +1121,8 @@ class PeakClassifier:
         
         confidence, detail_lines = calculate_lone_s1_confidence(
             current_peak_idx, self.state.candidate_beats[-1], self.state.long_term_bpm,
-            self.audio_envelope, self.state.dynamic_noise_floor, self.sample_rate, self.params
+            self.audio_envelope, self.state.dynamic_noise_floor, self.sample_rate, self.params,
+            all_peaks=self.state.all_peaks
         )
         
         # --- 2. Absolute prominence guardrail ---
@@ -1323,62 +1357,91 @@ def calculate_bpm_intervals(bpm: float, params: Dict) -> Dict[str, float]:
         "s2_s1_nominal": s2_s1_nominal,
     }
 
+def _contractility_expected_ratio_bpm(bpm: float, params: Dict) -> float:
+    """Expected S1/S2 ratio from BPM using a power curve (non-linear; steep rise at low BPM then flatter)."""
+    bpm_min = params.get("contractility_bpm_min", 60)
+    bpm_max = params.get("contractility_bpm_max", 200)
+    low_ratio = params.get("contractility_low_ratio", 0.9)
+    high_ratio = params.get("contractility_high_ratio", 6.0)
+    exponent = params.get("contractility_power_exponent", 0.7)
+    bpm_clipped = np.clip(bpm, bpm_min, bpm_max)
+    t = (bpm_clipped - bpm_min) / max(bpm_max - bpm_min, 1e-9)
+    return low_ratio + (high_ratio - low_ratio) * (t ** exponent)
+
+
 def adjust_confidence_with_contractility(
     base_confidence: float,
     s1_prominence: float,
     s2_prominence: float,
     bpm: float,
     params: Dict,
+    state: Optional[AnalysisState] = None,
 ) -> Tuple[float, str]:
     """
-    Contractility / prominence adjustment.
-
-    Compares the measured S2/S1 prominence ratio against a BPM-based expectation:
-    - If S2 is too prominent for this BPM → penalize confidence.
-    - If S1 is much more prominent than expected → modestly boost confidence.
+    Contractility / prominence adjustment. S1/S2 ratio; expected from history or BPM power curve.
+    Single deviation from expected: inside band → boost (tent); outside → penalty (linear ramp).
     """
     reason = ""
 
-    # --- 1. Contractility Model: Expected S2/S1 ratio as a function of BPM ---
-    # reminder to add comments to explain how the contractility model's logic was derrived from observing the data.
-    # I should probably not document the logic here since it's a long explination that's better left to the documentation
-    # but a surface level explanation would be helpful.
-
-    expected_max_ratio = np.interp(
-        bpm,
-        [params["contractility_bpm_low"], params["contractility_bpm_high"]],
-        [params["s2_s1_ratio_low_bpm"], params["s2_s1_ratio_high_bpm"]],
-    )
-
-    # --- 2. Reality: Measured S2/S1 prominence ratio ---
-    actual_ratio = s2_prominence / (s1_prominence + 1e-9)
-
-    # --- 3. Apply contractility logic ---
-    if actual_ratio > expected_max_ratio:
-        # S2 is too prominent for this BPM → penalize
-        violation = (actual_ratio / (expected_max_ratio + 1e-9)) - 1.0
-        penalty_strength = params.get("contractility_penalty_strength", 0.4)
-        penalty = violation * penalty_strength
-        confidence = max(0.0, base_confidence - penalty)
-        reason += (
-            f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S2/S1={actual_ratio:.2f} "
-            f"(expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM). S2 too prominent → -{penalty:.2f} → {confidence:.2f}"
-        )
-    elif actual_ratio < expected_max_ratio * 0.5:
-        # S1 is much more prominent than expected → mild boost
-        boost = params.get("contractility_boost_amount", 0.15)
-        confidence = min(1.0, base_confidence + boost)
-        reason += (
-            f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S2/S1={actual_ratio:.2f} "
-            f"(expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM). S1 >> S2 → +{boost:.2f} → {confidence:.2f}"
-        )
+    # --- 1. Expected S1/S2: from history or BPM power curve ---
+    history = getattr(state, "s1_s2_contractility_history", []) if state else []
+    n_use = params.get("contractility_expected_history_count", 10)
+    # Use BPM formula until queue is at least half the window (e.g. first 5 of 10); then use history.
+    min_for_history = max(1, n_use // 2)
+    use_history = params.get("contractility_expected_use_history", True) and len(history) >= min_for_history
+    if use_history:
+        arr = np.array(history[-n_use:])
+        if len(arr) > 2:
+            arr = np.sort(arr)[1:-1]  # drop highest and lowest to reduce outlier impact
+        expected_ratio = float(np.mean(arr))
+        expected_source = f"past {len(history[-n_use:])} pairs"
     else:
-        # Within expected range → leave confidence unchanged
-        confidence = base_confidence
-        reason += (
-            f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S2/S1={actual_ratio:.2f} "
-            f"(expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM). Within range → no change → {confidence:.2f}"
-        )
+        expected_ratio = _contractility_expected_ratio_bpm(bpm, params)
+        expected_source = "BPM power curve"
+
+    # --- 2. Measured S1/S2 prominence ratio and deviation from expected ---
+    actual_ratio = s1_prominence / (s2_prominence + 1e-9)
+    abs_deviation = abs(actual_ratio - expected_ratio)
+
+    # --- 3. Single deviation-based curve: band (boost) and ramp (penalty) ---
+    zero_crossing_frac = params.get("contractility_zero_crossing_fraction", 0.2)
+    ramp_frac = params.get("contractility_penalty_ramp_fraction", 0.4)
+    boost_max = params.get("contractility_boost_max", 0.10)
+    penalty_max = params.get("contractility_penalty_max", 0.30)
+
+    band_half_width = expected_ratio * zero_crossing_frac
+    ramp_width = expected_ratio * ramp_frac
+
+    contractility_boost = 0.0
+    contractility_penalty = 0.0
+
+    if abs_deviation <= band_half_width:
+        # Inside band: boost 0 at edge, max at center (tent)
+        if band_half_width > 1e-9:
+            t = 1.0 - (abs_deviation / band_half_width)
+            contractility_boost = boost_max * float(np.clip(t, 0, 1))
+    else:
+        # Outside band: penalty ramps from 0 at edge to penalty_max over ramp_width
+        excess = abs_deviation - band_half_width
+        if ramp_width > 1e-9:
+            t = excess / ramp_width
+            contractility_penalty = penalty_max * float(np.clip(t, 0, 1))
+
+    confidence = base_confidence
+    if contractility_boost > 0:
+        confidence = min(1.0, confidence * (1.0 + contractility_boost))
+    if contractility_penalty > 0:
+        confidence = max(0.0, confidence * (1.0 - contractility_penalty))
+
+    reason += (
+        f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S1/S2={actual_ratio:.2f} "
+        f"(expected {expected_ratio:.2f} from {expected_source})"
+    )
+    if contractility_boost > 0:
+        reason += f", boost +{contractility_boost:.2f} (×{(1.0 + contractility_boost):.2f})"
+    elif contractility_penalty > 0:
+        reason += f", penalty -{contractility_penalty:.2f} (×{(1.0 - contractility_penalty):.2f})"
+    reason += f" → {confidence:.2f}"
 
     return confidence, reason
 
@@ -1438,27 +1501,65 @@ def _apply_other_pairing_adjustments(
 
 
 def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_term_bpm: float, audio_envelope: np.ndarray,
-                                 dynamic_noise_floor: pd.Series, sample_rate: int, params: Dict) -> Tuple[float, List[str]]:
+                                 dynamic_noise_floor: pd.Series, sample_rate: int, params: Dict,
+                                 all_peaks: Optional[np.ndarray] = None) -> Tuple[float, List[str]]:
     """
     Calculates a confidence score for a Lone S1 candidate based on a weighted average of
     its rhythmic timing and its amplitude consistency with the previous beat, and returns
     human-readable detail lines explaining the calculation.
+
+    When the backward interval (last S1 → current) gives a rhythm score of zero (too far
+    from expected RR), optionally uses the forward interval (current → next-next peak)
+    as a fallback and uses that score instead.
     """
-    # --- 1. Calculate Rhythmic Fit Score ---
+    # --- 1. Calculate Rhythmic Fit Score (backward: last S1 → current) ---
     expected_rr_sec = calculate_bpm_intervals(long_term_bpm, params)["rr_interval"]
-    actual_rr_sec = (current_peak_idx - last_s1_idx) / sample_rate
-    rhythm_deviation_pct = abs(actual_rr_sec - expected_rr_sec) / expected_rr_sec
+    actual_rr_backward_sec = (current_peak_idx - last_s1_idx) / sample_rate
+    rhythm_deviation_pct = abs(actual_rr_backward_sec - expected_rr_sec) / expected_rr_sec
 
     rhythm_score = np.interp(
         rhythm_deviation_pct,
         [0.0, 0.15, 0.40, 0.60],  # Hardcoded rhythm deviation points
         [1.0, 0.8, 0.4, 0.0]      # Hardcoded rhythm confidence curve
     )
-    rhythm_reason = (
-        f"Rhythm Fit: interval {actual_rr_sec:.3f}s vs expected {expected_rr_sec:.3f}s "
-        f"(deviation {rhythm_deviation_pct:.0%}; map 0/15/40/60% → 1.00/0.80/0.40/0.00) "
-        f"→ score {rhythm_score:.2f} → {rhythm_score:.2f}"
-    )
+
+    # If backward gives zero, try forward interval (current → next-next peak) as fallback
+    if rhythm_score <= 0.0 and all_peaks is not None and len(all_peaks) >= 3:
+        pos = np.searchsorted(all_peaks, current_peak_idx)
+        if pos < len(all_peaks) and all_peaks[pos] == current_peak_idx and pos + 2 < len(all_peaks):
+            next_next_peak_idx = int(all_peaks[pos + 2])
+            actual_rr_forward_sec = (next_next_peak_idx - current_peak_idx) / sample_rate
+            rhythm_deviation_forward_pct = abs(actual_rr_forward_sec - expected_rr_sec) / expected_rr_sec
+            rhythm_score_forward = np.interp(
+                rhythm_deviation_forward_pct,
+                [0.0, 0.15, 0.40, 0.60],
+                [1.0, 0.8, 0.4, 0.0]
+            )
+            if rhythm_score_forward > 0.0:
+                rhythm_score = rhythm_score_forward
+                rhythm_reason = (
+                    f"Rhythm Fit (forward fallback): backward interval {actual_rr_backward_sec:.3f}s too far from expected "
+                    f"{expected_rr_sec:.3f}s → used forward interval {actual_rr_forward_sec:.3f}s (current→next-next) "
+                    f"(deviation {rhythm_deviation_forward_pct:.0%}) → score {rhythm_score:.2f}"
+                )
+            else:
+                rhythm_reason = (
+                    f"Rhythm Fit: interval {actual_rr_backward_sec:.3f}s vs expected {expected_rr_sec:.3f}s "
+                    f"(deviation {rhythm_deviation_pct:.0%}; map 0/15/40/60% → 1.00/0.80/0.40/0.00) "
+                    f"→ score {rhythm_score:.2f}; forward fallback interval {actual_rr_forward_sec:.3f}s also poor → {rhythm_score:.2f}"
+                )
+        else:
+            rhythm_reason = (
+                f"Rhythm Fit: interval {actual_rr_backward_sec:.3f}s vs expected {expected_rr_sec:.3f}s "
+                f"(deviation {rhythm_deviation_pct:.0%}; map 0/15/40/60% → 1.00/0.80/0.40/0.00) "
+                f"→ score {rhythm_score:.2f} → {rhythm_score:.2f}"
+            )
+    else:
+        rhythm_reason = (
+            f"Rhythm Fit: interval {actual_rr_backward_sec:.3f}s vs expected {expected_rr_sec:.3f}s "
+            f"(deviation {rhythm_deviation_pct:.0%}; map 0/15/40/60% → 1.00/0.80/0.40/0.00) "
+            f"→ score {rhythm_score:.2f} → {rhythm_score:.2f}"
+        )
 
     # --- 2. Calculate Amplitude Fit Score ---
     last_s1_strength = max(0, audio_envelope[last_s1_idx] - dynamic_noise_floor.iloc[last_s1_idx])
