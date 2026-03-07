@@ -1,11 +1,7 @@
 # config.py
-# I manually tuned the parameters in this file to result in the fewest errors across my input data
-# It's important to note that as my codebase evolves and I implement more efficient/better methods. many of these "bandaid fixes"
-# will be outdated and the parameter tuning will not need to be so specific. 
-# some of these params are too specific which indicates that the code is not as robust as it could be.
-# although I have tried to avoid it, adjusting some of the params to reduce errors for one input file may cause another input file to have more errors.
-# It feels like I have to balance the params to "fine tune" the code, which feels bad?
-# but this may also be unavoidable due to the nature of the data. 
+# Default parameters and output toggles for the analysis pipeline.
+# Values are tuned for typical PCG recordings from consumer hardware.
+# See Documentation.md "Parameter Tuning Rationale" for reasoning behind specific values.
 
 
 DEFAULT_PARAMS = {
@@ -34,11 +30,11 @@ DEFAULT_PARAMS = {
 
     # --- Multi-band S1 vs S2 (spectral fingerprint) ---
     "enable_multiband_s1_s2": True,      # Use S1-band vs S2-band energy to adjust pairing confidence.
-    "s1_band_low_hz": 20.0,             # S1 typical range 20–60 Hz.
+    "s1_band_low_hz": 20.0,             # S1 typical range 20-60 Hz.
     "s1_band_high_hz": 60.0,
-    "s2_band_low_hz": 170.0,             # S2 typical range 60–200 Hz.
+    "s2_band_low_hz": 170.0,             # S2 typical range 60-200 Hz.
     "s2_band_high_hz": 220.0,
-    "multiband_boost_max": 0.15,         # Max confidence boost when band energies support S1–S2.
+    "multiband_boost_max": 0.15,         # Max confidence boost when band energies support S1-S2.
     "multiband_penalty_max": 0.15,      # Max confidence penalty when bands suggest wrong order.
     "multiband_peak_window_ms": 130.0,   # Time window (ms) centered on each peak; covers whole beat. Converted to samples using sample rate.
     "multiband_gaussian_sigma_ms": 25.0, # Gaussian sigma (ms) for weighting; typically window/4 so weight falls off by edges. Used for Gaussian-weighted sum of band energy.
@@ -72,7 +68,8 @@ DEFAULT_PARAMS = {
     # The core logic for identifying S1-S2 pairs based on timing and physiology.
     # =================================================================================
     # --- 4.1. Core Pairing Rules ---
-    "pairing_confidence_threshold": 0.50, # Confidence score required to classify two peaks as an S1-S2 pair.
+    "pairing_confidence_threshold": 0.50,          # Confidence score required to classify two peaks as an S1-S2 pair.
+    "preliminary_pass_confidence_threshold": 0.75, # Higher threshold used for the first (anchor-finding) pass only.
     "s1_s2_interval_cap_sec": 0.4,        # The absolute maximum time (seconds) allowed between S1 and S2.
     "s1_s2_interval_rr_fraction": 0.7,    # Used when Weissler is disabled: nominal S1-S2 as fraction of R-R.
     'min_s1_s2_interval_sec': 0.10,           # Absolute minimum (100ms)
@@ -81,7 +78,7 @@ DEFAULT_PARAMS = {
     "s1_s2_expected_use_weissler": True,      # If True, expected S1-S2 from linear model; else rr_interval * rr_fraction.
     "s1_s2_expected_weissler_ref_et_ms": 300, # Reference ejection time (ms) at ref_bpm (e.g. ~300 ms at 60 BPM).
     "s1_s2_expected_weissler_ref_bpm": 60,    # BPM at which ref_et_ms is defined.
-    "s1_s2_expected_weissler_slope_ms_per_bpm": 1.0,  # ET decrease (ms) per BPM increase (literature ~1.0–1.7).
+    "s1_s2_expected_weissler_slope_ms_per_bpm": 1.0,  # ET decrease (ms) per BPM increase (literature ~1.0-1.7).
     'noise_prominence_threshold': 0.35,   # Peaks below this ratio are "suspect noise" 
     'enable_lookahead_skipping': True,    # Enable/disable lookahead skipping
 
@@ -101,7 +98,7 @@ DEFAULT_PARAMS = {
     "forward_look_drop_threshold": 0.4,     # If next peak < 60% of S2, it's suspicious
     "forward_look_max_penalty": 0.4,        # Max penalty for this scenario
     # Contractility: S1/S2 prominence ratio. Expected from history (past N pairs) or BPM power-curve fallback.
-    "contractility_expected_use_history": True,   # If True, expected S1/S2 = mean of last N accepted pairs; else BPM power curve.
+    "contractility_expected_use_history": False,   # If True, expected S1/S2 = mean of last N accepted pairs; else BPM power curve.
     "contractility_expected_history_count": 8,   # Number of past S1/S2 ratios to average.
     "contractility_expected_history_min": 1,      # Min history length before using average (else BPM fallback).
     # BPM fallback: power curve expected_ratio = low + (high - low) * ((BPM - bpm_min) / (bpm_max - bpm_min)) ** exponent.
@@ -110,10 +107,10 @@ DEFAULT_PARAMS = {
     "contractility_low_ratio": 0.9,              # Expected S1/S2 at bpm_min (rest).
     "contractility_high_ratio": 6.0,             # Expected S1/S2 at bpm_max (high exertion).
     "contractility_power_exponent": 0.5,         # <1: steep rise at low BPM then flatter (contractility kicks in early).
-    # Deviation-based curve: |actual − expected|; inside band = boost, outside = penalty ramp.
+    # Deviation-based curve: |actual - expected|; inside band = boost, outside = penalty ramp.
     "contractility_zero_crossing_fraction": 0.2,  # Band half-width = expected × this; inside → boost, outside → penalty.
     "contractility_boost_max": 0.15,              # Max multiplicative boost at expected: confidence *= (1 + boost).
-    "contractility_penalty_max": 0.30,             # Max multiplicative penalty when far outside band.
+    "contractility_penalty_max": 0.2,             # Max multiplicative penalty when far outside band.
     "contractility_penalty_ramp_fraction": 0.4,   # Ramp width = expected × this; penalty reaches max over this distance beyond band.
     "recovery_phase_duration_sec": 120,      # Duration (seconds) of the high-contractility state after peak BPM.
     "recovery_phase_min_peak_bpm": 110,      # Only enable recovery-phase adjust if preliminary peak BPM >= this (avoids activating when BPM stays low).
@@ -134,6 +131,9 @@ DEFAULT_PARAMS = {
     # --- 4.5. Kick-Start Mechanism to Recover from Pairing Failure ---
     "kickstart_check_threshold": 0.3,           # Only run the check if pairing_ratio is BELOW this value.
     "kickstart_override_ratio": 0.60,           # The temporary pairing ratio to use if kick-start is triggered.
+    "kickstart_history_beats": 4,               # Look-back window: how many recent beats to inspect for the pattern.
+    "kickstart_min_lone_s1s": 3,                # How many of those beats must be Lone S1 candidates.
+    "kickstart_min_noise_matches": 3,           # How many of those Lone S1s must be immediately followed by a Noise peak.
 
     # =================================================================================
     # 5. Rhythm Plausibility & Validation
@@ -142,6 +142,8 @@ DEFAULT_PARAMS = {
     # --- 5.1. Long-Term BPM Belief ---
     "min_bpm": 40,                          # Absolute minimum BPM the algorithm will consider valid.
     "max_bpm": 240,                         # Absolute maximum BPM the algorithm will consider valid.
+    "bpm_belief_learning_rate": 0.05,       # EMA weight for each new beat; lower = smoother but slower to track changes.
+    "bpm_belief_max_change_per_beat": 3.0,  # Speed limiter: max BPM shift allowed per beat (scaled by interval length).
 
     # --- 5.2. Beat-to-Beat Validation ---
     "rr_interval_max_decrease_pct": 0.45, # A new R-R interval can't be more than 45% shorter than the previous one.
@@ -175,7 +177,7 @@ DEFAULT_PARAMS = {
     "enable_hrv_frequency_domain": True,     # If True, compute Lomb-Scargle LF/HF and optional global VLF/LF/HF.
     "hrv_global_min_duration_sec": 300.0,   # Only compute global spectrum when recording duration >= this (5 min).
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
-    # In plotting.py: avoid dashed lines (dash=...) for line traces—they cause noticeable lag.
+    # In plotting.py: avoid dashed lines (dash=...) for line traces--they cause noticeable lag.
     "plot_downsample_factor": 4,             # Downsample only large traces: Audio Envelope and Dynamic Noise Floor (keep 1 of every N points). Does NOT apply to Average S1/S2 contractility, BPM, HRV, or markers.
     "contractility_average_window_sec": 1.0, # Time to average S1/S2 contractility plot: Used in: long-term (contractility vs BPM), short-term (S1 vs inhale/exhale)
 
@@ -196,8 +198,8 @@ DEFAULT_PARAMS = {
     "trapezoid_min_fall_delta_bpm": 3.0,        # Minimum absolute BPM drop across the fall edge (start vs end of fall).
 }
 
-# Single source of truth for pipeline output toggles (used when output_options is None).
-# GUI and analyze_wav_file use this; add new options here and in gui get_output_options/checkboxes.
+# Single source of truth for pipeline output toggles. GUI and analyze_wav_file use this;
+# add new options here only (GUI builds checkboxes and get_output_options from these keys).
 DEFAULT_OUTPUT_OPTIONS = {
     "html": True,
     "png": False,

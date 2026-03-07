@@ -14,7 +14,7 @@ import datetime
 from tkinter import ttk, filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
-from config import DEFAULT_PARAMS
+from config import DEFAULT_PARAMS, DEFAULT_OUTPUT_OPTIONS
 from dataclasses import dataclass
 from enum import Enum, auto
 from time_utils import timestamp_str
@@ -29,17 +29,18 @@ class UIMessage:
     type: UIMessageType
     data: any = None
 
-# Order and labels for output file checkboxes; first 8 in 2-column grid, 9th full width.
+# Order and labels for output file checkboxes (keys must match DEFAULT_OUTPUT_OPTIONS in config).
+# First 8 in 2-column grid, 9th full width. Default values come from config only.
 OUTPUT_FILE_OPTIONS = (
-    ("output_html", "Heart Rate Graph (HTML File)"),
-    ("output_png", "Plot PNG (auto-export)"),
-    ("output_csv", "CSV Data"),
-    ("output_spectrogram", "HTML Spectrogram"),
-    ("output_summary", "Summary Report"),
-    ("output_debug", "Debug Report"),
-    ("output_filtered_wav", "Filtered Audio WAV"),
-    ("output_bpm_text", "BPM Time Text"),
-    ("output_regression_log", "Regression testing output log (Markdown)"),
+    ("html", "Heart Rate Graph (HTML File)"),
+    ("png", "Plot PNG (auto-export)"),
+    ("csv", "CSV Data"),
+    ("spectrogram", "HTML Spectrogram"),
+    ("summary", "Summary Report"),
+    ("debug", "Debug Report"),
+    ("filtered_wav", "Filtered Audio WAV"),
+    ("bpm_text", "BPM Time Text"),
+    ("regression_log", "Regression testing output log (Markdown)"),
 )
 
 
@@ -106,18 +107,9 @@ class BPMApp:
             command=self.save_ui_settings,
         ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
 
-        # Output file options
-        self.output_html = tk.BooleanVar(value=True)
-        self.output_png = tk.BooleanVar(value=False)
-        self.output_csv = tk.BooleanVar(value=False)
-        self.output_summary = tk.BooleanVar(value=False)
-        self.output_debug = tk.BooleanVar(value=False)
-        self.output_filtered_wav = tk.BooleanVar(value=False)
-        self.output_bpm_text = tk.BooleanVar(value=False)
-        # HTML spectrogram overlay can be slow to generate; expose as a separate toggle.
-        self.output_spectrogram = tk.BooleanVar(value=True)
-        # Optional regression testing output log (Markdown)
-        self.output_regression_log = tk.BooleanVar(value=False)
+        # Output file options (defaults from config only)
+        for opt_key, _ in OUTPUT_FILE_OPTIONS:
+            setattr(self, "output_" + opt_key, tk.BooleanVar(value=DEFAULT_OUTPUT_OPTIONS.get(opt_key, False)))
         # Long-plot optimization (HTML debug traces)
         self.optimize_long_plots = tk.BooleanVar(value=False)
         # Output location option
@@ -132,8 +124,8 @@ class BPMApp:
             self._update_output_status()
             self.save_ui_settings()
 
-        for i, (var_name, label) in enumerate(OUTPUT_FILE_OPTIONS):
-            var = getattr(self, var_name)
+        for i, (opt_key, label) in enumerate(OUTPUT_FILE_OPTIONS):
+            var = getattr(self, "output_" + opt_key)
             ttk.Checkbutton(
                 output_frame, text=label, variable=var, command=self._update_output_status
             ).grid(
@@ -311,10 +303,9 @@ class BPMApp:
             return None
 
     _SETTINGS_VAR_KEYS = (
-        'process_all_channels', 'verbose_console_logging',
-        'output_html', 'output_png', 'output_csv', 'output_summary', 'output_debug',
-        'output_filtered_wav', 'output_bpm_text', 'output_spectrogram', 'output_regression_log',
-        'optimize_long_plots', 'output_to_input_dir',
+        ('process_all_channels', 'verbose_console_logging')
+        + tuple('output_' + k for k, _ in OUTPUT_FILE_OPTIONS)
+        + ('optimize_long_plots', 'output_to_input_dir')
     )
 
     def save_ui_settings(self):
@@ -400,39 +391,17 @@ class BPMApp:
 
     def select_all_outputs(self):
         """Select all output file options."""
-        self.output_html.set(True)
-        self.output_png.set(True)
-        self.output_csv.set(True)
-        self.output_summary.set(True)
-        self.output_debug.set(True)
-        self.output_filtered_wav.set(True)
-        self.output_bpm_text.set(True)
-        self.output_spectrogram.set(True)
+        for opt_key, _ in OUTPUT_FILE_OPTIONS:
+            getattr(self, "output_" + opt_key).set(True)
 
     def select_none_outputs(self):
         """Deselect all output file options."""
-        self.output_html.set(False)
-        self.output_png.set(False)
-        self.output_csv.set(False)
-        self.output_summary.set(False)
-        self.output_debug.set(False)
-        self.output_filtered_wav.set(False)
-        self.output_bpm_text.set(False)
-        self.output_spectrogram.set(False)
+        for opt_key, _ in OUTPUT_FILE_OPTIONS:
+            getattr(self, "output_" + opt_key).set(False)
 
     def get_output_options(self):
-        """Get the current output file selection as a dictionary."""
-        return {
-            'html': self.output_html.get(),
-            'png': self.output_png.get(),
-            'csv': self.output_csv.get(),
-            'summary': self.output_summary.get(),
-            'debug': self.output_debug.get(),
-            'filtered_wav': self.output_filtered_wav.get(),
-            'bpm_text': self.output_bpm_text.get(),
-            'spectrogram': self.output_spectrogram.get(),
-            'regression_log': self.output_regression_log.get(),
-        }
+        """Get the current output file selection as a dictionary (keys match config.DEFAULT_OUTPUT_OPTIONS)."""
+        return {opt_key: getattr(self, "output_" + opt_key).get() for opt_key, _ in OUTPUT_FILE_OPTIONS}
 
     def _update_output_status(self, *args):
         """Update the output status label based on current selections."""
@@ -471,8 +440,8 @@ class BPMApp:
 
     def _run_analysis_in_background(self):
         try:
-            from bpm_analysis import analyze_wav_file
-            from audio_io import convert_to_wav, split_wav_to_mono_channels
+            from pipeline import analyze_wav_file
+            from audio_preprocessing import convert_to_wav, split_wav_to_mono_channels
             import shutil
 
             # Check for a global BPM value to override all individual settings.

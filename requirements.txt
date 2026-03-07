@@ -1,17 +1,22 @@
-# Main app dependencies (Blender BPM tool scripts use Blender's built-in Python/bpy; no pip install needed)
-# Version ranges below support both Python 3.10 and 3.11+ (pip installs the latest compatible with your interpreter).
-dash>=3.3.0
+# ── Direct dependencies ──────────────────────────────────────────────────────
+# Version ranges below support both Python 3.10 and 3.11+.
+
 librosa>=0.11.0
 numpy>=2.0
 pandas>=2.3.0
 plotly>=6.1.1
-kaleido>=1.0.0
 pydub>=0.25.1
-pyperclip>=1.11.0
 scipy>=1.14
 ttkbootstrap>=1.19.2
-
-# Additional runtime dependencies used in the project
 matplotlib
-PyWavelets
-soxr
+
+# Optional: only required when PNG export is enabled (Plotter.save_as_png /
+# fig.write_image). Can be omitted if you only need interactive HTML output.
+kaleido>=1.0.0
+
+# ── Indirect dependencies (librosa back-ends) ─────────────────────────────────
+# These are pulled in automatically by librosa, but are listed here so that pip
+# resolves a compatible version rather than whatever happens to be installed.
+# You do not need to import them directly in application code.
+PyWavelets   # librosa wavelet support (pywt)
+soxr         # high-quality resampling back-end used by librosa

@@ -1,3 +1,7 @@
+# audio_preprocessing.py
+# Full audio preprocessing pipeline: format conversion, channel splitting, signal conditioning,
+# envelope extraction, and noise-floor estimation.
+# Consumed by bpm_analysis (main pipeline) and gui (conversion helpers).
 import os
 import logging
 from typing import Dict, Optional, Tuple, List
@@ -80,7 +84,7 @@ def _detect_and_remove_stationary_hum(
 
     if peak_indices.size == 0:
         logging.info(
-            "Hum removal: no strong narrow-band peak detected in %.1f–%.1f Hz.", fmin, fmax
+            "Hum removal: no strong narrow-band peak detected in %.1f-%.1f Hz.", fmin, fmax
         )
         return audio_data, None
 
@@ -115,7 +119,7 @@ def _detect_and_remove_stationary_hum(
     q = float(params.get("hum_notch_q", 30.0))
 
     try:
-        # Normalized frequency (0–1) for iirnotch
+        # Normalized frequency (0-1) for iirnotch
         w0 = hum_freq_hz / (sample_rate / 2.0)
         b, a = iirnotch(w0, Q=q)
         filtered = filtfilt(b, a, audio_data)
@@ -212,9 +216,64 @@ def _compute_band_envelope(
     return envelope
 
 
+def _calculate_dynamic_noise_floor(
+    audio_envelope: np.ndarray, sample_rate: int, params: Dict
+) -> Tuple[pd.Series, np.ndarray]:
+    """Calculates a dynamic noise floor based on a sanitized set of audio troughs."""
+    min_peak_dist_samples = int(params['min_peak_distance_sec'] * sample_rate)
+    trough_prom_thresh = np.quantile(audio_envelope, params['trough_prominence_quantile'])
+
+    # --- STEP 1: Find all potential troughs initially ---
+    all_trough_indices, _ = find_peaks(-audio_envelope, distance=min_peak_dist_samples, prominence=trough_prom_thresh)
+
+    # If we don't have enough troughs to begin with, fall back to a simple static floor.
+    if len(all_trough_indices) < 5:
+        logging.warning("Not enough troughs found for sanitization. Using a static noise floor.")
+        fallback_value = np.quantile(audio_envelope, params['noise_floor_quantile'])
+        dynamic_noise_floor = pd.Series(fallback_value, index=np.arange(len(audio_envelope)))
+        return dynamic_noise_floor, all_trough_indices
+
+    # --- STEP 2: Create a preliminary 'draft' noise floor from ALL troughs ---
+    # This draft version is used only to evaluate the troughs themselves.
+    trough_series_draft = pd.Series(index=all_trough_indices, data=audio_envelope[all_trough_indices])
+    dense_troughs_draft = trough_series_draft.reindex(np.arange(len(audio_envelope))).interpolate()
+    noise_window_samples = int(params['noise_window_sec'] * sample_rate)
+    quantile_val = params['noise_floor_quantile']
+    draft_noise_floor = dense_troughs_draft.rolling(window=noise_window_samples, min_periods=3, center=True).quantile(quantile_val)
+    draft_noise_floor = draft_noise_floor.bfill().ffill()
+
+    # --- STEP 3: Sanitize the trough list ---
+    # Remove any troughs too far above the noise floor.
+    sanitized_trough_indices = []
+    rejection_multiplier = params.get('trough_rejection_multiplier', 4.0)
+    for trough_idx in all_trough_indices:
+        trough_amp = audio_envelope[trough_idx]
+        floor_at_trough = draft_noise_floor.iloc[trough_idx]
+        if not pd.isna(floor_at_trough) and trough_amp <= (rejection_multiplier * floor_at_trough):
+            sanitized_trough_indices.append(trough_idx)
+
+    logging.info(f"Trough Sanitization: Kept {len(sanitized_trough_indices)} of {len(all_trough_indices)} initial troughs.")
+
+    # --- STEP 4: Calculate more accurate noise floor using only sanitized troughs ---
+    if len(sanitized_trough_indices) > 2:
+        trough_series_final = pd.Series(index=sanitized_trough_indices, data=audio_envelope[sanitized_trough_indices])
+        dense_troughs_final = trough_series_final.reindex(np.arange(len(audio_envelope))).interpolate()
+        dynamic_noise_floor = dense_troughs_final.rolling(window=noise_window_samples, min_periods=3, center=True).quantile(quantile_val)
+        dynamic_noise_floor = dynamic_noise_floor.bfill().ffill()
+    else:
+        logging.warning("Not enough sanitized troughs remaining. Using non-sanitized floor as fallback.")
+        dynamic_noise_floor = draft_noise_floor
+
+    if dynamic_noise_floor.isnull().all():
+        fallback_val = np.quantile(audio_envelope, 0.1)
+        dynamic_noise_floor = pd.Series(fallback_val, index=np.arange(len(audio_envelope)))
+
+    return dynamic_noise_floor, np.array(sanitized_trough_indices)
+
+
 def preprocess_audio(
     file_path: str, params: Dict, output_directory: str, output_options: Optional[Dict] = None
-) -> Tuple[np.ndarray, int, Optional[Dict[str, np.ndarray]]]:
+) -> Tuple[np.ndarray, int, Optional[Dict[str, np.ndarray]], pd.Series, np.ndarray]:
     if output_options is None:
         output_options = DEFAULT_OUTPUT_OPTIONS.copy()
 
@@ -228,7 +287,7 @@ def preprocess_audio(
         logging.error("Librosa failed to load file: %s", e)
         raise
 
-    # Optional adaptive hum removal (e.g., ~50–70 Hz mains / equipment hum)
+    # Optional adaptive hum removal (e.g., ~50-70 Hz mains / equipment hum)
     audio_downsampled, detected_hum = _detect_and_remove_stationary_hum(
         audio_downsampled, new_sample_rate, params
     )
@@ -252,7 +311,7 @@ def preprocess_audio(
         base_name = os.path.basename(os.path.splitext(file_path)[0])
         debug_path = os.path.join(output_directory, f"{base_name}_filtered_debug.wav")
 
-        # Resample to a browser‑friendly sample rate for HTML5 audio playback.
+        # Resample to a browser-friendly sample rate for HTML5 audio playback.
         # Very low sample rates (e.g. 500 Hz) can cause some browsers to report
         # "Audio format not supported", even though the WAV file is valid.
         # Increased debug_sample_rate to 10k to avoid Empty filters detected in mel frequency basis warnings.
@@ -293,7 +352,7 @@ def preprocess_audio(
         window=smooth_window, min_periods=1, center=True
     ).mean().values
 
-    # Multi-band S1 vs S2: separate envelopes for S1-band (e.g. 20–60 Hz) and S2-band (e.g. 60–200 Hz).
+    # Multi-band S1 vs S2: separate envelopes for S1-band (e.g. 20-60 Hz) and S2-band (e.g. 60-200 Hz).
     band_envelopes = None
     if params.get("enable_multiband_s1_s2", True):
         s1_low = float(params.get("s1_band_low_hz", 20.0))
@@ -309,5 +368,5 @@ def preprocess_audio(
             ),
         }
 
-    return audio_envelope, new_sample_rate, band_envelopes
-
+    noise_floor, trough_indices = _calculate_dynamic_noise_floor(audio_envelope, new_sample_rate, params)
+    return audio_envelope, new_sample_rate, band_envelopes, noise_floor, trough_indices

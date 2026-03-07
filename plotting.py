@@ -4,7 +4,8 @@ from time_utils import seconds_to_datetime
 import csv
 import shutil
 import json
-from typing import Dict, Optional, List, Any, Callable
+from typing import Dict, Optional, List, Any
+from peak_utils import PeakType, _get_peak_type_from_debug, format_debug_entry, get_peak_prominence_details
 
 import numpy as np
 import pandas as pd
@@ -29,9 +30,6 @@ class Plotter:
         sample_rate: int,
         output_directory: str,
         source_audio_path: Optional[str] = None,
-        peak_type_helper: Optional[Callable[[Any], str]] = None,
-        format_debug_entry_func: Optional[Callable[[Dict], List[str]]] = None,
-        peak_type_cls: Optional[Any] = None,
     ):
         self.file_name = file_name
         self.params = params
@@ -44,13 +42,6 @@ class Plotter:
         self.spectrogram_original_filename: Optional[str] = None
         self.bpm_axis_center: float = float(params.get("default_bpm_axis_center", 125))
         self.bpm_axis_span: float = float(params.get("bpm_axis_span", 150))
-
-        # Debug formatting helpers are injected from the analysis module to avoid
-        # importing bpm_analysis here (which would create a circular dependency).
-        # If they are not provided, we fall back to no-op implementations.
-        self._get_peak_type_from_debug: Callable[[Any], str] = peak_type_helper or (lambda entry: "")
-        self._format_debug_entry: Callable[[Dict], List[str]] = format_debug_entry_func or (lambda entry: [])
-        self._PeakType = peak_type_cls
 
     def _generate_spectrogram_image(self, audio_path: str, output_path: str) -> Optional[str]:
         """
@@ -341,7 +332,7 @@ class Plotter:
     ):
         """Adds audio envelope and noise floor traces. Downsampling (plot_downsample_factor) applies only here
         to these large arrays; contractility, BPM, HRV and markers are never downsampled.
-        Note: Do not use dashed lines (dash=...) for line traces—they cause noticeable lag in the plot."""
+        Note: Do not use dashed lines (dash=...) for line traces--they cause noticeable lag in the plot."""
         if getattr(self, "skip_detailed_debug_traces", False):
             logging.info("Skipping audio envelope and noise floor traces for long file (optimization enabled).")
             return
@@ -525,13 +516,13 @@ class Plotter:
         for peak_idx, debug_value in debug_info.items():
             hover_text_parts = []
 
-            peak_type = self._get_peak_type_from_debug(debug_value) or "Unknown Peak"
+            peak_type = _get_peak_type_from_debug(debug_value) or "Unknown Peak"
             hover_text_parts.append(f"<b>Type:</b> {peak_type}")
             hover_text_parts.append(f"<b>Time:</b> {peak_idx / self.sample_rate:.2f}s")
             hover_text_parts.append(f"<b>Amp:</b> {audio_envelope[peak_idx]:.0f}")
             hover_text_parts.append("---")
 
-            formatted_lines = self._format_debug_entry(debug_value)
+            formatted_lines = format_debug_entry(debug_value)
             if formatted_lines:
                 sub_text = "<br>".join(l.replace("\t", "&nbsp;&nbsp;&nbsp;&nbsp;") for l in formatted_lines)
                 hover_text_parts.append(sub_text)
@@ -539,10 +530,10 @@ class Plotter:
             full_hover_text = "<br>".join(hover_text_parts)
             classified_indices.add(peak_idx)
 
-            if self._PeakType is not None and self._PeakType.is_s1(peak_type):
+            if PeakType.is_s1(peak_type):
                 s1_peaks["indices"].append(peak_idx)
                 s1_peaks["customdata"].append(full_hover_text)
-            elif self._PeakType is not None and self._PeakType.is_s2(peak_type):
+            elif PeakType.is_s2(peak_type):
                 s2_peaks["indices"].append(peak_idx)
                 s2_peaks["customdata"].append(full_hover_text)
             else:
@@ -631,8 +622,6 @@ class Plotter:
     def _add_s1_s2_amplitude_traces(self, s1_indices, s2_indices, audio_envelope, trough_indices=None):
         """Add line traces for Average S1, S2, and combined contractility (prominence-based, averaged over time segments).
         Uses a fixed-duration segment (default 2 s) so trends reflect: long-term contractility vs BPM; short-term S1 vs inhale/exhale."""
-        from bpm_analysis import get_peak_prominence_details
-
         segment_sec = float(self.params.get("contractility_average_window_sec", 2.0))
         troughs = np.array(trough_indices) if trough_indices is not None and len(trough_indices) > 0 else np.array([], dtype=np.intp)
 
@@ -1530,7 +1519,7 @@ class Plotter:
         <!-- Chart container - takes up remaining space -->
         <div id="chart-container">
             <div id="chart-toolbar">
-                <span class="chart-toolbar-title">Heartbeat Analysis – </span>
+                <span class="chart-toolbar-title">Heartbeat Analysis - </span>
                 <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
                 <label for="legend-category-filter" class="chart-toolbar-label">Show:</label>
                 <select id="legend-category-filter" title="Filter legend and visible traces by category">

@@ -6,7 +6,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
-from bpm_analysis import _get_peak_type_from_debug, format_debug_entry
+from peak_utils import _get_peak_type_from_debug, format_debug_entry
 from time_utils import timestamp_str
 
 

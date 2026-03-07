@@ -371,9 +371,26 @@ The configuration parameter:
 If the current peak is S1, we take a look at the current heart rate and determine the distance S2 should be. If the next peak is too far or too close to the current peak, we apply a penalty to the pairing confidence. 
 The pairing logic uses a V-shaped penalty based on how far the observed S1–S2 interval deviates from the expected interval. 
 
-The center of this V is where we expect S2 to be, so no penalty (and a small boost when very close). The further away we get from the expected interval, the higher the penalty we apply. The boundary where the effect crosses zero is set by `interval_zero_crossing_fraction`. 
+The center of this V is where we expect S2 to be, so no penalty. The further away we get from the expected interval, the higher the penalty we apply. There's a bit of leeway before the ramp starts applying the penalty. It's just a linear function right now. 
 
 Also, if the timing deviates too much from expected, we hard reject the pairing and move onto Lone S1 decision. 
+#### How is the expected interval calculated from BPM?
+using the Weissler regression (ET vs HR slope of approximately -1.0 to -1.7 ms per bpm increase)
+for example, At 135 bpm: 300 - (75 × 1.0) ≈ 225 ms 
+
+
+> [!think] 📌
+> so at runtime, using the belief BPM to calculate intervals is a bit flawed. belief determines intervals and intervals determine belief. this type of sequential decision making is too greedy. 
+> If I ever update the iterative code/ second pass correction etc. I should pass the calculated Average BPM from the first pass and remove outliers, then make a line of best fit and pass that new assumed BPM into this function to make the algorithm behave more holistically
+- [ ] implemented
+
+> [!think]
+> Let's only use weissler, remove the other calculation 
+- [ ] implemented
+
+> [!think]
+> we should make this a function of past S1-S2 pairs instead of BPM. I want to test how that would look. Maybe average the past 10 S1-S2 pairs to get a expected value. 
+- [x] implemented
 
 
 
@@ -434,25 +451,22 @@ This may also be a contributor for why S1 waveform amplitude increases with BPM.
 
 
 ### Code implementation
-#### As BPM increases, the S1-S2 prominence differential increases
-**Code Location:** `bpm_analysis.py` `adjust_confidence_with_contractility()`
-```python
-def adjust_confidence_with_contractility(...):
-    # BPM-dependent S2/S1 ratio expectations
-    expected_max_ratio = np.interp(
-        bpm,
-        [params["contractility_bpm_low"], params["contractility_bpm_high"]],
-        [params["s2_s1_ratio_low_bpm"], params["s2_s1_ratio_high_bpm"]],
-    )
+```embed
+title: "Heart Contractility Power curve"
+image: "https://www.desmos.com/calc_thumbs/production/version/qll0xbsiuk/65328f50-19ea-11f1-bd8a-c516bba7813a.png"
+description: ""
+url: "https://www.desmos.com/calculator/qll0xbsiuk"
+favicon: ""
+aspectRatio: "100"
 ```
-**How it works:**
-- At high BPM (>140), `expected_max_ratio = 1.2`. If S2 is >1.2x S1 amplitude, it's **penalized heavily** because this is physiologically unlikely.
-- At low BPM (<120), `expected_max_ratio = 1.6`. A louder S2 is **accepted** because this matches resting physiology.
-**config.py setting:**
-```python
-"contractility_bpm_high": 140.0,        # Above this BPM, expect S2 ≤1.2x S1
-"s2_s1_ratio_high_bpm": 1.2,            # This captures the "S2 disappears" reality
-```
+
+
+For post Post-Exercise contractility, we can increase the Exponent in this function, decaying over time. 
+
+
+
+
+
 
 
 ## Post-Exercise, S1 amplitude remains elevated despite BPM decreasing
@@ -485,6 +499,7 @@ While S1 remains augmented, S2 normalization lags because:
 - **Aortic/pulmonary pressure gradients** recover more slowly as stroke volume remains elevated
 - **Residual vasodilation** in skeletal muscle beds affects systemic vascular resistance
 - **Splitting patterns** remain abnormal during early recovery
+
 ### Code Implementation:
 #### Post-Exercise, S1 amplitude remains elevated despite BPM decreasing
 **Physiology:** Sympathetic tone persists after HR normalizes → contractility remains elevated → S1 stays loud.
@@ -505,6 +520,7 @@ if (peak_bpm_time_sec is not None and
 "recovery_phase_duration_sec": 120,     # Sympathetic tone persists ~2 minutes
 "recovery_phase_stability_floor": 0.90, # Be lenient about faint S2s during this window
 ```
+
 #### S2 Re-Emergence After Dropout
 **Physiology:** After S2 disappears at high BPM, it reappears faintly as HR drops. Initial faint peaks are easy to miss.
 **Code Location:** `bpm_analysis.py`, `_kickstart_check()`
@@ -524,6 +540,7 @@ if matches >= min_matches:
 "kickstart_check_threshold": 0.3,           # Only run when pairing_ratio is low
 "kickstart_override_ratio": 0.60,           # Temporarily accept more pairs
 ```
+
 #### Contractility vs. Rate Mismatch (Post-Exercise 90 BPM)
 **Physiology:** At 90 BPM post-exercise, contractility is still high (loud S1). At 90 BPM pre-exercise, contractility is normal (balanced S1/S2).
 **Code Location:** `bpm_analysis.py`, `PeakClassifier.__init__`
@@ -650,14 +667,19 @@ Detects trapezoid-shaped discontinuities in the average BPM series that are char
 
 
 ## Parameter Tuning Rationale
+Parameters in `config.py` were hand-tuned across multiple PCG recordings from consumer hardware.
+A known limitation: tightening a parameter to reduce errors on one file can increase errors on another.
+This is partly unavoidable given how much recording conditions vary (microphone position, movement noise, BPM range).
+If you find yourself re-tuning frequently, the underlying algorithm is probably not robust enough for that class of recording -- see the "Known Limitations" section.
+
 ### Noise Floor Parameters
-- `trough_rejection_multiplier=4.0`: Reject troughs &gt;4x draft floor. Calibrated to keep physiological troughs while rejecting movement artifacts.
+- `trough_rejection_multiplier=4.0`: Reject troughs >4x draft floor. Calibrated to keep physiological troughs while rejecting movement artifacts.
 - `noise_window_sec=4`: Rolling window for noise floor. Long enough to smooth out temporary noise, short enough to track gradual changes in background noise.
 ### Confidence Thresholds
 - `pairing_confidence_threshold=0.55`: Empirically determined. Lower values increase false pairs; higher values miss faint S2s.
 - `lone_s1_confidence_threshold=0.50`: Must be strong enough to avoid noise, but lenient enough to catch valid single beats when S2 is absent.
 ### Lookahead Parameters
-- `noise_prominence_threshold=0.35`: Middle peak must be &lt;35% of S1 prominence to be considered skippable. Prevents skipping valid S2s.
+- `noise_prominence_threshold=0.35`: Middle peak must be <35% of S1 prominence to be considered skippable. Prevents skipping valid S2s.
 - `enable_lookahead_skipping=True`: Master switch because lookahead is aggressive. Can be disabled for clean recordings.
 
 
@@ -777,13 +799,30 @@ If I can find a better solution these band aid fixes would not be here: (e.g., "
 **Architectural Debt:**
 - **Deep call stacks**: 6-stage pipeline with shared state dictionaries makes debugging challenging
 
-**Code Quality:**
-- Sparse inline comments in complex logic (e.g., `classify_peaks` loop)
+**Undocumented code**
+Documentation should be reserved for reasoning and not the specific details on how the idea is implemented. This keeps our documentation flexible to massive algorithm changes with no changes in documentation
 
-**Redundant Logic:**
-There are bits of logic that I implemented to the script that likely do not need to be there. I come up with a idea to solve a problem, then later I come up with a better idea but left the initial solution in the code. Therefore there may be redundancy in logic that's still being used in the call stack but from a practical standpoint the logic is redundant. 
+#### LLM prompts to maintain our codebase
+> [!say]
+> There are bits of logic that I implemented to the script that likely do not need to be there. I come up with a idea to solve a problem, then later I come up with a better idea but left the initial solution in the code. Therefore there may be redundancy in logic that's still being used in the call stack but from a practical standpoint the logic is redundant. 
+> 
+> Can you scan our codebase for such cases if they do exist
 
-Right now, I can't name anything off the top of my head but I get the feeling this issue exists.
+> [!say]
+> Sometimes, a module name doesn't match its actual contents. Can you scan our codebase for such cases if they do exist
+
+> [!say]
+> can you scan the codebase for lingering circular dependancies etc.
+> observe the current structure and detemine if it needs to be done the way it is. should we further refactor for a more maintanable structure etc...
+
+> [!say]
+> can you scan the codebase for dead/redundant code? any stale or outdated comments?
+
+> [!say]
+> We should be writing code/text that makes it easy for AI to decipher and replace. Previously, we had difficulty with, and replacing/editing code using AI. Replace all high-risk characters with their ASCII equivalents so the codebase would be all-ASCII in its source text (string literals + comments). double check areas of concern. 
+
+
+
 
 
 ### Release

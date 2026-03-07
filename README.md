@@ -33,7 +33,6 @@ To run this script, you will need Python and the following libraries:
 - **`matplotlib`** (used for spectrogram and plotting)
 - **`kaleido`** (required for exporting Plotly graphs to PNG)
 - **`PyWavelets`** (provides the `pywt` module used for wavelet denoising)
-- **`pyPCG-toolbox`** (enables optional, tunable pyPCG denoising; the feature is only active when you configure `denoising_method` in `config.py`)
 
 You will also need **FFmpeg** installed and accessible in your system's PATH for `pydub` to function correctly. Follow the installation instructions for your operating system from the official [FFmpeg website](https://ffmpeg.org/download.html).
 
