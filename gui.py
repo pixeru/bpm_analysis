@@ -297,7 +297,7 @@ class BPMApp:
             return None
         try:
             bpm_val = float(match.group(1))
-            logging.info("Using BPM %s from file name for '%s'.", bpm_val, base)
+            logging.info(f"Using BPM {bpm_val} from file name for '{base}'.")
             return bpm_val
         except (TypeError, ValueError):
             return None
@@ -319,7 +319,7 @@ class BPMApp:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=4)
         except Exception as e:
-            logging.warning("Could not save UI settings: %s", e)
+            logging.warning(f"Could not save UI settings: {e}")
 
     def load_ui_settings(self):
         """Load UI settings from a JSON file if it exists."""
@@ -342,7 +342,7 @@ class BPMApp:
                     self.analyze_btn.config(state=tk.NORMAL)
                     self._update_status(f"Loaded {len(self.current_files)} files from previous session.")
         except Exception as e:
-            logging.warning("Could not load UI settings: %s", e)
+            logging.warning(f"Could not load UI settings: {e}")
         finally:
             self._loading_settings = False
 
@@ -463,7 +463,7 @@ class BPMApp:
                         log_file.write("# Regression Testing Output Log\n")
                         log_file.write(f"*Generated on: {timestamp_str()}*\n\n")
                 except Exception as e:
-                    logging.error("Failed to initialize regression testing output log: %s", e)
+                    logging.error(f"Failed to initialize regression testing output log: {e}")
                     regression_log_path = None
 
             # Read batch-wide options once

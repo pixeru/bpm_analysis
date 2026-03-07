@@ -219,7 +219,7 @@ def _append_validation_results_row(
     # Detailed per-peak differences: algorithm vs correct label.
     # 1) Label mismatches where both sides have a label.
     if mismatched > 0:
-        logging.info("  Label mismatches for '%s':", audio_name)
+        logging.info(f"  Label mismatches for '{audio_name}':")
         if log_file:
             log_file.write("### Label mismatches\n")
         for k in sorted(matched_keys):
@@ -232,12 +232,7 @@ def _append_validation_results_row(
             except ValueError:
                 t = k
             formatted_t = f"{t:.3f}" if isinstance(t, (float, int)) else str(t)
-            logging.info(
-                "    t=%s s  manual=%s  predicted=%s",
-                formatted_t,
-                true_label,
-                pred_label,
-            )
+            logging.info(f"    t={formatted_t} s  manual={true_label}  predicted={pred_label}")
             if log_file:
                 log_file.write(
                     f"- t={formatted_t} s -- **manual**: {true_label}, **predicted**: {pred_label}\n"
@@ -247,7 +242,7 @@ def _append_validation_results_row(
 
     # 2) Manual peaks that had no corresponding prediction.
     if missing > 0:
-        logging.info("  Missing detections for '%s' (manual label but no predicted peak):", audio_name)
+        logging.info(f"  Missing detections for '{audio_name}' (manual label but no predicted peak):")
         if log_file:
             log_file.write("### Missing detections (manual label but no predicted peak)\n")
         for k in sorted(missing_keys):
@@ -257,11 +252,7 @@ def _append_validation_results_row(
             except ValueError:
                 t = k
             formatted_t = f"{t:.3f}" if isinstance(t, (float, int)) else str(t)
-            logging.info(
-                "    t=%s s  manual=%s  predicted=<none>",
-                formatted_t,
-                true_label,
-            )
+            logging.info(f"    t={formatted_t} s  manual={true_label}  predicted=<none>")
             if log_file:
                 log_file.write(
                     f"- t={formatted_t} s -- **manual**: {true_label}, **predicted**: <none>\n"
@@ -271,7 +262,7 @@ def _append_validation_results_row(
 
     # 3) Extra predictions that have no manual label.
     if extra > 0:
-        logging.info("  Extra detections for '%s' (predicted peak but no manual label):", audio_name)
+        logging.info(f"  Extra detections for '{audio_name}' (predicted peak but no manual label):")
         if log_file:
             log_file.write("### Extra detections (predicted peak but no manual label)\n")
         for k in sorted(extra_keys):
@@ -281,11 +272,7 @@ def _append_validation_results_row(
             except ValueError:
                 t = k
             formatted_t = f"{t:.3f}" if isinstance(t, (float, int)) else str(t)
-            logging.info(
-                "    t=%s s  manual=<none>  predicted=%s",
-                formatted_t,
-                pred_label,
-            )
+            logging.info(f"    t={formatted_t} s  manual=<none>  predicted={pred_label}")
             if log_file:
                 log_file.write(
                     f"- t={formatted_t} s -- **manual**: <none>, **predicted**: {pred_label}\n"

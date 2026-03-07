@@ -8,6 +8,13 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+# Piecewise-linear lookup tables shared by confidence scoring and hover rendering.
+_RHYTHM_DEVIATION_XPOINTS: List[float] = [0.0, 0.15, 0.40, 0.60]
+_RHYTHM_SCORE_YPOINTS: List[float]     = [1.0, 0.8,  0.4,  0.0]
+
+_AMPLITUDE_RATIO_XPOINTS: List[float] = [0.0, 0.4, 0.7, 1.0]
+_AMPLITUDE_SCORE_YPOINTS: List[float] = [0.0, 0.4, 0.7, 1.0]
+
 
 class PeakType(Enum):
     """Enumeration for classifying heartbeat peaks."""
@@ -94,6 +101,30 @@ def format_debug_entry(debug_entry: Dict) -> List[str]:
             raw_lines = sec.get("lines") or []
             for ln in raw_lines:
                 lines.append(f"    - {ln}")
+
+        elif sec_type == "confidence_trace":
+            steps = sec.get("steps", [])
+            if steps:
+                lines.append("- Confidence trace:")
+                for s in steps:
+                    step_name = s.get("step", "?")
+                    detail = s.get("detail", "")
+                    result = s.get("result")
+                    result_str = f"{result:.2f}" if result is not None else "?"
+                    if detail:
+                        lines.append(f"    - {step_name}: {detail} → {result_str}")
+                    else:
+                        lines.append(f"    - {step_name}: → {result_str}")
+
+        elif sec_type == "kickstart":
+            msg = sec.get("text") or sec.get("message")
+            if msg:
+                lines.append(f"- {msg}")
+
+        elif sec_type == "correction_reason":
+            msg = sec.get("text")
+            if msg:
+                lines.append(f"- Correction: {msg}")
 
         elif sec_type == "lookahead":
             msg = sec.get("text") or sec.get("message")

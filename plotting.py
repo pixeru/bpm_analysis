@@ -112,7 +112,7 @@ class Plotter:
             plt.close(fig)
 
             basename = os.path.basename(output_path)
-            logging.info("Generated spectrogram image for background overlay: %s", basename)
+            logging.info(f"Generated spectrogram image for background overlay: {basename}")
             return basename
 
         except Exception as e:

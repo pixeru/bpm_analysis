@@ -52,7 +52,7 @@ def _detect_and_remove_stationary_hum(
         nperseg = max(256, min(len(audio_data), nperseg))
         freqs, psd = welch(audio_data, fs=sample_rate, nperseg=nperseg)
     except Exception as e:
-        logging.warning("Hum detection skipped (PSD computation failed): %s", e)
+        logging.warning(f"Hum detection skipped (PSD computation failed): {e}")
         return audio_data, None
 
     # Restrict search to a low-frequency band where hums typically live
@@ -79,7 +79,7 @@ def _detect_and_remove_stationary_hum(
     try:
         peak_indices, properties = find_peaks(psd_db_rel, prominence=min_prom_db)
     except Exception as e:
-        logging.warning("Hum detection skipped (peak finding failed): %s", e)
+        logging.warning(f"Hum detection skipped (peak finding failed): {e}")
         return audio_data, None
 
     if peak_indices.size == 0:
@@ -165,7 +165,7 @@ def split_wav_to_mono_channels(file_path: str, output_directory: str) -> List[st
     try:
         sound = AudioSegment.from_file(file_path)
     except Exception as e:
-        logging.warning("Failed to open WAV for channel splitting (%s): %s", file_path, e)
+        logging.warning(f"Failed to open WAV for channel splitting ({file_path}): {e}")
         return [file_path]
 
     if sound.channels <= 1:
@@ -182,7 +182,7 @@ def split_wav_to_mono_channels(file_path: str, output_directory: str) -> List[st
             seg.export(out_path, format="wav")
             channel_paths.append(out_path)
         except Exception as e:
-            logging.warning("Failed to export channel %d for %s: %s", ch_idx, file_path, e)
+            logging.warning(f"Failed to export channel {ch_idx} for {file_path}: {e}")
 
     # Fallback: if export failed for all channels, keep original file
     if not channel_paths:
@@ -284,7 +284,7 @@ def preprocess_audio(
         # Preserve historical behavior: simple mono mix of all channels.
         audio_downsampled, new_sample_rate = librosa.load(file_path, sr=target_sample_rate, mono=True)
     except Exception as e:
-        logging.error("Librosa failed to load file: %s", e)
+        logging.error(f"Librosa failed to load file: {e}")
         raise
 
     # Optional adaptive hum removal (e.g., ~50-70 Hz mains / equipment hum)
@@ -337,7 +337,7 @@ def preprocess_audio(
                 debug_sample_rate,
             )
         except Exception as e:
-            logging.error("Failed to write filtered debug WAV file %s: %s", debug_path, e)
+            logging.error(f"Failed to write filtered debug WAV file {debug_path}: {e}")
     elif params["save_filtered_wav"] and not output_options.get("filtered_wav", True):
         logging.info("Skipping filtered audio WAV generation as requested.")
 

@@ -32,7 +32,7 @@ def _lombscargle_band_powers(
     try:
         periodogram = lombscargle(times_sec, rr_ms, angular_freqs, normalize=True)
     except Exception as e:
-        logging.warning("Lomb-Scargle: lombscargle() failed: %s", e)
+        logging.warning(f"Lomb-Scargle: lombscargle() failed: {e}")
         return None
     # Task Force bands: VLF 0.003-0.04, LF 0.04-0.15, HF 0.15-0.40 Hz
     # With normalize=True the periodogram is dimensionless; scale by RR variance to get power in ms² (Task Force convention).

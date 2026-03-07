@@ -117,6 +117,8 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
                     "penalty_waiver_max_s2_s1_ratio"]
 
                 if is_strong_s1 and is_ratio_plausible:
+                    gap_sec = (s1_end_idx - s1_start_idx) / sample_rate
+                    s2_s1_ratio = audio_envelope[candidate_s2] / (audio_envelope[candidate_s1] + 1e-9)
                     log_debug(f"  - SUCCESS: Re-labeling S1/S2 pair at {candidate_s1 / sample_rate:.2f}s.")
                     corrections_made += 1
                     peaks_to_add.add(candidate_s1)
@@ -125,6 +127,14 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
                     corrected_debug_info[candidate_s1] = {
                         "peak_type": PeakType.S1_CORRECTED_GAP.value,
                         "sections": [
+                            {
+                                "type": "correction_reason",
+                                "text": (
+                                    f"Promoted from Noise: strong S1 (strength {s1_strength:.3f}) found in long gap "
+                                    f"({gap_sec:.3f}s > {long_conflict_threshold_sec:.3f}s). "
+                                    f"S2/S1 ratio {s2_s1_ratio:.2f} (max {params['penalty_waiver_max_s2_s1_ratio']:.2f})."
+                                ),
+                            },
                             {"type": "original", "original_debug": original_reason_s1},
                         ],
                     }
@@ -133,6 +143,10 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
                     corrected_debug_info[candidate_s2] = {
                         "peak_type": PeakType.S2_CORRECTED_GAP.value,
                         "sections": [
+                            {
+                                "type": "correction_reason",
+                                "text": f"Promoted from Noise: paired with S1 at {candidate_s1 / sample_rate:.2f}s during gap correction.",
+                            },
                             {"type": "original", "original_debug": original_reason_s2},
                         ],
                     }
@@ -162,12 +176,36 @@ def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarra
             amp_B = audio_envelope[beat_B_idx]
 
             if amp_B > amp_A:
-                peaks_to_remove.add(beat_A_idx)
                 log_debug(f"  - Removing weaker peak at {beat_A_idx / sample_rate:.2f}s.")
+                reason_text = (
+                    f"Removed: short interval {interval_sec:.3f}s < {short_conflict_threshold_sec:.3f}s "
+                    f"and weaker amplitude ({amp_A:.0f} < {amp_B:.0f} at {beat_B_idx / sample_rate:.2f}s)."
+                )
+                original_debug_a = corrected_debug_info.get(beat_A_idx)
+                corrected_debug_info[beat_A_idx] = {
+                    "peak_type": PeakType.NOISE.value,
+                    "sections": [
+                        {"type": "correction_reason", "text": reason_text},
+                        {"type": "original", "original_debug": original_debug_a},
+                    ],
+                }
+                peaks_to_remove.add(beat_A_idx)
                 corrections_made += 1
             else:
-                peaks_to_remove.add(beat_B_idx)
                 log_debug(f"  - Removing weaker peak at {beat_B_idx / sample_rate:.2f}s.")
+                reason_text = (
+                    f"Removed: short interval {interval_sec:.3f}s < {short_conflict_threshold_sec:.3f}s "
+                    f"and weaker amplitude ({amp_B:.0f} < {amp_A:.0f} at {beat_A_idx / sample_rate:.2f}s)."
+                )
+                original_debug_b = corrected_debug_info.get(beat_B_idx)
+                corrected_debug_info[beat_B_idx] = {
+                    "peak_type": PeakType.NOISE.value,
+                    "sections": [
+                        {"type": "correction_reason", "text": reason_text},
+                        {"type": "original", "original_debug": original_debug_b},
+                    ],
+                }
+                peaks_to_remove.add(beat_B_idx)
                 corrections_made += 1
 
     # Construct the final list of S1 peaks after all corrections

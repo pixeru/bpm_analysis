@@ -7,6 +7,10 @@ from peak_utils import (
     PeakType,
     get_peak_prominence_details,
     calculate_peak_prominence,
+    _RHYTHM_DEVIATION_XPOINTS,
+    _RHYTHM_SCORE_YPOINTS,
+    _AMPLITUDE_RATIO_XPOINTS,
+    _AMPLITUDE_SCORE_YPOINTS,
 )
 
 
@@ -161,13 +165,13 @@ def adjust_confidence_with_contractility(
     bpm: float,
     params: Dict,
     state: Optional[AnalysisState] = None,
-) -> Tuple[float, str]:
+) -> Tuple[float, Dict[str, Any]]:
     """
     Contractility / prominence adjustment. S1/S2 ratio; expected from history or BPM power curve.
     Single deviation from expected: inside band → boost (tent); outside → penalty (linear ramp).
-    """
-    reason = ""
 
+    Returns (updated_confidence, step_dict) where step_dict is a confidence_trace step.
+    """
     # --- 1. Expected S1/S2: from history or BPM power curve ---
     history = getattr(state, "s1_s2_contractility_history", []) if state else []
     n_use = params.get("contractility_expected_history_count", 10)
@@ -218,17 +222,16 @@ def adjust_confidence_with_contractility(
     if contractility_penalty > 0:
         confidence = max(0.0, confidence * (1.0 - contractility_penalty))
 
-    reason += (
-        f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S1/S2={actual_ratio:.2f} "
+    detail = (
+        f"S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S1/S2={actual_ratio:.2f} "
         f"(expected {expected_ratio:.2f} from {expected_source})"
     )
     if contractility_boost > 0:
-        reason += f", boost +{contractility_boost:.2f} (×{(1.0 + contractility_boost):.2f})"
+        detail += f", boost +{contractility_boost:.2f} (×{(1.0 + contractility_boost):.2f})"
     elif contractility_penalty > 0:
-        reason += f", penalty -{contractility_penalty:.2f} (×{(1.0 - contractility_penalty):.2f})"
-    reason += f" → {confidence:.2f}"
+        detail += f", penalty -{contractility_penalty:.2f} (×{(1.0 - contractility_penalty):.2f})"
 
-    return confidence, reason
+    return confidence, {"step": "Contractility", "detail": detail, "result": confidence}
 
 
 def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_term_bpm: float, audio_envelope: np.ndarray,
@@ -250,8 +253,6 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
 
     # Piecewise-linear map: deviation fraction → confidence score.
     # 0 % off → 1.0, 15 % off → 0.8 (minor tolerance), 40 % off → 0.4, >=60 % off → 0.0.
-    _RHYTHM_DEVIATION_XPOINTS = [0.0, 0.15, 0.40, 0.60]
-    _RHYTHM_SCORE_YPOINTS     = [1.0, 0.8,  0.4,  0.0]
     rhythm_score = np.interp(rhythm_deviation_pct, _RHYTHM_DEVIATION_XPOINTS, _RHYTHM_SCORE_YPOINTS)
 
     # If backward gives zero, try forward interval (current → next-next peak) as fallback
@@ -299,8 +300,6 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
 
     # Piecewise-linear map: current/history amplitude ratio → confidence score.
     # A ratio near 1.0 means amplitude is consistent with recent history → full confidence.
-    _AMPLITUDE_RATIO_XPOINTS = [0.0, 0.4, 0.7, 1.0]
-    _AMPLITUDE_SCORE_YPOINTS = [0.0, 0.4, 0.7, 1.0]
     amplitude_score = np.interp(amplitude_ratio, _AMPLITUDE_RATIO_XPOINTS, _AMPLITUDE_SCORE_YPOINTS)
     amplitude_reason = (
         f"Amplitude Fit: strength ratio {amplitude_ratio:.2f}x "
@@ -408,21 +407,35 @@ class PairingEngine:
         self.recovery_end_time_sec = recovery_end_time_sec
         self.band_envelopes = band_envelopes
 
+    @staticmethod
+    def _gaussian_weighted_energy(
+        band_arr: np.ndarray, peak_idx: int, half: int, sigma_samp: float, n: int
+    ) -> float:
+        """Gaussian-windowed energy of a band envelope centred on a peak sample."""
+        lo = max(0, peak_idx - half)
+        hi = min(n, peak_idx + half + 1)
+        if hi <= lo:
+            return 0.0
+        offsets = np.arange(lo, hi, dtype=np.float64) - float(peak_idx)
+        weights = np.exp(-0.5 * (offsets / sigma_samp) ** 2)
+        weights /= weights.sum()
+        return float(np.sum(weights * band_arr[lo:hi]))
+
     def attempt_pair(
         self,
         state: AnalysisState,
         s1_candidate_idx: int,
         s2_candidate_idx: int,
         pairing_ratio: float,
-    ) -> Tuple[bool, str, Dict[str, Any]]:
+    ) -> Tuple[bool, List[Dict[str, Any]], Dict[str, Any]]:
         """
         Calculates the confidence score for pairing two candidate peaks.
 
         Returns:
-            (is_paired, reason, prominence_context)
+            (is_paired, steps, prominence_context)
         where:
             - is_paired: True if the final confidence exceeds the configured threshold
-            - reason: multi-line human-readable explanation of the decision
+            - steps: list of confidence_trace step dicts explaining each scoring decision
             - prominence_context: raw prominence details for S1/S2 used by debug tools
         """
         interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
@@ -449,22 +462,24 @@ class PairingEngine:
         if interval_sec < short_cutoff:
             implied_total_cycle = interval_sec * 2.0
             implied_bpm = 60.0 / implied_total_cycle if implied_total_cycle > 0 else float('inf')
-            debug_msg = (
-                f"Interval Reject: S1-S2 interval {interval_sec:.3f}s < short cutoff {short_cutoff:.3f}s "
-                f"(expected {expected_s1_s2:.3f}s @ {bpm:.0f} BPM; implies {implied_bpm:.0f} BPM) → reject → 0.00"
+            detail = (
+                f"S1-S2 interval {interval_sec:.3f}s < short cutoff {short_cutoff:.3f}s "
+                f"(expected {expected_s1_s2:.3f}s @ {bpm:.0f} BPM; implies {implied_bpm:.0f} BPM)"
             )
-            return False, debug_msg, {}
+            return False, [{"step": "Interval Reject", "detail": detail, "result": 0.0}], {}
 
         if interval_sec >= long_reject:
-            debug_msg = (
-                f"Interval Reject: S1-S2 interval {interval_sec:.3f}s >= long reject {long_reject:.3f}s "
-                f"(expected {expected_s1_s2:.3f}s @ {bpm:.0f} BPM) → reject → 0.00"
+            detail = (
+                f"S1-S2 interval {interval_sec:.3f}s >= long reject {long_reject:.3f}s "
+                f"(expected {expected_s1_s2:.3f}s @ {bpm:.0f} BPM)"
             )
-            return False, debug_msg, {}
+            return False, [{"step": "Interval Reject", "detail": detail, "result": 0.0}], {}
+
+        steps: List[Dict[str, Any]] = []
 
         # --- Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
         base_confidence = 0.60
-        reason = f"- Base: starting confidence → no change → {base_confidence:.2f}"
+        steps.append({"step": "Base", "detail": "starting confidence", "result": base_confidence})
 
         # --- Contractility / prominence-based adjustment (S1 vs S2) ---
         s1_details = get_peak_prominence_details(
@@ -494,7 +509,7 @@ class PairingEngine:
         }
 
         # --- Contractility model based on S1/S2 prominence ratio ---
-        confidence, contractility_reason = adjust_confidence_with_contractility(
+        confidence, contractility_step = adjust_confidence_with_contractility(
             base_confidence,
             s1_prominence,
             s2_prominence,
@@ -502,10 +517,10 @@ class PairingEngine:
             self.params,
             state=state,
         )
-        reason += contractility_reason
+        steps.append(contractility_step)
 
         # --- Absolute S1 prominence guardrail (shared with Lone S1 logic) ---
-        # Protect against tiny noise bumps being interpreted as heartbeats, a "high contractility" S1/S2 pair.
+        # Protect against tiny noise bumps being interpreted as heartbeats in a "high contractility" S1/S2 pair.
         # We compare the current S1 prominence against a recent high-quality S1 baseline.
         recent_prominences = _get_recent_s1_prominences_for_state(
             state, self.audio_envelope, state.trough_indices
@@ -526,10 +541,14 @@ class PairingEngine:
                     #   at ratio  == 0       -> full veto
                     penalty_factor = float(np.clip(prominence_ratio / (min_ratio + 1e-9), 0.0, 1.0))
                     confidence *= penalty_factor
-                    reason += (
-                        f"\n- Absolute S1 Prominence: {s1_prominence:.3f} < {min_ratio:.1f}× reference "
-                        f"({reference_prominence:.3f}) → ×{penalty_factor:.2f} → {confidence:.2f}"
-                    )
+                    steps.append({
+                        "step": "Abs. S1 Prominence",
+                        "detail": (
+                            f"{s1_prominence:.3f} < {min_ratio:.1f}× reference "
+                            f"({reference_prominence:.3f}) → ×{penalty_factor:.2f}"
+                        ),
+                        "result": confidence,
+                    })
 
         # --- Multi-band S1 vs S2: spectral fingerprint adjustment ---
         if self.params.get("enable_multiband_s1_s2", True) and self.band_envelopes is not None:
@@ -542,110 +561,94 @@ class PairingEngine:
                 window_samples = max(1, int(round(window_ms * 0.001 * self.sample_rate)))
                 if window_samples % 2 == 0:
                     window_samples += 1
-                half = (window_samples - 1) // 2
-                half = min(half, n // 2)
+                half = min((window_samples - 1) // 2, n // 2)
                 sigma_samp = max(1e-6, sigma_ms * 0.001 * self.sample_rate)
 
-                def _gaussian_weighted_energy(band_arr: np.ndarray, peak_idx: int) -> float:
-                    lo = max(0, peak_idx - half)
-                    hi = min(n, peak_idx + half + 1)
-                    slice_len = hi - lo
-                    if slice_len <= 0:
-                        return 0.0
-                    offsets = np.arange(lo, hi, dtype=np.float64) - float(peak_idx)
-                    weights = np.exp(-0.5 * (offsets / sigma_samp) ** 2)
-                    weights /= weights.sum()
-                    return float(np.sum(weights * band_arr[lo:hi]))
+                e_s1_at_first  = self._gaussian_weighted_energy(s1_band, s1_candidate_idx, half, sigma_samp, n)
+                e_s2_at_first  = self._gaussian_weighted_energy(s2_band, s1_candidate_idx, half, sigma_samp, n)
+                e_s1_at_second = self._gaussian_weighted_energy(s1_band, s2_candidate_idx, half, sigma_samp, n)
+                e_s2_at_second = self._gaussian_weighted_energy(s2_band, s2_candidate_idx, half, sigma_samp, n)
 
-                e_s1_at_first = _gaussian_weighted_energy(s1_band, s1_candidate_idx)
-                e_s2_at_first = _gaussian_weighted_energy(s2_band, s1_candidate_idx)
-                e_s1_at_second = _gaussian_weighted_energy(s1_band, s2_candidate_idx)
-                e_s2_at_second = _gaussian_weighted_energy(s2_band, s2_candidate_idx)
-                eps = 1e-9
                 # For correct S1-S2: first peak should have more S1-band, second more S2-band.
                 # consistency > 1 means bands support this pair; < 1 means bands suggest wrong order.
-                consistency = (e_s1_at_first * e_s2_at_second) / (e_s2_at_first * e_s1_at_second + eps)
-                boost_max = self.params.get("multiband_boost_max", 0.12)
-                penalty_max = self.params.get("multiband_penalty_max", 0.15)
+                consistency = (e_s1_at_first * e_s2_at_second) / (e_s2_at_first * e_s1_at_second + 1e-9)
+                mb_boost_max   = self.params.get("multiband_boost_max", 0.12)
+                mb_penalty_max = self.params.get("multiband_penalty_max", 0.15)
                 if consistency >= 1.2:
-                    delta = min(boost_max, (consistency - 1.0) * 0.5)
+                    delta = min(mb_boost_max, (consistency - 1.0) * 0.5)
                     confidence = min(1.0, confidence + delta)
-                    reason += f"\n- Multiband: S1/S2 bands support pair (ratio {consistency:.2f}) → +{delta:.2f} → {confidence:.2f}"
+                    steps.append({"step": "Multiband", "detail": f"bands support pair (ratio {consistency:.2f}) → +{delta:.2f}", "result": confidence})
                 elif consistency <= 0.85:
-                    delta = min(penalty_max, (1.0 - consistency) * 0.5)
+                    delta = min(mb_penalty_max, (1.0 - consistency) * 0.5)
                     confidence = max(0.0, confidence - delta)
-                    reason += f"\n- Multiband: S1/S2 bands oppose pair (ratio {consistency:.2f}) → -{delta:.2f} → {confidence:.2f}"
+                    steps.append({"step": "Multiband", "detail": f"bands oppose pair (ratio {consistency:.2f}) → -{delta:.2f}", "result": confidence})
                 else:
-                    reason += f"\n- Multiband: S1/S2 bands neutral (ratio {consistency:.2f}) → no change → {confidence:.2f}"
+                    steps.append({"step": "Multiband", "detail": f"bands neutral (ratio {consistency:.2f}) → no change", "result": confidence})
 
-        # Placeholder for future non-contractility, non-interval pairing adjustments.
-
-        # V-shaped interval: linear boost when close to expected, linear penalty outside the boost zone; hard cutoffs already applied above
+        # --- V-shaped interval: linear boost when close to expected, linear penalty outside the boost zone ---
+        # Hard cutoffs already applied above.
         interval_v_penalty = 0.0
         interval_v_boost = 0.0
-        v_max = self.params.get("interval_v_penalty_max", 0.2)
-        boost_max = self.params.get("interval_v_boost_max", 0.10)
+        v_penalty_max = self.params.get("interval_v_penalty_max", 0.2)
+        v_boost_max = self.params.get("interval_v_boost_max", 0.10)
         zero_crossing_fraction = self.params.get("interval_zero_crossing_fraction", 0.2)
         long_ramp_end = expected_s1_s2 * self.params.get("interval_v_long_ramp_end_fraction", 2.0)
         left_ramp_start = expected_s1_s2 * (1.0 - zero_crossing_fraction)   # below this: left penalty ramp
-        right_ramp_start = expected_s1_s2 * (1.0 + zero_crossing_fraction)   # above this: right penalty ramp
+        right_ramp_start = expected_s1_s2 * (1.0 + zero_crossing_fraction)  # above this: right penalty ramp
 
         if interval_sec < left_ramp_start:
-            # Left penalty ramp: from short_cutoff to left_ramp_start, penalty 0 at left_ramp_start, v_max at short_cutoff
+            # Left penalty ramp: from short_cutoff to left_ramp_start, penalty 0 at left_ramp_start, v_penalty_max at short_cutoff
             ramp_span = left_ramp_start - short_cutoff
             if ramp_span > 1e-9:
                 t = (left_ramp_start - interval_sec) / ramp_span
-                interval_v_penalty = v_max * float(np.clip(t, 0, 1))
+                interval_v_penalty = v_penalty_max * float(np.clip(t, 0, 1))
         elif interval_sec > right_ramp_start:
-            # Right penalty ramp: from right_ramp_start to long_ramp_end; flat v_max beyond long_ramp_end
+            # Right penalty ramp: from right_ramp_start to long_ramp_end; flat v_penalty_max beyond long_ramp_end
             if interval_sec <= long_ramp_end:
                 ramp_span = long_ramp_end - right_ramp_start
                 if ramp_span > 1e-9:
                     t = (interval_sec - right_ramp_start) / ramp_span
-                    interval_v_penalty = v_max * float(np.clip(t, 0, 1))
+                    interval_v_penalty = v_penalty_max * float(np.clip(t, 0, 1))
             else:
-                interval_v_penalty = v_max
+                interval_v_penalty = v_penalty_max
         else:
-            # Boost zone [left_ramp_start, right_ramp_start]: linear boost from 0 at edges to boost_max at expected
+            # Boost zone [left_ramp_start, right_ramp_start]: linear boost from 0 at edges to v_boost_max at expected
             if interval_sec <= expected_s1_s2:
                 span = expected_s1_s2 - left_ramp_start
                 if span > 1e-9:
                     t = (interval_sec - left_ramp_start) / span
-                    interval_v_boost = boost_max * float(np.clip(t, 0, 1))
+                    interval_v_boost = v_boost_max * float(np.clip(t, 0, 1))
             else:
                 span = right_ramp_start - expected_s1_s2
                 if span > 1e-9:
                     t = (right_ramp_start - interval_sec) / span
-                    interval_v_boost = boost_max * float(np.clip(t, 0, 1))
+                    interval_v_boost = v_boost_max * float(np.clip(t, 0, 1))
 
         # Always show actual vs expected interval on hover (even when no penalty/boost)
+        interval_base_detail = f"{interval_sec:.3f}s (expected {expected_s1_s2:.3f}s from {expected_s1_s2_source})"
         if interval_v_penalty > 0:
             confidence *= max(0.0, 1.0 - interval_v_penalty)
-            reason += (
-                f"\n- S1-S2 interval: {interval_sec:.3f}s (expected {expected_s1_s2:.3f}s from {expected_s1_s2_source}). "
-                f"Too far from expected → -{interval_v_penalty:.2f} (×{(1.0 - interval_v_penalty):.2f}) → {confidence:.2f}"
-            )
+            steps.append({
+                "step": "S1-S2 Interval",
+                "detail": f"{interval_base_detail}. Too far → -{interval_v_penalty:.2f} (×{(1.0 - interval_v_penalty):.2f})",
+                "result": confidence,
+            })
         elif interval_v_boost > 0:
             confidence = min(1.0, confidence * (1.0 + interval_v_boost))
-            reason += (
-                f"\n- S1-S2 interval: {interval_sec:.3f}s (expected {expected_s1_s2:.3f}s from {expected_s1_s2_source}). "
-                f"Near expected → +{interval_v_boost:.2f} (×{(1.0 + interval_v_boost):.2f}) → {confidence:.2f}"
-            )
+            steps.append({
+                "step": "S1-S2 Interval",
+                "detail": f"{interval_base_detail}. Near expected → +{interval_v_boost:.2f} (×{(1.0 + interval_v_boost):.2f})",
+                "result": confidence,
+            })
         else:
-            reason += (
-                f"\n- S1-S2 interval: {interval_sec:.3f}s (expected {expected_s1_s2:.3f}s from {expected_s1_s2_source}) "
-                f"→ no change → {confidence:.2f}"
-            )
+            steps.append({"step": "S1-S2 Interval", "detail": f"{interval_base_detail} → no change", "result": confidence})
 
         # --- Forward-Looking Contextual Penalty ---
         # If pairing S1-S2 causes the next S2→S1 transition to be implausible, penalize it.
         # Guardrail: only trust this check if the "next S1" peak is strong enough to be
         # a plausible beat; otherwise it may just be noise and should not veto the pair.
-        forward_look_penalty = 0.0
         if state.loop_idx + 2 < len(state.all_peaks):
             next_next_peak_idx = state.all_peaks[state.loop_idx + 2]
-
-            # Use prominence for robust amplitude comparison
             next_s1_details = get_peak_prominence_details(
                 next_next_peak_idx,
                 self.audio_envelope,
@@ -654,38 +657,25 @@ class PairingEngine:
             )
             next_s1_prominence = next_s1_details["prominence"]
 
-            # Only apply if we have valid data
             if s2_prominence > 1e-9 and next_s1_prominence > 1e-9:
                 noise_thresh = self.params.get('noise_prominence_threshold', 0.35)
-
-                # Guardrail: Skip penalty if the "next S1" is too weak to be a credible beat.
-                # This prevents noise from vetoing a valid S1-S2 pair.
-                if next_s1_prominence < s2_prominence * noise_thresh:
-                    # Next peak is likely noise; skip forward-look penalty entirely.
-                    pass
-                else:
+                if next_s1_prominence >= s2_prominence * noise_thresh:
                     # Next peak is strong enough to evaluate; apply penalty if needed.
                     drop_ratio = next_s1_prominence / (s2_prominence + 1e-9)
-
-                    # If the following peak is substantially weaker, it suggests s2_candidate
-                    # is actually a strong S1, making this S1-S2 pairing incorrect
                     threshold = self.params.get('forward_look_drop_threshold', 0.4)
                     if drop_ratio < threshold:
-                        # Scale penalty by severity of the drop
                         severity = (threshold - drop_ratio) / threshold
-                        max_pen = self.params.get('forward_look_max_penalty', 0.3)
-                        forward_look_penalty = severity * max_pen
-
+                        forward_look_penalty = severity * self.params.get('forward_look_max_penalty', 0.3)
                         confidence = max(0.0, confidence - forward_look_penalty)
-                        reason += (
-                            f"\n- Forward-Look: S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x "
-                            f"→ -{forward_look_penalty:.2f} → {confidence:.2f}"
-                        )
+                        steps.append({
+                            "step": "Forward-Look",
+                            "detail": f"S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x → -{forward_look_penalty:.2f}",
+                            "result": confidence,
+                        })
 
         # --- Stability (pairing ratio) multiplier applied last ---
         # Scale confidence by recent pairing success so we don't over-penalize when S2 was absent at high BPM.
-        beat_count = len(state.candidate_beats)
-        if beat_count >= 5:
+        if len(state.candidate_beats) >= 5:
             floor = self.params.get("stability_confidence_floor", 0.85)
             ceiling = self.params.get("stability_confidence_ceiling", 1.10)
             current_time_sec = s1_candidate_idx / self.sample_rate
@@ -696,19 +686,25 @@ class PairingEngine:
                 self.peak_bpm_time_sec <= current_time_sec <= self.recovery_end_time_sec):
                 recovery_floor = self.params.get("recovery_phase_stability_floor", 0.95)
                 floor = max(floor, recovery_floor)
-                reason += f"\n- Recovery phase: using floor {floor:.2f}"
+                steps.append({"step": "Recovery Phase", "detail": f"using floor {floor:.2f}", "result": confidence})
             stability_factor = np.interp(pairing_ratio, [0.0, 1.0], [floor, ceiling])
             confidence = max(0.0, min(1.0, confidence * stability_factor))
-            reason += (
-                f"\n- Stability (last): pairing ratio {pairing_ratio:.0%} → ×{stability_factor:.2f} → {confidence:.2f}"
-            )
+            steps.append({
+                "step": "Stability",
+                "detail": f"pairing ratio {pairing_ratio:.0%} → ×{stability_factor:.2f}",
+                "result": confidence,
+            })
 
         is_paired = confidence >= self.params['pairing_confidence_threshold']
-        reason += (
-            f"\n- Final: score {confidence:.2f} vs threshold {self.params['pairing_confidence_threshold']:.2f} "
-            f"→ {'Paired' if is_paired else 'Not Paired'}"
-        )
-        return is_paired, reason, prominence_context
+        steps.append({
+            "step": "Final",
+            "detail": (
+                f"score {confidence:.2f} vs threshold {self.params['pairing_confidence_threshold']:.2f} "
+                f"→ {'Paired' if is_paired else 'Not Paired'}"
+            ),
+            "result": confidence,
+        })
+        return is_paired, steps, prominence_context
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +743,7 @@ class LookaheadSkipper:
 
         The returned dict contains:
             - s1_idx, middle_idx, s2_idx: indices of the three peaks
-            - reason: full pairing reason string
+            - steps: confidence_trace step dicts from the pairing attempt
             - prominence_context: raw prominence context for debug tooltips
             - lookahead_msg: human-readable summary of *why* the middle was skipped
             - middle_noise_msg: explanation attached to the middle peak marked as Noise
@@ -797,7 +793,7 @@ class LookaheadSkipper:
 
         # --- Mode 1: interval-aware reinterpretation (impossible S2→S1 interval) ---
         if middle_is_weak and interval_is_impossible and next_next_is_strong and alt_interval_plausible:
-            is_paired_interval, reason_interval, prominence_context_interval = self.pairing_engine.attempt_pair(
+            is_paired_interval, steps_interval, prominence_context_interval = self.pairing_engine.attempt_pair(
                 state, current_peak_idx, next_next_peak_idx, pairing_ratio
             )
 
@@ -825,7 +821,7 @@ class LookaheadSkipper:
                     "s1_idx": current_peak_idx,
                     "middle_idx": middle_peak_idx,
                     "s2_idx": next_next_peak_idx,
-                    "reason": reason_interval,
+                    "steps": steps_interval,
                     "prominence_context": prominence_context_interval,
                     "lookahead_msg": lookahead_msg_interval,
                     "middle_noise_msg": middle_noise_msg_interval,
@@ -837,7 +833,7 @@ class LookaheadSkipper:
             and middle_prom < next_next_prom
             and alt_interval_plausible
         ):
-            is_paired_skip, reason_skip, prominence_context_skip = self.pairing_engine.attempt_pair(
+            is_paired_skip, steps_skip, prominence_context_skip = self.pairing_engine.attempt_pair(
                 state, current_peak_idx, next_next_peak_idx, pairing_ratio
             )
 
@@ -861,7 +857,7 @@ class LookaheadSkipper:
                     "s1_idx": current_peak_idx,
                     "middle_idx": middle_peak_idx,
                     "s2_idx": next_next_peak_idx,
-                    "reason": reason_skip,
+                    "steps": steps_skip,
                     "prominence_context": prominence_context_skip,
                     "lookahead_msg": lookahead_msg,
                     "middle_noise_msg": middle_noise_msg,

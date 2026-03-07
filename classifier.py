@@ -17,14 +17,11 @@ from confidence_engine import (
 )
 from peak_utils import (
     PeakType,
+    _is_s1_paired_debug,
     _is_lone_s1_debug,
     _is_noise_debug,
     calculate_peak_prominence,
 )
-
-# INSTRUCTIONS FOR AI:
-# Do not remove debugging code unless specified by the user
-# Do not over-engineer a solution, keep it simple
 
 
 class PeakClassifier:
@@ -104,32 +101,33 @@ class PeakClassifier:
             # the same view of recent rhythm stability.
             pairing_ratio = self._calculate_pairing_ratio()
 
-            self._kickstart_check(pairing_ratio)
+            kickstart_msg = self._kickstart_check(pairing_ratio)
             current_peak_idx = self.state.all_peaks[self.state.loop_idx]
             is_last_peak = self.state.loop_idx >= len(self.state.all_peaks) - 1
 
             if is_last_peak:
                 self._handle_last_peak(current_peak_idx)
             else:
-                self._process_peak_pair(current_peak_idx, pairing_ratio)
+                self._process_peak_pair(current_peak_idx, pairing_ratio, kickstart_msg=kickstart_msg)
 
             self._update_long_term_bpm()
 
         return self._finalize_results()
 
-    def _kickstart_check(self, pairing_ratio: float) -> None:
+    def _kickstart_check(self, pairing_ratio: float) -> Optional[str]:
         """
-        Specialized recovery function to kick-start the algorithm if it gets stuck.
-        This is a "bandaid" fix to help the algorithm recover from pairing failures. but ideally we would have a more robust solution.
-        If I manage to get the algorithm good enough, this feature should never activate...
+        Recovery function that fires when the algorithm is stuck in Lone-S1-only mode.
+        Detected by: low pairing ratio + recent Lone S1 beats each followed by a Noise peak.
+        When triggered, overrides the pairing ratio to encourage pairing on the next peak.
+
+        Returns a human-readable message if kick-start fired, otherwise None.
         """
-        # pairing_ratio is calculated once per main-loop iteration in classify_peaks.
         if pairing_ratio >= self.params.get("kickstart_check_threshold", 0.3):
-            return
+            return None
 
         history = self.params.get("kickstart_history_beats", 4)
         if len(self.state.candidate_beats) < history:
-            return
+            return None
 
         min_s1s = self.params.get("kickstart_min_lone_s1s", 3)
         recent_lone_s1s = [
@@ -137,7 +135,7 @@ class PeakClassifier:
             if _is_lone_s1_debug(self.state.beat_debug_info.get(idx))
         ]
         if len(recent_lone_s1s) < min_s1s:
-            return
+            return None
 
         min_matches = self.params.get("kickstart_min_noise_matches", 3)
         matches = 0
@@ -150,9 +148,16 @@ class PeakClassifier:
 
         if matches >= min_matches:
             override_ratio = self.params.get("kickstart_override_ratio", 0.6)
-            logging.info(f"KICK-START: Found {matches}/{len(recent_lone_s1s)} S1->Noise patterns. Overriding pairing ratio to {override_ratio}.")
-            # This is a temporary state change, so we don't store the override ratio in self.state
+            msg = (
+                f"KICK-START: Found {matches}/{len(recent_lone_s1s)} S1→Noise patterns "
+                f"(pairing ratio {pairing_ratio:.0%}). Overriding pairing ratio to {override_ratio:.0%} "
+                f"to encourage pairing on this peak."
+            )
+            logging.info(msg)
             self.state.pairing_ratio_override = override_ratio
+            return msg
+
+        return None
 
     def _handle_last_peak(self, peak_idx: int):
         """Classify the final peak in the sequence."""
@@ -165,7 +170,6 @@ class PeakClassifier:
 
     def _calculate_pairing_ratio(self) -> float:
         """Calculate recent rhythm stability ratio."""
-        from peak_utils import _is_s1_paired_debug
         history_window = self.params.get("stability_history_window", 20)
         if len(self.state.candidate_beats) < history_window:
             return 0.5
@@ -177,7 +181,12 @@ class PeakClassifier:
         )
         return paired_count / history_window
 
-    def _process_peak_pair(self, current_peak_idx: int, pairing_ratio: float) -> None:
+    def _process_peak_pair(
+        self,
+        current_peak_idx: int,
+        pairing_ratio: float,
+        kickstart_msg: Optional[str] = None,
+    ) -> None:
         """Processes a pair of peaks to determine if they are S1-S2."""
         all_peaks = self.state.all_peaks
         loop_idx = self.state.loop_idx
@@ -191,27 +200,18 @@ class PeakClassifier:
             s1_idx = decision["s1_idx"]
             middle_idx = decision["middle_idx"]
             s2_idx = decision["s2_idx"]
-            reason = decision["reason"]
+            steps = decision["steps"]
             prominence_context = decision["prominence_context"]
             lookahead_msg = decision["lookahead_msg"]
             middle_noise_msg = decision["middle_noise_msg"]
 
-            pairing_lines = [
-                line.strip().lstrip('- ')
-                for line in reason.strip().split("\n")
-                if line.strip()
-            ]
-
-            s1_sections = [
+            pair_sections = [
                 {"type": "lookahead", "text": lookahead_msg},
-                {"type": "pairing", "lines": pairing_lines, "success": True},
+                {"type": "confidence_trace", "steps": steps},
                 {"type": "prominence", "details": prominence_context},
             ]
-            s2_sections = [
-                {"type": "lookahead", "text": lookahead_msg},
-                {"type": "pairing", "lines": pairing_lines, "success": True},
-                {"type": "prominence", "details": prominence_context},
-            ]
+            if kickstart_msg:
+                pair_sections.insert(0, {"type": "kickstart", "text": kickstart_msg})
 
             self.state.candidate_beats.append(s1_idx)
             _append_s1_s2_interval(self.state, (s2_idx - s1_idx) / self.sample_rate, self.params)
@@ -220,27 +220,21 @@ class PeakClassifier:
             )
             self.state.beat_debug_info[s1_idx] = {
                 "peak_type": PeakType.S1_PAIRED.value,
-                "sections": s1_sections,
+                "sections": pair_sections,
             }
 
             original_middle_debug = self.state.beat_debug_info.get(middle_idx)
             self.state.beat_debug_info[middle_idx] = {
                 "peak_type": PeakType.NOISE.value,
                 "sections": [
-                    {
-                        "type": "lookahead",
-                        "text": middle_noise_msg,
-                    },
-                    {
-                        "type": "original",
-                        "original_debug": original_middle_debug,
-                    },
+                    {"type": "lookahead", "text": middle_noise_msg},
+                    {"type": "original", "original_debug": original_middle_debug},
                 ],
             }
 
             self.state.beat_debug_info[s2_idx] = {
                 "peak_type": PeakType.S2_PAIRED.value,
-                "sections": s2_sections,
+                "sections": pair_sections,
             }
 
             self.state.consecutive_rr_rejections = 0
@@ -249,7 +243,7 @@ class PeakClassifier:
             return
 
         # --- Standard pairing attempt ---
-        is_paired, reason, prominence_context = self.pairing_engine.attempt_pair(
+        is_paired, steps, prominence_context = self.pairing_engine.attempt_pair(
             self.state, current_peak_idx, next_peak_idx, pairing_ratio
         )
 
@@ -259,13 +253,12 @@ class PeakClassifier:
             _append_s1_s2_contractility(
                 self.state, current_peak_idx, next_peak_idx, self.audio_envelope, self.state.trough_indices, self.sample_rate, self.params
             )
-            pairing_lines = [
-                line.strip().lstrip('- ')
-                for line in reason.strip().split("\n")
-                if line.strip()
+            sections: List[Dict[str, Any]] = [
+                {"type": "confidence_trace", "steps": steps},
+                {"type": "prominence", "details": prominence_context},
             ]
-            sections = [{"type": "pairing", "lines": pairing_lines, "success": True}]
-            sections.append({"type": "prominence", "details": prominence_context})
+            if kickstart_msg:
+                sections.insert(0, {"type": "kickstart", "text": kickstart_msg})
             self.state.beat_debug_info[current_peak_idx] = {
                 "peak_type": PeakType.S1_PAIRED.value,
                 "sections": sections,
@@ -277,7 +270,7 @@ class PeakClassifier:
             self.state.consecutive_rr_rejections = 0
             self.state.loop_idx += 2
         else:
-            self._classify_lone_peak(current_peak_idx, reason)
+            self._classify_lone_peak(current_peak_idx, steps, kickstart_msg=kickstart_msg)
             self.state.loop_idx += 1
 
     def _update_long_term_bpm(self):
@@ -308,24 +301,29 @@ class PeakClassifier:
         logging.info(f"Found {len(peaks)} raw peaks using dynamic height threshold.")
         return peaks
 
-    def _classify_lone_peak(self, peak_idx: int, pairing_failure_reason: str):
+    def _classify_lone_peak(
+        self,
+        peak_idx: int,
+        pairing_failure_steps: List[Dict[str, Any]],
+        kickstart_msg: Optional[str] = None,
+    ):
         """Validates if an unpaired peak is a Lone S1 or Noise."""
         is_valid, lone_s1_lines = self._validate_lone_s1(peak_idx)
-        pairing_lines = [
-            line.strip().lstrip('- ')
-            for line in pairing_failure_reason.strip().split("\n")
-            if line.strip()
-        ]
+
+        def _build_sections(validated: bool) -> List[Dict[str, Any]]:
+            secs: List[Dict[str, Any]] = [
+                {"type": "confidence_trace", "steps": pairing_failure_steps},
+                {"type": "lone_s1", "lines": lone_s1_lines, "validated": validated},
+            ]
+            if kickstart_msg:
+                secs.insert(0, {"type": "kickstart", "text": kickstart_msg})
+            return secs
 
         if is_valid:
             self.state.candidate_beats.append(peak_idx)
-            # For a validated S1, the "rejection_detail" is just the success reason.
             self.state.beat_debug_info[peak_idx] = {
                 "peak_type": PeakType.LONE_S1_VALIDATED.value,
-                "sections": [
-                    {"type": "pairing", "lines": pairing_lines, "success": False},
-                    {"type": "lone_s1", "lines": lone_s1_lines, "validated": True},
-                ],
+                "sections": _build_sections(validated=True),
             }
             self.state.consecutive_rr_rejections = 0
         else:
@@ -341,19 +339,13 @@ class PeakClassifier:
                 self.state.candidate_beats.append(peak_idx)
                 self.state.beat_debug_info[peak_idx] = {
                     "peak_type": PeakType.LONE_S1_CASCADE.value,
-                    "sections": [
-                        {"type": "pairing", "lines": pairing_lines, "success": False},
-                        {"type": "lone_s1", "lines": lone_s1_lines, "validated": False},
-                    ],
+                    "sections": _build_sections(validated=False),
                 }
                 self.state.consecutive_rr_rejections = 0
             else:
                 self.state.beat_debug_info[peak_idx] = {
                     "peak_type": PeakType.NOISE.value,
-                    "sections": [
-                        {"type": "pairing", "lines": pairing_lines, "success": False},
-                        {"type": "lone_s1", "lines": lone_s1_lines, "validated": False},
-                    ],
+                    "sections": _build_sections(validated=False),
                 }
 
     def _validate_lone_s1(self, current_peak_idx: int) -> Tuple[bool, List[str]]:
