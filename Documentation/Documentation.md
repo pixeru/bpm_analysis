@@ -70,7 +70,7 @@ aspectRatio: "62.5"
 Springer's pipeline was not made to process PCG information at different/changing heart rates. It expects the bpm to be constant across time.
 - **Springer:** Calculates **one global HR estimate per recording** before segmentation begins. It uses this single value to parameterize the Gaussian duration distributions (S1, Systole, S2, Diastole) for the **entire sequence**.
 
-
+[A Wavelet Transform-Based Neural Network Denoising Algorithm for Mobile Phonocardiography](https://doi.org/10.3390/s19040957)
 
 ### [Heart sound datasets:](https://pmc.ncbi.nlm.nih.gov/articles/PMC11461928/)
 https://pmc.ncbi.nlm.nih.gov/articles/PMC7199391/
@@ -115,7 +115,6 @@ The fourier transform converts data from the time domain to the frequency domain
 
 ### [Application of time frequency analysis](https://www.youtube.com/playlist?list=PLn0OLiymPak2BYu--bR0ADNBJsC4kuRWs)
 ### What is a Wavelet Transform?
-[A Wavelet Transform-Based Neural Network Denoising Algorithm for Mobile Phonocardiography](https://doi.org/10.3390/s19040957)
 In order to do time series analysis, we must understand these fundamental concepts:
 What are [wavelets](https://youtu.be/jnxqHcObNK4)? 
 what is wavelet [convolution](https://youtu.be/jnxqHcObNK4?t=1282)?
@@ -124,7 +123,7 @@ By applying wavelet transform, to generate a wavelet scalogram, we can [view a s
 
 Side note: [Mike X Cohen](https://youtu.be/ljw3gW-nL0E?t=1721) is fkin intelligent:
 We should maintain a holistic view. [If you have a real finding in your data, it will be robust to a reasonable range of parameters](https://youtu.be/ljw3gW-nL0E?t=1676)
-aka a good algorithm should have a large range of configuration values that will work on any input data. 
+aka a good algorithm should have a large range of configuration values that will work on any input data. aka, if you find yourself tuning config/parameters often, your algorithm is not robust. 
 This is why it's a good idea to use wavelet convolution for time series analysis
 
 ```embed
@@ -186,12 +185,7 @@ aspectRatio: "56.25"
 ### Find a way to help the algorithm identify S1 and S2
 [Transfer Learning in Heart Sound Classification using Mel Spectrogram](https://cinc.org/archives/2022/pdf/CinC2022-046.pdf)
 
-> [!say]
-> I wonder, is it possible to record a spectral fingerprint for S1 and S2 heart sounds?
-> Like, each recording has a different audio characteristic
-> But within the file, every S1 should sound similar
-> And be distinct from S2
-> If this is true, there must be a way to exploit this
+
 
 > [!think] Multiple frequency bands
 > what if we preprocess using multiple frequency bands for the explicit propose of comparing the confidence that a peak is S1 vs S2 across the two frequency bands.
@@ -233,76 +227,43 @@ We can identify the following parameters for S1/S2 sounds
 - Energy envelope shape (attack/decay)
 
 
-### Multi-band S1 vs S2 (implemented)
+### Multiple bandpass filters to isolate the different frequency ranges of S1 and S2
+> [!say]
+> I wonder, is it possible to record a spectral fingerprint for S1 and S2 heart sounds?
+> Like, each recording has a different audio characteristic
+> But within the file, every S1 should sound similar
+> And be distinct from S2
+> If this is true, there must be a way to exploit this
+- [x] Implemented
+S1 tends to have more energy in the lower frequency band, S2 in the higher frequency band.
+We calculate the ratio between  these energies and adjust pairing confidence accordingly. If the first peak is more S1-like and the second more S2-like, boost confidence; if the pattern is reversed, penalize.
 
-This feature uses the **spectral difference** between S1 and S2 (S1 tends to have more energy in the lower band, S2 in the higher band) to adjust pairing confidence. It does not change which peaks are detected; it only helps decide whether two consecutive peaks should be labeled as S1–S2.
+We use a Gaussian‑weighted sum of the band energy to get the "energy of the whole beat". 100ms is average duration of the S1 heart sound, the width of the beat's Hilbert envelope. We make the gaussian this width and place it at the detected peak. Then use it to mask out the section of time we are interested in. 
 
-#### Purpose
 
-- Exploit the fact that **S1** has more energy in roughly **20–60 Hz** and **S2** in **60–200 Hz** (configurable).
-- For each candidate S1–S2 pair, compute “how much S1-band vs S2-band” each peak has; if the first peak is more S1-like and the second more S2-like, **boost** confidence; if the pattern is reversed, **penalize**.
-- The rest of the pipeline (prominence, intervals, contractility) is unchanged; multiband is an extra adjustment.
 
-#### Config parameters (`config.py`)
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `enable_multiband_s1_s2` | `True` | Turn the multiband adjustment on/off. |
-| `s1_band_low_hz` | `20.0` | S1 band lower cutoff (Hz). |
-| `s1_band_high_hz` | `60.0` | S1 band upper cutoff (Hz). |
-| `s2_band_low_hz` | `60.0` | S2 band lower cutoff (Hz). |
-| `s2_band_high_hz` | `200.0` | S2 band upper cutoff (Hz). |
-| `multiband_boost_max` | `0.12` | Max confidence **increase** when band energies support S1–S2. |
-| `multiband_penalty_max` | `0.15` | Max confidence **decrease** when bands suggest wrong order. |
-| `multiband_peak_window_ms` | `100.0` | Time window (ms) centered on each peak when sampling band energy; covers the whole beat. |
-| `multiband_gaussian_sigma_ms` | `25.0` | Gaussian σ (ms) for weighting; typically window/4 so weight falls off by the edges. |
 
-Main preprocessing (same signal that is bandpassed for the main envelope) also has:
 
-- `preprocess_target_sample_rate` — e.g. 500 Hz.
-- `preprocess_bandpass_low_hz` / `preprocess_bandpass_high_hz` — wide band (e.g. 20–220 Hz) before any band splitting.
-
-#### Signal flow
-
-1. **Preprocessing (`audio_io.py`)**
-   - Load audio, optional hum removal, then **one wide bandpass** (e.g. 20–220 Hz) → Hilbert envelope → rolling mean → **main envelope** (used for peak detection).
-   - If `enable_multiband_s1_s2` is True, the **same** bandpassed signal is passed through two extra bandpasses:
-     - **S1 band**: `s1_band_low_hz`–`s1_band_high_hz` → Hilbert → same rolling mean → `s1_band` (one value per sample).
-     - **S2 band**: `s2_band_low_hz`–`s2_band_high_hz` → Hilbert → same rolling mean → `s2_band`.
-   - So we get two full-length “band energy” time series, aligned with the main envelope.
-
-2. **Pairing (`bpm_analysis.py`, `PairingEngine.attempt_pair`)**
-   - For each candidate **S1 peak** and **S2 peak** (two consecutive detected peaks):
-     - **Window**: Centered on the peak, length = `multiband_peak_window_ms` (e.g. 100 ms), converted to an odd number of samples.
-     - **Gaussian weighting**: σ = `multiband_gaussian_sigma_ms` in samples. Weights = exp(−0.5·(offset/σ)²), normalized to sum to 1 over the window.
-     - **Band “energy”** for that peak = **Gaussian-weighted sum** of the band envelope over the window (discrete integral under the Gaussian). So we use the whole beat, with the center of the peak weighted highest.
-   - Four numbers: `e_s1_at_first`, `e_s2_at_first`, `e_s1_at_second`, `e_s2_at_second`.
-   - **Consistency ratio**:  
-     `(e_s1_at_first × e_s2_at_second) / (e_s2_at_first × e_s1_at_second)`.  
-     If &gt; 1, the first peak is relatively more S1-like and the second more S2-like → bands support the pair. If &lt; 1, the pattern is reversed.
-   - **Adjustment**: If consistency ≥ 1.2 → add up to `multiband_boost_max` to confidence; if ≤ 0.85 → subtract up to `multiband_penalty_max`; otherwise leave confidence unchanged.
-
-The ratio is **scale-invariant**: overall loudness or level of the beat does not change the consistency, only the relative S1-band vs S2-band content at each peak.
-
-#### Visualization (`plotting.py`)
-
-- **S1 band energy** / **S2 band energy**: Continuous traces of the raw band envelopes (may appear temporally smeared due to narrow-band filtering). Legend-only by default.
-- **S1 proportion at peaks** / **S2 proportion at peaks**: Scatter points **only at detected peak times**, showing S1/(S1+S2) and S2/(S1+S2) at those indices (scaled for display). This is what the algorithm effectively uses (relative band content at peaks). Triangles: S1 proportion = triangle-up, S2 proportion = triangle-down. Legend-only by default.
-
-So: continuous band energy for context; proportion-at-peaks for how the pairing logic “sees” the data, without the lag of the full band curves.
 
 
 ### I still need to research:
-- **[Lomb–Scargle periodogram](https://archive.physionet.org/physiotools/lomb/lomb.html)** for HRV calculation to obtain frequency-domain data such as VLF, LF, HF, LF/HF ratio
-	- FFT assumes evenly spaced samples, R–R (beat-to-beat) data is inherently uneven. 
-	- (SDNN/RMSSD is time domain data)
-	- Caveats:
-		- Shorter segments: frequency-domain measures become less reliable; minimum lengths in the literature are often ~4–5 minutes for stable VLF/LF/HF; HF can still be usable down to ~10 s; LF is more reliable with at least ~30–60 s.
 - [mel-spectrogram](https://www.youtube.com/watch?v=9GHCiiDLHQ4&t=280s)
 - Wavelet Scalogram
 
 
-we should probably give a warning message for which metrics are unreliable depending on file length 
+
+I want to generate a profile over time:
+so we average the features of the past 5 labeled S1 peaks and build a understanding of what S1 should look like in the context of this recording. 
+
+what if we further this idea by sampling at random indices, we take 10 random marked S1 peaks after labeling is done and re-run the labeling using this "trained model"
+like we are training a model in real time to label, then label to train the model, recursively. 
+
+for the features, I want to sample the entire beat, not just the time at the peak. this means finding the bounds of the envelope and sampling the data within that time frame maybe with increasing significance towards the center?
+like we use a gaussian to mask the... or maybe not, do the edges of the beat contain important data? if not we should mask it out... but what if it does?
+
+
+
 
 
 
@@ -358,6 +319,7 @@ After implementing Homomorphic envelope, it doesn't really make a improvement...
 
 
 # Explanation of algorithm logic decision making
+## Temporal Features
 
 ### Brainstorming:
 > [!think]
@@ -391,7 +353,7 @@ The configuration parameter:
 "s1_s2_interval_rr_fraction": 0.7,  # The S1-S2 interval cannot be longer than this fraction of the R-R interval.
 ```
 
-#### Long-Term BPM vs Instantaneous BPM
+### Long-Term BPM vs Instantaneous BPM
 **Problem:** A mislabeled beat could drastically shrink s1_s2_max_interval, causing all subsequent beats to be misclassified.
 **Solution:** Maintain two BPM values:
 - `long_term_bpm`: Slowly adapting belief (0.05 learning rate) that stabilizes the S1-S2 window
@@ -399,10 +361,21 @@ The configuration parameter:
 **Why this works:** Allows the algorithm to self-correct. If instant BPM spikes to 240 but long-term is 120, we know we double-counted S2 and can trigger corrective logic.
 **Code:** `update_long_term_bpm()`, `PeakClassifier.state['long_term_bpm']`
 
-#### Dynamic S1-S2 Pairing Window
+### Dynamic S1-S2 Pairing Window
 **Problem:** At 90 BPM, true S1-S1 interval is 0.67s. But if s1_s2_max_interval is 0.33s, then at 170 BPM (true interval 0.35s), the algorithm merges separate beats.
 **Solution:** `s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)` where expected_rr comes from long_term_bpm, not last interval.
 **Physiological basis:** S1-S2 interval is ~35-50% of total R-R interval and adapts with heart rate.
+
+
+### We add a S1-S2 pairing penalty for the timing of the S1-S2 interval
+If the current peak is S1, we take a look at the current heart rate and determine the distance S2 should be. If the next peak is too far or too close to the current peak, we apply a penalty to the pairing confidence. 
+The pairing logic uses a V-shaped penalty based on how far the observed S1–S2 interval deviates from the expected interval. 
+
+The center of this V is where we expect S2 to be, so no penalty (and a small boost when very close). The further away we get from the expected interval, the higher the penalty we apply. The boundary where the effect crosses zero is set by `interval_zero_crossing_fraction`. 
+
+Also, if the timing deviates too much from expected, we hard reject the pairing and move onto Lone S1 decision. 
+
+
 
 
 ## As BPM increases, the S1-S2 prominence differential increases
@@ -641,6 +614,12 @@ It's important to note that prominence is calculated against the troughs adjacen
 
 
 
+## HRV calculation
+**[Lomb–Scargle periodogram](https://archive.physionet.org/physiotools/lomb/lomb.html)** for HRV calculation to obtain frequency-domain data such as VLF, LF, HF, LF/HF ratio
+- FFT assumes evenly spaced samples, R–R (beat-to-beat) data is inherently uneven. 
+- (SDNN/RMSSD is time domain data)
+- Caveats:
+	- Shorter segments: frequency-domain measures become less reliable; minimum lengths in the literature are often ~4–5 minutes for stable VLF/LF/HF; HF can still be usable down to ~10 s; LF is more reliable with at least ~30–60 s.
 
 
 ## Trapezoid Artifacts
@@ -680,6 +659,7 @@ Detects trapezoid-shaped discontinuities in the average BPM series that are char
 ### Lookahead Parameters
 - `noise_prominence_threshold=0.35`: Middle peak must be &lt;35% of S1 prominence to be considered skippable. Prevents skipping valid S2s.
 - `enable_lookahead_skipping=True`: Master switch because lookahead is aggressive. Can be disabled for clean recordings.
+
 
 
 ## Known Limitations & Edge Cases
@@ -828,6 +808,10 @@ The code has several issues that don't fundamentally change the bpm estimation:
 
 
 ## Unimplemented/Incomplete Ideas:
+
+> [!think]
+> I mean, if you really just want a accurate enough bpm/time graph, we can just plot all R-R intervals, remove the outliers and plot a line of best fit
+
 
 > [!think]
 > Should use **Kalman filter**?
@@ -1029,7 +1013,6 @@ Contractility can also be used to visualize RSA.
 > 
 > 
 > I've been doing this manual data labeling for a while now, but why don't we find a way to export the labeling data directly from my script. then write a software that allows me to fix/edit those labels. this will speed up my labeling workflow immensely
-
 
 
 

@@ -18,8 +18,8 @@ DEFAULT_PARAMS = {
 
     # Main preprocessing: target sample rate and bandpass (single wide band before envelope); typical PCG range for S1/S2.
     "preprocess_target_sample_rate": 550,   # Resample to this Hz for analysis; lower = faster, less detail.
-    "preprocess_bandpass_low_hz": 5.0,
-    "preprocess_bandpass_high_hz": 250.0,
+    "preprocess_bandpass_low_hz": 30.0,     # increasing this reduces the amplitude of S1.
+    "preprocess_bandpass_high_hz": 220.0,
     "preprocess_bandpass_order": 2,   # Butterworth order; higher order not yet validated for this pipeline.
 
     "enable_hum_removal": True,           # Detect and notch narrow low-frequency hums if present
@@ -37,8 +37,8 @@ DEFAULT_PARAMS = {
     "s1_band_low_hz": 20.0,             # S1 typical range 20–60 Hz.
     "s1_band_high_hz": 60.0,
     "s2_band_low_hz": 170.0,             # S2 typical range 60–200 Hz.
-    "s2_band_high_hz": 250.0,
-    "multiband_boost_max": 0.2,         # Max confidence boost when band energies support S1–S2.
+    "s2_band_high_hz": 220.0,
+    "multiband_boost_max": 0.15,         # Max confidence boost when band energies support S1–S2.
     "multiband_penalty_max": 0.15,      # Max confidence penalty when bands suggest wrong order.
     "multiband_peak_window_ms": 130.0,   # Time window (ms) centered on each peak; covers whole beat. Converted to samples using sample rate.
     "multiband_gaussian_sigma_ms": 25.0, # Gaussian sigma (ms) for weighting; typically window/4 so weight falls off by edges. Used for Gaussian-weighted sum of band energy.
@@ -48,7 +48,7 @@ DEFAULT_PARAMS = {
     # Governs the initial identification of peaks and troughs in the audio envelope.
     # =================================================================================
     "min_peak_distance_sec": 0.1,        # I Adjusted This✔ Minimum time allowed between any two raw peaks.
-    "peak_prominence_quantile": 0.60,    # Min prominence = this quantile of envelope. Higher reduces false peaks (e.g. Hilbert ripple).
+    "peak_prominence_quantile": 0.50,    # Min prominence = this quantile of envelope. Higher reduces false peaks (e.g. Hilbert ripple).
     "trough_prominence_quantile": 0.3,   # How much a dip must stand out to be considered a 'trough'.
 
     # =================================================================================
@@ -74,9 +74,14 @@ DEFAULT_PARAMS = {
     # --- 4.1. Core Pairing Rules ---
     "pairing_confidence_threshold": 0.50, # Confidence score required to classify two peaks as an S1-S2 pair.
     "s1_s2_interval_cap_sec": 0.4,        # The absolute maximum time (seconds) allowed between S1 and S2.
-    "s1_s2_interval_rr_fraction": 0.7,    # The S1-S2 interval cannot be longer than this fraction of the R-R interval.
+    "s1_s2_interval_rr_fraction": 0.7,    # Used when Weissler is disabled: nominal S1-S2 as fraction of R-R.
     'min_s1_s2_interval_sec': 0.10,           # Absolute minimum (100ms)
     'min_s1_s2_interval_rr_fraction': 0.23,   # Or 23% of total RR interval
+    # BPM-dependent expected S1-S2 (Weissler-style: ET shortens with HR)
+    "s1_s2_expected_use_weissler": True,      # If True, expected S1-S2 from linear model; else rr_interval * rr_fraction.
+    "s1_s2_expected_weissler_ref_et_ms": 300, # Reference ejection time (ms) at ref_bpm (e.g. ~300 ms at 60 BPM).
+    "s1_s2_expected_weissler_ref_bpm": 60,    # BPM at which ref_et_ms is defined.
+    "s1_s2_expected_weissler_slope_ms_per_bpm": 1.0,  # ET decrease (ms) per BPM increase (literature ~1.0–1.7).
     'noise_prominence_threshold': 0.35,   # Peaks below this ratio are "suspect noise" 
     'enable_lookahead_skipping': True,    # Enable/disable lookahead skipping
 
@@ -100,14 +105,22 @@ DEFAULT_PARAMS = {
     # We should test the contractility model with different values for these params to determine the best values for the dataset I have on hand.
     "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
     "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
-    "contractility_penalty_strength": 0.35,  # Strength of the contractility penalty.
+    "contractility_penalty_strength": 0.3,  # Strength of the contractility penalty.
     "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
     "recovery_phase_min_peak_bpm": 110,      # Only enable recovery-phase adjust if preliminary peak BPM >= this (avoids activating when BPM stays low).
 
-    # --- 4.4. Interval-Based Confidence Penalty ---
-    "interval_penalty_start_factor": 1.0,     # Penalty begins when interval > (max_interval * this value).
-    "interval_penalty_full_factor": 1.4,      # Penalty is at max when interval > (max_interval * this value).
-    "interval_max_penalty": 0.75,             # Max confidence points to subtract for a long interval.
+    # --- 4.4. V-Shaped Interval: boost near expected, penalty outside ---
+    # Linear boost from 0 at expected±zero_crossing to max at expected; linear penalty outside that band.
+    "interval_v_penalty_max": 0.75,              # Max penalty (multiplicative) at ramp ends.
+    "interval_v_boost_max": 0.10,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
+    "interval_zero_crossing_fraction": 0.2,      # Fraction of expected where effect crosses zero: boost zone [expected*(1±this)].
+    "interval_v_short_ramp_end_fraction": 0.2,  # Left: below this fraction of expected → hard reject; ramp from here up to left zero-crossing.
+    "interval_v_long_ramp_end_fraction": 2.0,   # Right: ramp from right zero-crossing to this × expected → full penalty.
+    "interval_v_long_reject_fraction": 2.5,     # Right: above this × expected → hard reject.
+    # Expected S1-S2 from past pairs (when enabled, overrides BPM-based expected for the V-shape)
+    "s1_s2_expected_use_history": True,         # If True, expected = mean of last N accepted S1-S2 intervals; else BPM-based.
+    "s1_s2_expected_history_count": 10,        # Number of past S1-S2 intervals to average.
+    "s1_s2_expected_history_min": 1,           # Minimum history length before using average (else fallback to BPM).
 
     # --- 4.5. Kick-Start Mechanism to Recover from Pairing Failure ---
     "kickstart_check_threshold": 0.3,           # Only run the check if pairing_ratio is BELOW this value.

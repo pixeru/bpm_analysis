@@ -242,6 +242,7 @@ class AnalysisState:
     consecutive_rr_rejections: int = 0
     loop_idx: int = 0
     pairing_ratio_override: Optional[float] = None
+    s1_s2_interval_history: List[float] = field(default_factory=list)  # Last N accepted S1-S2 intervals (sec) for expected-S1-S2
 
 
 class PairingEngine:
@@ -290,25 +291,39 @@ class PairingEngine:
         interval_sec = (s2_candidate_idx - s1_candidate_idx) / self.sample_rate
         bpm = state.long_term_bpm
 
-        # Minimum S1-S2 as fraction of RR interval (adapts to current BPM)
         intervals = calculate_bpm_intervals(bpm, self.params)
-        min_s1_s2_interval = intervals["s1_s2_min"]
+        history = getattr(state, "s1_s2_interval_history", []) or []
+        n_use = self.params.get("s1_s2_expected_history_count", 10)
+        min_history = self.params.get("s1_s2_expected_history_min", 1)
+        use_history = self.params.get("s1_s2_expected_use_history", True) and len(history) >= min_history
+        if use_history:
+            expected_s1_s2 = float(np.mean(history[-n_use:]))
+            expected_s1_s2_source = f"past {len(history[-n_use:])} pairs"
+        else:
+            expected_s1_s2 = intervals["s1_s2_nominal"]
+            expected_s1_s2_source = "BPM"
+        short_cutoff = expected_s1_s2 * self.params.get("interval_v_short_ramp_end_fraction", 0.2)
+        long_reject = expected_s1_s2 * self.params.get("interval_v_long_reject_fraction", 3.0)
 
-        if interval_sec < min_s1_s2_interval:
-            # Calculate implied BPM for debugging
-            # Assuming S2-S1 is at least as long as S1-S2 (conservative estimate)
-            implied_total_cycle = interval_sec * 2.0  # S1-S2 + S2-S1
+        if interval_sec < short_cutoff:
+            implied_total_cycle = interval_sec * 2.0
             implied_bpm = 60.0 / implied_total_cycle if implied_total_cycle > 0 else float('inf')
-
             debug_msg = (
-                f"Impossible: S1-S2 interval {interval_sec:.3f}s < min {min_s1_s2_interval:.3f}s "
-                f"(implies {implied_bpm:.0f} BPM vs assumed {bpm:.0f} BPM)"
+                f"Interval Reject: S1-S2 interval {interval_sec:.3f}s < short cutoff {short_cutoff:.3f}s "
+                f"(expected {expected_s1_s2:.3f}s @ {bpm:.0f} BPM; implies {implied_bpm:.0f} BPM) → reject → 0.00"
+            )
+            return False, debug_msg, {}
+
+        if interval_sec >= long_reject:
+            debug_msg = (
+                f"Interval Reject: S1-S2 interval {interval_sec:.3f}s >= long reject {long_reject:.3f}s "
+                f"(expected {expected_s1_s2:.3f}s @ {bpm:.0f} BPM) → reject → 0.00"
             )
             return False, debug_msg, {}
 
         # --- Base confidence: neutral starting point (contractility handled by prominence adjustment) ---
         base_confidence = 0.60
-        reason = f"Base Conf: {base_confidence:.2f}"
+        reason = f"- Base: starting confidence → no change → {base_confidence:.2f}"
 
         # --- Contractility / prominence-based adjustment (S1 vs S2) ---
         s1_details = get_peak_prominence_details(
@@ -370,8 +385,8 @@ class PairingEngine:
                     penalty_factor = float(np.clip(prominence_ratio / (min_ratio + 1e-9), 0.0, 1.0))
                     confidence *= penalty_factor
                     reason += (
-                        f"\n- Absolute S1 Prominence Penalty: {s1_prominence:.3f} < {min_ratio:.1f}× reference "
-                        f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
+                        f"\n- Absolute S1 Prominence: {s1_prominence:.3f} < {min_ratio:.1f}× reference "
+                        f"({reference_prominence:.3f}) → ×{penalty_factor:.2f} → {confidence:.2f}"
                     )
 
         # --- Multi-band S1 vs S2: spectral fingerprint adjustment ---
@@ -413,13 +428,13 @@ class PairingEngine:
                 if consistency >= 1.2:
                     delta = min(boost_max, (consistency - 1.0) * 0.5)
                     confidence = min(1.0, confidence + delta)
-                    reason += f"\n- Multiband: S1/S2 bands support pair (ratio {consistency:.2f}) → +{delta:.2f}"
+                    reason += f"\n- Multiband: S1/S2 bands support pair (ratio {consistency:.2f}) → +{delta:.2f} → {confidence:.2f}"
                 elif consistency <= 0.85:
                     delta = min(penalty_max, (1.0 - consistency) * 0.5)
                     confidence = max(0.0, confidence - delta)
-                    reason += f"\n- Multiband: S1/S2 bands oppose pair (ratio {consistency:.2f}) → −{delta:.2f}"
+                    reason += f"\n- Multiband: S1/S2 bands oppose pair (ratio {consistency:.2f}) → −{delta:.2f} → {confidence:.2f}"
                 else:
-                    reason += f"\n- Multiband: S1/S2 bands neutral (ratio {consistency:.2f})"
+                    reason += f"\n- Multiband: S1/S2 bands neutral (ratio {consistency:.2f}) → no change → {confidence:.2f}"
 
         # --- Other adjustments (stability, ratio history, etc.) ---
         confidence, other_reason = _apply_other_pairing_adjustments(
@@ -438,31 +453,62 @@ class PairingEngine:
         )
         reason += other_reason
 
-        s1_s2_max_interval = intervals["s1_s2_max"]
+        # V-shaped interval: linear boost when close to expected, linear penalty outside the boost zone; hard cutoffs already applied above
+        interval_v_penalty = 0.0
+        interval_v_boost = 0.0
+        v_max = self.params.get("interval_v_penalty_max", 0.2)
+        boost_max = self.params.get("interval_v_boost_max", 0.10)
+        zero_crossing_fraction = self.params.get("interval_zero_crossing_fraction", 0.2)
+        long_ramp_end = expected_s1_s2 * self.params.get("interval_v_long_ramp_end_fraction", 2.0)
+        left_ramp_start = expected_s1_s2 * (1.0 - zero_crossing_fraction)   # below this: left penalty ramp
+        right_ramp_start = expected_s1_s2 * (1.0 + zero_crossing_fraction)   # above this: right penalty ramp
 
-        # Apply interval penalty if the S1-S2 interval is too long
-        if self.params.get("enable_interval_penalty", True) and interval_sec > s1_s2_max_interval:
-            start_factor = self.params.get("interval_penalty_start_factor", 1.0)
-            full_factor = self.params.get("interval_penalty_full_factor", 1.4)
-            max_penalty = self.params.get("interval_max_penalty", 0.75)
-
-            penalty_zone_start = s1_s2_max_interval * start_factor
-            penalty_zone_end = s1_s2_max_interval * full_factor
-
-            if interval_sec > penalty_zone_start:
-                exceedance_scale = (interval_sec - penalty_zone_start) / (penalty_zone_end - penalty_zone_start + 1e-9)
-                exceedance_scale = np.clip(exceedance_scale, 0, 1)
-                penalty_amount = exceedance_scale * max_penalty
-                confidence = max(0, confidence - penalty_amount)
-                interval_reason = (
-                    f"\n- Interval penalty by {penalty_amount:.2f} "
-                    f"(Interval {interval_sec:.3f}s > Max {s1_s2_max_interval:.3f}s)"
-                )
+        if interval_sec < left_ramp_start:
+            # Left penalty ramp: from short_cutoff to left_ramp_start, penalty 0 at left_ramp_start, v_max at short_cutoff
+            ramp_span = left_ramp_start - short_cutoff
+            if ramp_span > 1e-9:
+                t = (left_ramp_start - interval_sec) / ramp_span
+                interval_v_penalty = v_max * float(np.clip(t, 0, 1))
+        elif interval_sec > right_ramp_start:
+            # Right penalty ramp: from right_ramp_start to long_ramp_end; flat v_max beyond long_ramp_end
+            if interval_sec <= long_ramp_end:
+                ramp_span = long_ramp_end - right_ramp_start
+                if ramp_span > 1e-9:
+                    t = (interval_sec - right_ramp_start) / ramp_span
+                    interval_v_penalty = v_max * float(np.clip(t, 0, 1))
             else:
-                interval_reason = ""
+                interval_v_penalty = v_max
         else:
-            interval_reason = ""
-        reason += interval_reason
+            # Boost zone [left_ramp_start, right_ramp_start]: linear boost from 0 at edges to boost_max at expected
+            if interval_sec <= expected_s1_s2:
+                span = expected_s1_s2 - left_ramp_start
+                if span > 1e-9:
+                    t = (interval_sec - left_ramp_start) / span
+                    interval_v_boost = boost_max * float(np.clip(t, 0, 1))
+            else:
+                span = right_ramp_start - expected_s1_s2
+                if span > 1e-9:
+                    t = (right_ramp_start - interval_sec) / span
+                    interval_v_boost = boost_max * float(np.clip(t, 0, 1))
+
+        # Always show actual vs expected interval on hover (even when no penalty/boost)
+        if interval_v_penalty > 0:
+            confidence *= max(0.0, 1.0 - interval_v_penalty)
+            reason += (
+                f"\n- S1-S2 interval: {interval_sec:.3f}s (expected {expected_s1_s2:.3f}s from {expected_s1_s2_source}). "
+                f"Too far from expected → -{interval_v_penalty:.2f} (×{(1.0 - interval_v_penalty):.2f}) → {confidence:.2f}"
+            )
+        elif interval_v_boost > 0:
+            confidence = min(1.0, confidence * (1.0 + interval_v_boost))
+            reason += (
+                f"\n- S1-S2 interval: {interval_sec:.3f}s (expected {expected_s1_s2:.3f}s from {expected_s1_s2_source}). "
+                f"Near expected → +{interval_v_boost:.2f} (×{(1.0 + interval_v_boost):.2f}) → {confidence:.2f}"
+            )
+        else:
+            reason += (
+                f"\n- S1-S2 interval: {interval_sec:.3f}s (expected {expected_s1_s2:.3f}s from {expected_s1_s2_source}) "
+                f"→ no change → {confidence:.2f}"
+            )
 
         # --- Forward-Looking Contextual Penalty ---
         # If pairing S1-S2 causes the next S2→S1 transition to be implausible, penalize it.
@@ -505,15 +551,14 @@ class PairingEngine:
 
                         confidence = max(0.0, confidence - forward_look_penalty)
                         reason += (
-                            f"\n- Penalized by Forward-Look {forward_look_penalty:.2f} "
-                            f"(S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x)"
+                            f"\n- Forward-Look: S2→S1 drop {drop_ratio:.2f}x < threshold {threshold:.1f}x "
+                            f"→ -{forward_look_penalty:.2f} → {confidence:.2f}"
                         )
 
         is_paired = confidence >= self.params['pairing_confidence_threshold']
         reason += (
-            f"\n- Final Score: {confidence:.2f} vs Threshold "
-            f"{self.params['pairing_confidence_threshold']:.2f} -> "
-            f"{'Paired' if is_paired else 'Not Paired'}"
+            f"\n- Final: score {confidence:.2f} vs threshold {self.params['pairing_confidence_threshold']:.2f} "
+            f"→ {'Paired' if is_paired else 'Not Paired'} → {confidence:.2f}"
         )
         return is_paired, reason, prominence_context
 
@@ -676,6 +721,14 @@ class LookaheadSkipper:
 def _build_prominence_section(prominence_context: Dict[str, Any]) -> Dict[str, Any]:
     """Wraps prominence context in a debug section structure for tooltips/logs."""
     return {"type": "prominence", "details": prominence_context}
+
+
+def _append_s1_s2_interval(state: AnalysisState, interval_sec: float, params: Dict) -> None:
+    """Append an accepted S1-S2 interval to history and cap to last N for expected-S1-S2 from past pairs."""
+    state.s1_s2_interval_history.append(interval_sec)
+    n_keep = params.get("s1_s2_expected_history_count", 10)
+    if len(state.s1_s2_interval_history) > n_keep:
+        state.s1_s2_interval_history = state.s1_s2_interval_history[-n_keep:]
 
 
 def _get_recent_s1_prominences_for_state(
@@ -889,6 +942,7 @@ class PeakClassifier:
             ]
 
             self.state.candidate_beats.append(s1_idx)
+            _append_s1_s2_interval(self.state, (s2_idx - s1_idx) / self.sample_rate, self.params)
             self.state.beat_debug_info[s1_idx] = {
                 "peak_type": PeakType.S1_PAIRED.value,
                 "sections": s1_sections,
@@ -926,6 +980,7 @@ class PeakClassifier:
 
         if is_paired:
             self.state.candidate_beats.append(current_peak_idx)
+            _append_s1_s2_interval(self.state, (next_peak_idx - current_peak_idx) / self.sample_rate, self.params)
             pairing_lines = [
                 line.strip().lstrip('- ')
                 for line in reason.strip().split("\n")
@@ -1029,7 +1084,7 @@ class PeakClassifier:
         
         # --- 1. Basic rhythm & amplitude calculation ---
         if not self.state.candidate_beats:
-            return True, ["Validated Lone S1: First beat (no prior rhythm to compare)."]
+            return True, ["Outcome: First beat (no prior rhythm to compare) → Validated Lone S1 → —"]
         
         confidence, detail_lines = calculate_lone_s1_confidence(
             current_peak_idx, self.state.candidate_beats[-1], self.state.long_term_bpm,
@@ -1061,10 +1116,9 @@ class PeakClassifier:
                 # Linear penalty: 0.5x → 0.5 penalty, 0.2x → 0.2 penalty, etc.
                 penalty_factor = np.clip(prominence_ratio / min_ratio, 0.0, 1.0)
                 confidence *= penalty_factor
-                
                 detail_lines.append(
-                    f"\nAbsolute Prominence Veto: {current_prominence:.3f} < {min_ratio:.1f}× reference "
-                    f"({reference_prominence:.3f}) → confidence ×{penalty_factor:.2f}"
+                    f"Absolute Prominence: {current_prominence:.3f} < {min_ratio:.1f}× reference "
+                    f"({reference_prominence:.3f}) → ×{penalty_factor:.2f} → {confidence:.2f}"
                 )
         
         # --- 3. Forward check ---
@@ -1081,17 +1135,21 @@ class PeakClassifier:
                 # If not MUCH stronger, it's likely S2, not S1
                 if current_amp < next_amp * 1.69: # 1.69 is a random number I tuned, a better implementation would avoid the need for this magic number
                     detail_lines.append(
-                        f"\nForward check failed: next peak too close ({forward_interval_sec:.3f}s) and not strong enough"
+                        f"Forward check: next peak too close ({forward_interval_sec:.3f}s) and not strong enough "
+                        f"→ veto → 0.00"
                     )
                     confidence = 0.0  # Hard veto
         
         # --- 4. Final threshold check ---
         threshold = self.params.get("lone_s1_confidence_threshold", 0.6)
         if confidence < threshold:
-            detail_lines.append(f"Outcome: Rejected Lone S1 (final score {confidence:.2f} < {threshold:.2f})")
+            detail_lines.append(
+                f"Outcome: score {confidence:.2f} < threshold {threshold:.2f} → Rejected Lone S1 → {confidence:.2f}"
+            )
             return False, detail_lines
-        
-        detail_lines.append(f"Outcome: Validated Lone S1 (final score {confidence:.2f} >= {threshold:.2f})")
+        detail_lines.append(
+            f"Outcome: score {confidence:.2f} >= threshold {threshold:.2f} → Validated Lone S1 → {confidence:.2f}"
+        )
         return True, detail_lines
 
 
@@ -1231,7 +1289,7 @@ def calculate_bpm_intervals(bpm: float, params: Dict) -> Dict[str, float]:
     Returns a dictionary with:
       - 'rr_interval'     : full S1→S1 (R-R) interval
       - 's1_s2_min'       : minimum plausible S1→S2 interval
-      - 's1_s2_nominal'   : nominal S1→S2 interval as a fraction of R-R
+      - 's1_s2_nominal'   : expected S1→S2 (Weissler-style if enabled, else fraction of R-R)
       - 's1_s2_max'       : maximum plausible S1→S2 interval (capped)
       - 's2_s1_nominal'   : nominal S2→S1 interval (R-R minus S1→S2 nominal)
     """
@@ -1245,8 +1303,16 @@ def calculate_bpm_intervals(bpm: float, params: Dict) -> Dict[str, float]:
     cap_abs = params.get("s1_s2_interval_cap_sec", rr_interval * nominal_frac)
 
     s1_s2_min = max(rr_interval * min_frac, min_abs)
-    s1_s2_nominal = rr_interval * nominal_frac
-    s1_s2_max = min(cap_abs, s1_s2_nominal)
+    if params.get("s1_s2_expected_use_weissler", False):
+        # Weissler-style: expected S1-S2 (ejection time) decreases with BPM (ms per BPM)
+        ref_et_ms = params.get("s1_s2_expected_weissler_ref_et_ms", 300)
+        ref_bpm = params.get("s1_s2_expected_weissler_ref_bpm", 60)
+        slope = params.get("s1_s2_expected_weissler_slope_ms_per_bpm", 1.0)
+        expected_et_ms = ref_et_ms - slope * (bpm - ref_bpm)
+        s1_s2_nominal = np.clip(expected_et_ms / 1000.0, min_abs, cap_abs)
+    else:
+        s1_s2_nominal = rr_interval * nominal_frac
+    s1_s2_max = min(cap_abs, max(s1_s2_nominal, s1_s2_min))
     s2_s1_nominal = max(0.0, rr_interval - s1_s2_nominal)
 
     return {
@@ -1286,10 +1352,6 @@ def adjust_confidence_with_contractility(
 
     # --- 2. Reality: Measured S2/S1 prominence ratio ---
     actual_ratio = s2_prominence / (s1_prominence + 1e-9)
-    reason += (
-        f"\n- Prominence: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, "
-        f"S2/S1={actual_ratio:.2f} (Expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM)"
-    )
 
     # --- 3. Apply contractility logic ---
     if actual_ratio > expected_max_ratio:
@@ -1299,23 +1361,23 @@ def adjust_confidence_with_contractility(
         penalty = violation * penalty_strength
         confidence = max(0.0, base_confidence - penalty)
         reason += (
-            f"\n Contractility Penalty: -{penalty:.2f} "
-            f"(S2 too prominent for BPM; prominence ratio {actual_ratio:.2f} > expected {expected_max_ratio:.2f}) -> {confidence:.2f}"
+            f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S2/S1={actual_ratio:.2f} "
+            f"(expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM). S2 too prominent → -{penalty:.2f} → {confidence:.2f}"
         )
     elif actual_ratio < expected_max_ratio * 0.5:
         # S1 is much more prominent than expected → mild boost
         boost = params.get("contractility_boost_amount", 0.15)
         confidence = min(1.0, base_confidence + boost)
         reason += (
-            f"\n Contractility Boost: +{boost:.2f} "
-            f"(S1 >> S2 at {bpm:.0f} BPM; prominence ratio {actual_ratio:.2f}) -> {confidence:.2f}"
+            f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S2/S1={actual_ratio:.2f} "
+            f"(expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM). S1 >> S2 → +{boost:.2f} → {confidence:.2f}"
         )
     else:
         # Within expected range → leave confidence unchanged
         confidence = base_confidence
         reason += (
-            f"\n Contractility Neutral: prominence ratio {actual_ratio:.2f} within expected range "
-            f"for {bpm:.0f} BPM, confidence unchanged"
+            f"\n- Contractility: S1={s1_prominence:.3f}, S2={s2_prominence:.3f}, S2/S1={actual_ratio:.2f} "
+            f"(expected max {expected_max_ratio:.2f} at {bpm:.0f} BPM). Within range → no change → {confidence:.2f}"
         )
 
     return confidence, reason
@@ -1360,11 +1422,17 @@ def _apply_other_pairing_adjustments(
             recovery_floor = params.get("recovery_phase_stability_floor", 0.95)
             original_floor = floor
             floor = max(floor, recovery_floor)
-            reason += f"\n- Recovery Phase Adjust: floor {original_floor:.2f} → {floor:.2f} (peak at {peak_bpm_time_sec:.1f}s)"
+            reason += (
+                f"\n- Recovery Phase: in recovery window (peak at {peak_bpm_time_sec:.1f}s), "
+                f"floor {original_floor:.2f} → {floor:.2f} → no change → {confidence:.2f}"
+            )
 
         stability_factor = np.interp(pairing_ratio, [0.0, 1.0], [floor, ceiling])
         confidence *= stability_factor
-        reason += f"\n- Stability Adjust: x{stability_factor:.2f} (Pairing Ratio: {pairing_ratio:.0%}, Floor: {floor:.2f}) → {confidence:.2f}"
+        reason += (
+            f"\n- Stability: pairing ratio {pairing_ratio:.0%}, floor {floor:.2f} "
+            f"→ ×{stability_factor:.2f} → {confidence:.2f}"
+        )
 
     return max(0.0, min(1.0, confidence)), reason
 
@@ -1387,8 +1455,9 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
         [1.0, 0.8, 0.4, 0.0]      # Hardcoded rhythm confidence curve
     )
     rhythm_reason = (
-        f"Rhythm Fit {rhythm_score:.2f}: interval {actual_rr_sec:.3f}s vs expected {expected_rr_sec:.3f}s "
-        f"(deviation {rhythm_deviation_pct:.0%}; map 0/15/30/50% -> 1.00/0.80/0.40/0.00)"
+        f"Rhythm Fit: interval {actual_rr_sec:.3f}s vs expected {expected_rr_sec:.3f}s "
+        f"(deviation {rhythm_deviation_pct:.0%}; map 0/15/40/60% → 1.00/0.80/0.40/0.00) "
+        f"→ score {rhythm_score:.2f} → {rhythm_score:.2f}"
     )
 
     # --- 2. Calculate Amplitude Fit Score ---
@@ -1402,8 +1471,8 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
         [0.0, 0.4, 0.7, 1.0]       # Hardcoded amplitude confidence curve
     )
     amplitude_reason = (
-        f"Amplitude Fit {amplitude_score:.2f}: strength ratio {amplitude_ratio:.2f}x "
-        f"(map 0/0.4/0.7/1.0 -> 0/0.4/0.8/1.0)"
+        f"Amplitude Fit: strength ratio {amplitude_ratio:.2f}x "
+        f"(map 0/0.4/0.7/1.0 → 0/0.4/0.7/1.0) → score {amplitude_score:.2f} → {amplitude_score:.2f}"
     )
 
     # --- 3. Combine Scores with Weights ---
@@ -1415,8 +1484,8 @@ def calculate_lone_s1_confidence(current_peak_idx: int, last_s1_idx: int, long_t
         rhythm_reason,
         amplitude_reason,
         (
-            f"Weighted Score: (Rhythm {rhythm_score:.2f} x {rhythm_weight:.2f}) + "
-            f"(Amplitude {amplitude_score:.2f} x {amplitude_weight:.2f}) = {final_confidence:.3f}"
+            f"Weighted Score: (Rhythm {rhythm_score:.2f}×{rhythm_weight:.2f}) + "
+            f"(Amplitude {amplitude_score:.2f}×{amplitude_weight:.2f}) → combined → {final_confidence:.3f}"
         ),
     ]
     return final_confidence, reason_lines
