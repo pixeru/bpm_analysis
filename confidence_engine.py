@@ -532,6 +532,32 @@ class PairingEngine:
         base_confidence = 0.60
         steps.append({"step": "Base", "detail": "starting confidence", "result": base_confidence})
 
+        # --- RR vs BPM penalty (penalty only) ---
+        # If the proposed S1 would create an implausible R-R interval vs the current BPM belief,
+        # penalize pairing confidence. This helps avoid pairing when the "S1 candidate" is actually noise.
+        confidence = base_confidence
+        if state.candidate_beats:
+            last_s1_idx = state.candidate_beats[-1]
+            expected_rr_sec = float(intervals.get("rr_interval", 0.0))
+            observed_rr_sec = (s1_candidate_idx - last_s1_idx) / self.sample_rate
+            if expected_rr_sec > 1e-9 and observed_rr_sec > 0:
+                rr_deviation_frac = abs(observed_rr_sec - expected_rr_sec) / expected_rr_sec
+                # Allow a small dead zone: no penalty for deviations ≤ 5%; ramp starts beyond that.
+                rr_deviation_for_penalty = max(0.0, rr_deviation_frac - 0.05)
+                rr_score = float(np.interp(rr_deviation_for_penalty, _RHYTHM_DEVIATION_XPOINTS, _RHYTHM_SCORE_YPOINTS))
+                rr_penalty_max = float(self.params.get("pairing_rr_penalty_max", 0.25))
+                rr_penalty = rr_penalty_max * float(np.clip(1.0 - rr_score, 0.0, 1.0))
+                if rr_penalty > 0:
+                    confidence *= max(0.0, 1.0 - rr_penalty)
+                    steps.append({
+                        "step": "RR vs BPM",
+                        "detail": (
+                            f"{observed_rr_sec:.3f}s vs {expected_rr_sec:.3f}s "
+                            f"(deviation {rr_deviation_frac:.0%}) → -{rr_penalty:.2f} (×{(1.0 - rr_penalty):.2f})"
+                        ),
+                        "result": confidence,
+                    })
+
         # --- Contractility / prominence-based adjustment (S1 vs S2) ---
         s1_details = get_peak_prominence_details(
             s1_candidate_idx,
@@ -562,7 +588,7 @@ class PairingEngine:
         # --- Contractility model based on S1/S2 prominence ratio ---
         current_time_sec = s1_candidate_idx / self.sample_rate
         confidence, contractility_step = adjust_confidence_with_contractility(
-            base_confidence,
+            confidence,
             s1_prominence,
             s2_prominence,
             bpm,

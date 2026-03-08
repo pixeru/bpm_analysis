@@ -34,7 +34,7 @@ DEFAULT_PARAMS = {
     "s1_band_high_hz": 60.0,
     "s2_band_low_hz": 170.0,             # S2 typical range 60-200 Hz.
     "s2_band_high_hz": 220.0,
-    "multiband_boost_max": 0.15,         # Max confidence boost when band energies support S1-S2.
+    "multiband_boost_max": 0.1,         # Max confidence boost when band energies support S1-S2.
     "multiband_penalty_max": 0.1,      # Max confidence penalty when bands suggest wrong order.
     "multiband_peak_window_ms": 130.0,   # Time window (ms) centered on each peak; covers whole beat. Converted to samples using sample rate.
     "multiband_gaussian_sigma_ms": 25.0, # Gaussian sigma (ms) for weighting; typically window/4 so weight falls off by edges. Used for Gaussian-weighted sum of band energy.
@@ -95,6 +95,7 @@ DEFAULT_PARAMS = {
     "penalty_amount_max": 0.30,             # Subtractive confidence penalty for a "bad" pair in an unstable section.
     "forward_look_drop_threshold": 0.4,     # If next peak < 60% of S2, it's suspicious
     "forward_look_max_penalty": 0.4,        # Max penalty for this scenario
+    "pairing_rr_penalty_max": 0.25,         # Multiplicative penalty for RR mismatch vs 60/BPM when evaluating an S1-S2 pair.
     # Contractility: S1/S2 prominence ratio. Expected from history (past N pairs) or BPM power-curve fallback.
     "contractility_expected_use_history": True,   # If True, expected S1/S2 = mean of last N accepted pairs; else BPM power curve.
     "contractility_expected_history_count": 8,   # Number of past S1/S2 ratios to average.
@@ -109,7 +110,7 @@ DEFAULT_PARAMS = {
     # Asymmetric deviation-based curve: L2=(1-r_low), L1=(1-a_low), R1=(1+a_high), R2=(1+r_high) × expected.
     "contractility_zero_crossing_low": 0.3,       # Left zero-crossing: L1 = expected × (1 - this).
     "contractility_zero_crossing_high": 0.4,      # Right zero-crossing: R1 = expected × (1 + this).
-    "contractility_penalty_ramp_fraction_low": 1.2,   # Left ramp end: L2 = expected × (1 - this); penalty max at L2.
+    "contractility_penalty_ramp_fraction_low": 1.3,   # Left ramp end: L2 = expected × (1 - this); penalty max at L2.
     "contractility_penalty_ramp_fraction_high": 2.5,  # Right ramp end: R2 = expected × (1 + this); penalty max at R2.
     "contractility_boost_max": 0.2,              # Max multiplicative boost at expected: confidence *= (1 + boost).
     "contractility_penalty_max": 0.5,             # Max multiplicative penalty when far outside band.
@@ -119,7 +120,7 @@ DEFAULT_PARAMS = {
     # --- 4.4. V-Shaped Interval: boost near expected, penalty outside ---
     # Linear boost from 0 at expected±zero_crossing to max at expected; linear penalty outside that band.
     "interval_v_penalty_max": 0.75,              # Max penalty (multiplicative) at ramp ends.
-    "interval_v_boost_max": 0.5,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
+    "interval_v_boost_max": 0.6,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
     "interval_zero_crossing_fraction": 0.2,      # Fraction of expected where effect crosses zero: boost zone [expected*(1±this)].
     "interval_v_short_ramp_end_fraction": 0.4,  # Left: below this fraction of expected → hard reject; ramp from here up to left zero-crossing.
     "interval_v_long_ramp_end_fraction": 2.0,   # Right: ramp from right zero-crossing to this × expected → full penalty.
