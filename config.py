@@ -177,7 +177,7 @@ DEFAULT_PARAMS = {
     "hrv_window_size_beats": 40,             # Sliding window size (in beats) for HRV calculation.
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
     "enable_hrv_frequency_domain": True,     # If True, compute Lomb-Scargle LF/HF and optional global VLF/LF/HF.
-    "hrv_global_min_duration_sec": 300.0,   # Only compute global spectrum when recording duration >= this (5 min).
+    "hrv_global_min_duration_sec": 300.0,    # Only compute global spectrum when recording duration >= this (5 min).
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
     # In plotting.py: avoid dashed lines (dash=...) for line traces--they cause noticeable lag.
     "plot_downsample_factor": 4,             # Downsample only large traces: Audio Envelope and Dynamic Noise Floor (keep 1 of every N points). Does NOT apply to Average S1/S2 contractility, BPM, HRV, or markers.
@@ -191,12 +191,16 @@ DEFAULT_PARAMS = {
 
     # --- 7.1.1. FFT Profiles (S1/S2 frequency spectra from raw and preprocessed audio) ---
     "enable_fft_profiles": True,                 # If True, generate separate HTML with S1/S2 FFT profiles.
-    "fft_window_ms": 100.0,                     # Time window (ms) centered on each peak for FFT.
+    "fft_window_ms": 120.0,                      # Time window (ms) centered on each peak for FFT.
+    "fft_max_peaks_per_type": 200,               # Max S1 and S2 peaks (each) for FFT; selected by highest pairing confidence. Lone S1s excluded.
+    "fft_aggregate_sr": 32000,                   # Sample rate for multi-file FFT aggregation (common grid). Per-file uses native sr.
+    "fft_neutral_band_low_hz": 3000.0,           # Neutral band low (Hz) for S2→S1 alignment (force same level in this band).
+    "fft_neutral_band_high_hz": 5000.0,          # Neutral band high (Hz) for S2→S1 alignment.
 
     # --- 7.2. Trapezoid Artifact Detection ---
     # These control detection of brief, trapezoid-shaped BPM jumps that are often extra-beat artifacts.
     "trapezoid_rate_threshold": 7.0,            # BPM/s: physiologically implausible rate for rise/fall edges.
-    "trapezoid_max_edge_duration_sec": 2,     # Maximum duration (seconds) for the rise/fall edges.
+    "trapezoid_max_edge_duration_sec": 2,       # Maximum duration (seconds) for the rise/fall edges.
     "trapezoid_min_plateau_duration_sec": 1.5,  # Minimum plateau length between rise and fall.
     "trapezoid_max_plateau_duration_sec": 15.0, # Maximum plateau length between rise and fall.
     "trapezoid_baseline_tolerance_bpm": 5.0,    # Allowed BPM difference between pre- and post-artifact baseline.

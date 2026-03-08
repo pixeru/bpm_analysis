@@ -448,6 +448,7 @@ class BPMApp:
         try:
             from pipeline import analyze_wav_file
             from audio_preprocessing import convert_to_wav, split_wav_to_mono_channels
+            from fft_profiles import aggregate_fft_profiles, save_aggregate_fft_profiles_html
             import shutil
 
             # Check for a global BPM value to override all individual settings.
@@ -509,6 +510,8 @@ class BPMApp:
             total_files = len(input_files)
             files_processed = 0
             errors = []
+            fft_results_for_aggregate = []
+            collect_fft_for_aggregate = total_files >= 2
 
             # --- BATCH PROCESSING LOOP ---
             for i, file_path in enumerate(input_files):
@@ -608,17 +611,17 @@ class BPMApp:
                             )
                         )
 
-                        analyze_wav_file(
+                        _figure, fft_data = analyze_wav_file(
                             wav_for_analysis,
                             self.params,
                             file_start_bpm_hint,
-                            # Use the original user-selected file path for naming and
-                            # for locating any manually labeled peaks CSV placed next to
-                            # the input file.
                             original_file_path=file_path,
                             output_directory=output_dir,
                             output_options=output_options,
+                            collect_fft_for_aggregate=collect_fft_for_aggregate,
                         )
+                        if fft_data is not None:
+                            fft_results_for_aggregate.append(fft_data)
                     files_processed += 1
 
                     # Log total wall-clock time for this original input file (including conversion, splitting, and analysis).
@@ -634,6 +637,17 @@ class BPMApp:
                     error_info = f"Error processing '{os.path.basename(file_path)}':\n{str(e)}"
                     self.log_queue.put(UIMessage(UIMessageType.ERROR, error_info))
                     errors.append(os.path.basename(file_path))
+
+            # --- AGGREGATE FFT (when 2+ files were analyzed with FFT) ---
+            if len(fft_results_for_aggregate) >= 2:
+                try:
+                    freqs, agg_r1, agg_r2, agg_b1, agg_b2 = aggregate_fft_profiles(fft_results_for_aggregate, self.params)
+                    aggregate_path = os.path.join(base_output_dir, "fft_profiles_aggregate.html")
+                    save_aggregate_fft_profiles_html(
+                        freqs, agg_r1, agg_r2, agg_b1, agg_b2, aggregate_path, self.params
+                    )
+                except Exception as e:
+                    logging.warning("Aggregate FFT profiles failed: %s", e)
 
             # --- POST-LOOP COMPLETION MESSAGE ---
             if not errors:

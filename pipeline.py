@@ -28,7 +28,7 @@ from hrv import (
     calculate_global_hrv_frequency,
 )
 from correction import correct_peaks_by_rhythm, fix_rhythmic_discontinuities
-from fft_profiles import save_fft_profiles_html
+from fft_profiles import compute_fft_profiles, save_fft_profiles_html
 
 
 class _NoisyAlgorithmLogFilter(logging.Filter):
@@ -182,7 +182,7 @@ def _calculate_final_metrics(final_peaks: np.ndarray, sample_rate: int, params: 
     return metrics
 
 
-def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str, output_options: Optional[Dict] = None):
+def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[float], original_file_path: str, output_directory: str, output_options: Optional[Dict] = None, collect_fft_for_aggregate: bool = False):
     """Main analysis pipeline that orchestrates the refactored classes."""
     # Honor optional verbose logging flag from params to control how noisy the console is.
     # When disabled, we keep stage-level INFO logs but suppress very chatty algorithm-detail INFO logs.
@@ -312,18 +312,40 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
         logging.info("Skipping all report generation as requested.")
 
     # FFT profiles: aggregate S1/S2 frequency spectra from raw audio (separate minimal HTML)
+    fft_aggregate_data = None
     if params.get("enable_fft_profiles", True) and output_options.get("fft_profiles", True):
         try:
             base_name = os.path.basename(os.path.splitext(original_file_path)[0])
             fft_output_path = os.path.join(output_directory, f"{base_name}_fft_profiles.html")
-            save_fft_profiles_html(
-                wav_file_path,
-                analysis_data.get("beat_debug_info", {}),
-                sample_rate,
-                fft_output_path,
-                audio_envelope,
-                params,
-            )
+            if collect_fft_for_aggregate:
+                target_sr = int(params.get("fft_aggregate_sr", 32000))
+                fft_result = compute_fft_profiles(
+                    wav_file_path,
+                    analysis_data.get("beat_debug_info", {}),
+                    sample_rate,
+                    audio_envelope,
+                    params,
+                    target_sr=target_sr,
+                )
+                save_fft_profiles_html(
+                    wav_file_path,
+                    analysis_data.get("beat_debug_info", {}),
+                    sample_rate,
+                    fft_output_path,
+                    audio_envelope,
+                    params,
+                    fft_result=fft_result,
+                )
+                fft_aggregate_data = fft_result
+            else:
+                save_fft_profiles_html(
+                    wav_file_path,
+                    analysis_data.get("beat_debug_info", {}),
+                    sample_rate,
+                    fft_output_path,
+                    audio_envelope,
+                    params,
+                )
         except Exception as e:
             logging.warning(f"FFT profiles generation failed: {e}")
 
@@ -337,4 +359,4 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
         except Exception:
             pass
 
-    return plotly_figure
+    return plotly_figure, fft_aggregate_data

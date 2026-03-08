@@ -4,7 +4,7 @@
 
 import logging
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import plotly.graph_objects as go
@@ -14,17 +14,56 @@ from audio_preprocessing import apply_bandpass_only
 from peak_utils import PeakType, _get_peak_type_from_debug
 
 
-def _collect_s1_s2_indices(beat_debug_info: Dict) -> Tuple[list, list]:
-    """Extract S1 and S2 peak indices (at envelope sample rate) from beat_debug_info."""
+def _get_pairing_confidence(entry) -> Optional[float]:
+    """Extract final pairing confidence from a debug entry (confidence_trace section, last step result)."""
+    if not isinstance(entry, dict):
+        return None
+    for sec in entry.get("sections", []):
+        if sec.get("type") != "confidence_trace":
+            continue
+        steps = sec.get("steps", [])
+        if not steps:
+            continue
+        result = steps[-1].get("result")
+        if result is not None and isinstance(result, (int, float)):
+            return float(result)
+    return None
+
+
+def _collect_s1_s2_indices(
+    beat_debug_info: Dict, paired_s1_only: bool = False
+) -> Tuple[list, list]:
+    """Extract S1 and S2 peak indices (at envelope sample rate) from beat_debug_info.
+    If paired_s1_only is True, only include paired S1s (exclude Lone S1)."""
     s1_indices = []
     s2_indices = []
     for peak_idx, entry in beat_debug_info.items():
         pt = _get_peak_type_from_debug(entry) or ""
         if PeakType.is_s1(pt):
+            if paired_s1_only and pt.strip().startswith("Lone S1"):
+                continue
             s1_indices.append(peak_idx)
         elif PeakType.is_s2(pt):
             s2_indices.append(peak_idx)
     return s1_indices, s2_indices
+
+
+def _select_top_peaks_by_confidence(
+    beat_debug_info: Dict,
+    s1_indices: list,
+    s2_indices: list,
+    max_per_type: int = 100,
+) -> Tuple[list, list]:
+    """Return up to max_per_type S1 and S2 indices with highest pairing confidence."""
+    def sort_and_cap(indices: list) -> list:
+        with_conf = [
+            (idx, _get_pairing_confidence(beat_debug_info.get(idx)) or 0.0)
+            for idx in indices
+        ]
+        with_conf.sort(key=lambda x: x[1], reverse=True)
+        return [idx for idx, _ in with_conf[:max_per_type]]
+
+    return sort_and_cap(s1_indices), sort_and_cap(s2_indices)
 
 
 def _peak_indices_to_full_rate(
@@ -123,33 +162,42 @@ def compute_fft_profiles(
     envelope_sample_rate: int,
     audio_envelope: np.ndarray,
     params: Optional[Dict] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    target_sr: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     """
     Compute aggregate FFT profiles for S1 and S2 from raw and bandpass-only audio.
     Normalizes by RMS energy of each peak's window so each peak contributes equally.
 
+    target_sr: If set (e.g. 32000), resample audio to this rate so all files share
+        the same frequency grid for aggregation. If None, use native sample rate.
+
     Returns:
-        (freqs, raw_s1_db, raw_s2_db, bandpass_s1_db, bandpass_s2_db)
+        (freqs, raw_s1_db, raw_s2_db, bandpass_s1_db, bandpass_s2_db, n_s1, n_s2)
     """
     params = params or {}
     window_ms = float(params.get("fft_window_ms", 100.0))
+    max_peaks_per_type = int(params.get("fft_max_peaks_per_type", 100))
 
-    audio_raw, full_sr = librosa.load(audio_path, sr=None, mono=True)
+    if target_sr is not None:
+        audio_raw, full_sr = librosa.load(audio_path, sr=target_sr, mono=True)
+    else:
+        audio_raw, full_sr = librosa.load(audio_path, sr=None, mono=True)
     if audio_raw.size == 0:
         logging.warning("Empty audio file for FFT profiles.")
-        return (
-            np.array([]), np.array([]), np.array([]),
-            np.array([]), np.array([]),
-        )
+        empty = np.array([])
+        return (empty, empty, empty, empty, empty, 0, 0)
 
-    s1_indices, s2_indices = _collect_s1_s2_indices(beat_debug_info)
-    s1_full = _peak_indices_to_full_rate(s1_indices, envelope_sample_rate, full_sr)
-    s2_full = _peak_indices_to_full_rate(s2_indices, envelope_sample_rate, full_sr)
+    s1_indices, s2_indices = _collect_s1_s2_indices(beat_debug_info, paired_s1_only=True)
+    s1_selected, s2_selected = _select_top_peaks_by_confidence(
+        beat_debug_info, s1_indices, s2_indices, max_per_type=max_peaks_per_type
+    )
+    s1_full = _peak_indices_to_full_rate(s1_selected, envelope_sample_rate, full_sr)
+    s2_full = _peak_indices_to_full_rate(s2_selected, envelope_sample_rate, full_sr)
 
     # Envelope amplitudes at each peak (for amplitude normalization)
     env = np.asarray(audio_envelope)
-    s1_amps = np.array([env[min(int(idx), len(env) - 1)] for idx in s1_indices], dtype=np.float64)
-    s2_amps = np.array([env[min(int(idx), len(env) - 1)] for idx in s2_indices], dtype=np.float64)
+    s1_amps = np.array([env[min(int(idx), len(env) - 1)] for idx in s1_selected], dtype=np.float64)
+    s2_amps = np.array([env[min(int(idx), len(env) - 1)] for idx in s2_selected], dtype=np.float64)
 
     window_samples = int(round(window_ms * 0.001 * full_sr))
     half_samples = window_samples // 2
@@ -166,107 +214,110 @@ def compute_fft_profiles(
         audio_preproc, full_sr, s1_full, s2_full, s1_amps, s2_amps, n_fft, half_samples
     )
 
+    # Align S2 to S1 in a neutral high band so curves converge there (shape-only difference in 0–500 Hz)
+    neutral_low = float(params.get("fft_neutral_band_low_hz", 3000.0))
+    neutral_high = float(params.get("fft_neutral_band_high_hz", 5000.0))
+    raw_s1_db, raw_s2_db = _align_s2_to_s1_in_band(freqs, raw_s1_db, raw_s2_db, neutral_low, neutral_high)
+    preproc_s1_db, preproc_s2_db = _align_s2_to_s1_in_band(freqs, preproc_s1_db, preproc_s2_db, neutral_low, neutral_high)
+
     logging.info(
         f"FFT profiles: raw ({n_s1_raw} S1, {n_s2_raw} S2), bandpass ({n_s1_pre} S1, {n_s2_pre} S2), "
         f"{full_sr} Hz, {window_ms} ms window"
     )
-    return freqs, raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db
+    return freqs, raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db, n_s1_raw, n_s2_raw
 
 
-def save_fft_profiles_html(
-    audio_path: str,
-    beat_debug_info: Dict,
-    envelope_sample_rate: int,
-    output_path: str,
-    audio_envelope: np.ndarray,
+def _align_s2_to_s1_in_band(
+    freqs: np.ndarray,
+    profile_s1_db: np.ndarray,
+    profile_s2_db: np.ndarray,
+    low_hz: float,
+    high_hz: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Shift S2 profile so its mean dB in [low_hz, high_hz] equals S1's (neutral-band alignment)."""
+    mask = (freqs >= low_hz) & (freqs <= high_hz)
+    if not np.any(mask):
+        return profile_s1_db, profile_s2_db
+    mean_s1 = float(np.nanmean(profile_s1_db[mask]))
+    mean_s2 = float(np.nanmean(profile_s2_db[mask]))
+    offset = mean_s1 - mean_s2
+    return profile_s1_db, profile_s2_db + offset
+
+
+def aggregate_fft_profiles(
+    file_results: List[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]],
     params: Optional[Dict] = None,
-) -> None:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute FFT profiles and save a minimal HTML plot.
-
-    Args:
-        audio_path: Path to the WAV file.
-        beat_debug_info: From analysis_data["beat_debug_info"].
-        envelope_sample_rate: Sample rate used for peak detection (e.g. 600 Hz).
-        output_path: Path for the output HTML file.
-        audio_envelope: Envelope used for peak detection; amplitudes used for normalization.
-        params: Optional config dict for fft_window_ms.
+    Aggregate FFT profiles from multiple files (same frequency grid assumed, e.g. target_sr=32000).
+    Each file_result is (freqs, raw_s1_db, raw_s2_db, bandpass_s1_db, bandpass_s2_db, n_s1, n_s2).
+    Returns (freqs, agg_raw_s1, agg_raw_s2, agg_bandpass_s1, agg_bandpass_s2) weighted by peak counts.
+    Applies neutral-band alignment (S2 to S1) after aggregation when params has fft_neutral_band_*.
     """
+    if not file_results:
+        empty = np.array([])
+        return (empty, empty, empty, empty, empty)
+    freqs = file_results[0][0]
+    n_bins = len(freqs)
+    sum_raw_s1 = np.zeros(n_bins, dtype=np.float64)
+    sum_raw_s2 = np.zeros(n_bins, dtype=np.float64)
+    sum_bandpass_s1 = np.zeros(n_bins, dtype=np.float64)
+    sum_bandpass_s2 = np.zeros(n_bins, dtype=np.float64)
+    total_n_s1 = 0
+    total_n_s2 = 0
+    for (f, r1, r2, b1, b2, n1, n2) in file_results:
+        if len(f) != n_bins:
+            continue
+        sum_raw_s1 += r1 * n1
+        sum_raw_s2 += r2 * n2
+        sum_bandpass_s1 += b1 * n1
+        sum_bandpass_s2 += b2 * n2
+        total_n_s1 += n1
+        total_n_s2 += n2
+    if total_n_s1 == 0 and total_n_s2 == 0:
+        return (freqs, sum_raw_s1, sum_raw_s2, sum_bandpass_s1, sum_bandpass_s2)
+    if total_n_s1 > 0:
+        sum_raw_s1 /= total_n_s1
+        sum_bandpass_s1 /= total_n_s1
+    if total_n_s2 > 0:
+        sum_raw_s2 /= total_n_s2
+        sum_bandpass_s2 /= total_n_s2
     params = params or {}
-    s1_indices, s2_indices = _collect_s1_s2_indices(beat_debug_info)
-    n_s1, n_s2 = len(s1_indices), len(s2_indices)
-    if n_s1 == 0:
-        logging.info("FFT profiles: no S1 labels; skipping FFT profiles HTML.")
-        return
-    if n_s2 <= 0.5 * n_s1:
-        logging.warning(
-            "FFT profiles: S2 labels (%d) are not > 50%% of S1 labels (%d); skipping (insufficient data).",
-            n_s2,
-            n_s1,
-        )
-        return
+    neutral_low = float(params.get("fft_neutral_band_low_hz", 3000.0))
+    neutral_high = float(params.get("fft_neutral_band_high_hz", 5000.0))
+    sum_raw_s1, sum_raw_s2 = _align_s2_to_s1_in_band(freqs, sum_raw_s1, sum_raw_s2, neutral_low, neutral_high)
+    sum_bandpass_s1, sum_bandpass_s2 = _align_s2_to_s1_in_band(freqs, sum_bandpass_s1, sum_bandpass_s2, neutral_low, neutral_high)
+    return (freqs, sum_raw_s1, sum_raw_s2, sum_bandpass_s1, sum_bandpass_s2)
 
-    freqs, raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db = compute_fft_profiles(
-        audio_path, beat_debug_info, envelope_sample_rate, audio_envelope, params
-    )
-    if freqs.size == 0:
-        logging.warning("No FFT data to plot; skipping FFT profiles HTML.")
-        return
 
-    window_ms = float(params.get("fft_window_ms", 100.0))
+def _build_fft_figure(
+    freqs: np.ndarray,
+    raw_s1_db: np.ndarray,
+    raw_s2_db: np.ndarray,
+    bandpass_s1_db: np.ndarray,
+    bandpass_s2_db: np.ndarray,
+    window_ms: float = 100.0,
+) -> go.Figure:
+    """Build the shared FFT profile Plotly figure (dB + linear, 0–500 Hz)."""
     trace_style = dict(width=1.5)
-
+    raw_s1_lin = np.power(10.0, raw_s1_db / 20.0)
+    raw_s2_lin = np.power(10.0, raw_s2_db / 20.0)
+    bandpass_s1_lin = np.power(10.0, bandpass_s1_db / 20.0)
+    bandpass_s2_lin = np.power(10.0, bandpass_s2_db / 20.0)
+    linear_vals = np.concatenate([raw_s1_lin, raw_s2_lin, bandpass_s1_lin, bandpass_s2_lin])
+    linear_min = float(np.min(linear_vals))
+    linear_max = float(np.max(linear_vals))
+    pad = (linear_max - linear_min) * 0.05 if linear_max > linear_min else 0.1
+    linear_range = [max(0, linear_min - pad), linear_max + pad]
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=freqs,
-            y=raw_s1_db,
-            name="S1 (raw)",
-            line=trace_style,
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=freqs,
-            y=raw_s2_db,
-            name="S2 (raw)",
-            line=trace_style,
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=freqs,
-            y=preproc_s1_db,
-            name="S1 (bandpass)",
-            line=trace_style,
-            visible="legendonly",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=freqs,
-            y=preproc_s2_db,
-            name="S2 (bandpass)",
-            line=trace_style,
-            visible="legendonly",
-        )
-    )
-    # Auto-scale x-axis: show 0 Hz up to the frequency where dB drops to 50% of max dB value
-    max_db = float(np.nanmax([raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db]))
-    cutoff_db = 0.55 * max_db  # 50% of the dB value (not 50% of linear magnitude)
-    combined = np.maximum(
-        np.maximum(raw_s1_db, raw_s2_db),
-        np.maximum(preproc_s1_db, preproc_s2_db),
-    )
-    above_cutoff = combined >= cutoff_db
-    if np.any(above_cutoff):
-        last_idx = int(np.nanmax(np.where(above_cutoff)[0]))
-        x_max = float(freqs[last_idx])
-        # Small margin so the cutoff point is visible
-        x_max = min(freqs[-1], x_max * 1.05)
-    else:
-        x_max = float(freqs[-1])
-
+    fig.add_trace(go.Scatter(x=freqs, y=raw_s1_db, name="S1 (raw)", line=trace_style))
+    fig.add_trace(go.Scatter(x=freqs, y=raw_s2_db, name="S2 (raw)", line=trace_style))
+    fig.add_trace(go.Scatter(x=freqs, y=bandpass_s1_db, name="S1 (bandpass)", line=trace_style, visible="legendonly"))
+    fig.add_trace(go.Scatter(x=freqs, y=bandpass_s2_db, name="S2 (bandpass)", line=trace_style, visible="legendonly"))
+    fig.add_trace(go.Scatter(x=freqs, y=raw_s1_lin, name="S1 (raw)", line=trace_style, visible=False))
+    fig.add_trace(go.Scatter(x=freqs, y=raw_s2_lin, name="S2 (raw)", line=trace_style, visible=False))
+    fig.add_trace(go.Scatter(x=freqs, y=bandpass_s1_lin, name="S1 (bandpass)", line=trace_style, visible=False))
+    fig.add_trace(go.Scatter(x=freqs, y=bandpass_s2_lin, name="S2 (bandpass)", line=trace_style, visible=False))
     fig.update_layout(
         template="plotly_dark",
         title=f"S1 / S2 FFT Profiles ({window_ms:.0f} ms window)",
@@ -277,15 +328,37 @@ def save_fft_profiles_html(
         dragmode="pan",
         uirevision="layout-stable",
         autosize=True,
+        updatemenus=[
+            dict(
+                active=0,
+                type="dropdown",
+                direction="down",
+                x=0.01,
+                y=1.08,
+                xanchor="left",
+                yanchor="top",
+                buttons=[
+                    dict(label="dB", method="update", args=[
+                        {"visible": [True, True, "legendonly", "legendonly", False, False, False, False]},
+                        {"yaxis.title": "Magnitude (dB)", "yaxis.range": [-50, 90]},
+                    ]),
+                    dict(label="Linear", method="update", args=[
+                        {"visible": [False, False, False, False, True, True, "legendonly", "legendonly"]},
+                        {"yaxis.title": "Magnitude", "yaxis.range": linear_range},
+                    ]),
+                ],
+            ),
+        ],
     )
-    fig.update_xaxes(range=[0, x_max], automargin=False)
-    fig.update_yaxes(automargin=False)
+    fig.update_xaxes(range=[0, 500], automargin=False)
+    fig.update_yaxes(range=[0, 70], automargin=False)
+    return fig
 
+
+def _write_fft_html(fig: go.Figure, output_path: str, page_title: str, header_label: str) -> None:
+    """Write FFT figure to HTML with shared wrapper."""
     plot_config = {"scrollZoom": True, "showTips": False}
     plotly_html = fig.to_html(full_html=False, config=plot_config, include_plotlyjs="cdn")
-
-    audio_file_name = os.path.basename(audio_path)
-    page_title = f"S1 / S2 FFT Profiles - {audio_file_name}"
     wrapper_html = f"""<!DOCTYPE html>
 <html style="height:100%;margin:0;padding:0;">
 <head>
@@ -304,7 +377,7 @@ def save_fft_profiles_html(
 <body>
     <div id="fft-header">
         <span class="chart-toolbar-title">S1 / S2 FFT Profiles – </span>
-        <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
+        <span id="audio-file-name" title="{header_label}">{header_label}</span>
     </div>
     <div id="fft-plot-container">
         {plotly_html}
@@ -314,3 +387,80 @@ def save_fft_profiles_html(
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(wrapper_html)
     logging.info(f"FFT profiles saved to {output_path}")
+
+
+def save_fft_profiles_html(
+    audio_path: str,
+    beat_debug_info: Dict,
+    envelope_sample_rate: int,
+    output_path: str,
+    audio_envelope: np.ndarray,
+    params: Optional[Dict] = None,
+    fft_result: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]] = None,
+) -> None:
+    """
+    Compute FFT profiles and save a minimal HTML plot.
+
+    Args:
+        audio_path: Path to the WAV file.
+        beat_debug_info: From analysis_data["beat_debug_info"].
+        envelope_sample_rate: Sample rate used for peak detection (e.g. 600 Hz).
+        output_path: Path for the output HTML file.
+        audio_envelope: Envelope used for peak detection; amplitudes used for normalization.
+        params: Optional config dict for fft_window_ms.
+        fft_result: If provided, use this 7-tuple from compute_fft_profiles instead of computing (e.g. for aggregate collection).
+    """
+    params = params or {}
+    if fft_result is not None:
+        freqs, raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db = fft_result[0], fft_result[1], fft_result[2], fft_result[3], fft_result[4]
+        if freqs.size == 0:
+            logging.warning("No FFT data to plot; skipping FFT profiles HTML.")
+            return
+        window_ms = float(params.get("fft_window_ms", 100.0))
+        fig = _build_fft_figure(freqs, raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db, window_ms)
+        _write_fft_html(fig, output_path, f"S1 / S2 FFT Profiles - {os.path.basename(audio_path)}", os.path.basename(audio_path))
+        return
+    s1_indices, s2_indices = _collect_s1_s2_indices(beat_debug_info, paired_s1_only=True)
+    n_s1, n_s2 = len(s1_indices), len(s2_indices)
+    if n_s1 == 0:
+        logging.info("FFT profiles: no paired S1 labels; skipping FFT profiles HTML.")
+        return
+    if n_s2 <= 0.5 * n_s1:
+        logging.warning(
+            "FFT profiles: S2 labels (%d) are not > 50%% of S1 labels (%d); skipping (insufficient data).",
+            n_s2,
+            n_s1,
+        )
+        return
+
+    result = compute_fft_profiles(
+        audio_path, beat_debug_info, envelope_sample_rate, audio_envelope, params
+    )
+    freqs, raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db = result[0], result[1], result[2], result[3], result[4]
+    if freqs.size == 0:
+        logging.warning("No FFT data to plot; skipping FFT profiles HTML.")
+        return
+
+    window_ms = float(params.get("fft_window_ms", 100.0))
+    fig = _build_fft_figure(freqs, raw_s1_db, raw_s2_db, preproc_s1_db, preproc_s2_db, window_ms)
+    audio_file_name = os.path.basename(audio_path)
+    _write_fft_html(fig, output_path, f"S1 / S2 FFT Profiles - {audio_file_name}", audio_file_name)
+
+
+def save_aggregate_fft_profiles_html(
+    freqs: np.ndarray,
+    raw_s1_db: np.ndarray,
+    raw_s2_db: np.ndarray,
+    bandpass_s1_db: np.ndarray,
+    bandpass_s2_db: np.ndarray,
+    output_path: str,
+    params: Optional[Dict] = None,
+) -> None:
+    """Save aggregated FFT profiles (from aggregate_fft_profiles) to HTML."""
+    params = params or {}
+    window_ms = float(params.get("fft_window_ms", 100.0))
+    if freqs.size == 0:
+        logging.warning("No FFT data for aggregate; skipping aggregate FFT HTML.")
+        return
+    fig = _build_fft_figure(freqs, raw_s1_db, raw_s2_db, bandpass_s1_db, bandpass_s2_db, window_ms)
+    _write_fft_html(fig, output_path, "Aggregated S1 / S2 FFT Profiles", "Aggregated")
