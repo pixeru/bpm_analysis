@@ -61,6 +61,7 @@ class PeakClassifier:
         analysis_data: Dict[str, Any] = {}
         dynamic_noise_floor, trough_indices = precomputed_noise_floor, precomputed_troughs
         all_peaks = self._find_raw_peaks(dynamic_noise_floor.values)
+        all_peaks = self._refine_peaks_by_center_of_mass(all_peaks)
 
         analysis_data["dynamic_noise_floor_series"] = dynamic_noise_floor
         analysis_data["trough_indices"] = trough_indices
@@ -346,6 +347,70 @@ class PeakClassifier:
         peaks, _ = find_peaks(self.audio_envelope, height=height_threshold, prominence=prominence_thresh, distance=min_peak_dist_samples)
         logging.info(f"Found {len(peaks)} raw peaks using dynamic height threshold.")
         return peaks
+
+    def _refine_peaks_by_center_of_mass(self, peaks: np.ndarray) -> np.ndarray:
+        """
+        Refines each peak to the super-Gaussian-weighted center-of-mass of the envelope
+        in a window around it. If two refined positions are within 50 ms, keeps the one
+        with higher weighted mass (drops the smaller / noisier one).
+        """
+        if len(peaks) == 0:
+            return peaks
+        envelope = self.audio_envelope
+        n_samples = len(envelope)
+        window_ms = float(self.params.get("peak_refine_window_ms", 100))
+        max_shift_ms = float(self.params.get("peak_refine_max_shift_ms", 10))
+        n_exp = float(self.params.get("peak_refine_super_gaussian_n", 4))
+        window_samples = int(window_ms * self.sample_rate / 1000)
+        half = max(1, window_samples // 2)
+        max_shift_samples = max(0, int(max_shift_ms * self.sample_rate / 1000))
+        # Sigma so that flat top spans center; standard choice ~ window/4
+        sigma = max(1.0, window_samples / 4.0)
+        min_dist_samples = max(1, int(0.05 * self.sample_rate))  # 50 ms
+
+        refined_with_mass: List[Tuple[int, float, int]] = []
+        for peak_idx in peaks:
+            left = max(0, peak_idx - half)
+            right = min(n_samples - 1, peak_idx + half)
+            t = np.arange(left, right + 1, dtype=np.float64)
+            dist = np.abs(t - peak_idx)
+            weights = np.exp(-((dist / sigma) ** n_exp))
+            weighted_env = weights * envelope[left : right + 1]
+            mass = float(np.sum(weighted_env))
+            if mass <= 0:
+                refined_idx = int(peak_idx)
+            else:
+                com = float(np.sum(t * weighted_env) / mass)
+                com_clipped = np.clip(
+                    com,
+                    peak_idx - max_shift_samples,
+                    peak_idx + max_shift_samples,
+                )
+                refined_idx = int(round(com_clipped))
+                refined_idx = max(0, min(n_samples - 1, refined_idx))
+            refined_with_mass.append((refined_idx, mass, int(peak_idx)))
+
+        refined_with_mass.sort(key=lambda x: x[0])
+        result: List[Tuple[int, float, int]] = []
+        for r, m, o in refined_with_mass:
+            if not result:
+                result.append((r, m, o))
+                continue
+            prev_r, prev_m, _ = result[-1]
+            if (r - prev_r) < min_dist_samples:
+                if m > prev_m:
+                    result[-1] = (r, m, o)
+            else:
+                result.append((r, m, o))
+
+        out = np.array([r for r, _, _ in result], dtype=peaks.dtype)
+        if len(out) < len(peaks):
+            logging.info(
+                "Peak refinement: %d -> %d peaks after CoM shift and 50 ms merge.",
+                len(peaks),
+                len(out),
+            )
+        return np.sort(out)
 
     def _classify_lone_peak(
         self,

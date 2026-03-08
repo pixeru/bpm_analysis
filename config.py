@@ -47,6 +47,11 @@ DEFAULT_PARAMS = {
     "peak_prominence_quantile": 0.50,    # Min prominence = this quantile of envelope. Higher reduces false peaks (e.g. Hilbert ripple).
     "trough_prominence_quantile": 0.3,   # How much a dip must stand out to be considered a 'trough'.
 
+    # Peak position refinement: shift each raw peak to super-Gaussian-weighted center-of-mass (~100 ms window).
+    "peak_refine_window_ms": 100,        # Window (ms) around each peak for CoM; ~100 ms covers typical S1 extent.
+    "peak_refine_max_shift_ms": 10,      # Cap shift so noisy envelope cannot pull peak more than this (ms).
+    "peak_refine_super_gaussian_n": 4,   # Super-Gaussian exponent (flat top); n=4 gives flat center, smooth falloff.
+
     # =================================================================================
     # 3. Noise Estimation & Rejection
     # Rules for calculating the dynamic noise floor and vetoing noisy peaks.
