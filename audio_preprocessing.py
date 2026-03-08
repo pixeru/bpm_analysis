@@ -11,7 +11,7 @@ from config import DEFAULT_OUTPUT_OPTIONS
 import numpy as np
 import pandas as pd
 from scipy.io import wavfile
-from scipy.signal import butter, filtfilt, welch, iirnotch, find_peaks, hilbert
+from scipy.signal import butter, filtfilt, sosfiltfilt, welch, iirnotch, find_peaks, hilbert
 import librosa
 
 try:
@@ -134,6 +134,46 @@ def _detect_and_remove_stationary_hum(
         return audio_data, None
 
 
+def apply_bandpass_only(audio: np.ndarray, sample_rate: int, params: Dict) -> np.ndarray:
+    """
+    Apply only bandpass filtering (no hum removal). Used for FFT profiles so
+    preprocessed traces reflect spectral shape within the band of interest.
+    Returns filtered audio at the same sample rate.
+    """
+    if audio.size == 0:
+        return audio
+    lowcut = float(params.get("preprocess_bandpass_low_hz", 20.0))
+    highcut = float(params.get("preprocess_bandpass_high_hz", 220.0))
+    order = int(params.get("preprocess_bandpass_order", 2))
+    nyquist = 0.5 * sample_rate
+    low, high = lowcut / nyquist, highcut / nyquist
+    if high >= 1.0:
+        return audio
+    sos = butter(order, [low, high], btype="band", output="sos")
+    return sosfiltfilt(sos, audio)
+
+
+def apply_signal_preprocessing(
+    audio: np.ndarray, sample_rate: int, params: Dict
+) -> np.ndarray:
+    """
+    Apply hum removal and bandpass to audio. Used for FFT profiles (preprocessed traces).
+    Returns filtered audio at the same sample rate.
+    """
+    if audio.size == 0:
+        return audio
+    filtered, _ = _detect_and_remove_stationary_hum(audio, sample_rate, params)
+    lowcut = float(params.get("preprocess_bandpass_low_hz", 20.0))
+    highcut = float(params.get("preprocess_bandpass_high_hz", 220.0))
+    order = int(params.get("preprocess_bandpass_order", 2))
+    nyquist = 0.5 * sample_rate
+    low, high = lowcut / nyquist, highcut / nyquist
+    if high >= 1.0:
+        return filtered
+    sos = butter(order, [low, high], btype="band", output="sos")
+    return sosfiltfilt(sos, filtered)
+
+
 def convert_to_wav(file_path: str, target_path: str) -> bool:
     """Converts a given audio file to WAV format."""
     if not AudioSegment:
@@ -206,8 +246,8 @@ def _compute_band_envelope(
     high = min(1.0 - 1e-6, high_hz / nyquist)
     if low >= high:
         return np.zeros_like(audio, dtype=np.float64)
-    b, a = butter(2, [low, high], btype="band")
-    filtered = filtfilt(b, a, audio)
+    sos = butter(2, [low, high], btype="band", output="sos")
+    filtered = sosfiltfilt(sos, audio)
     analytic = hilbert(filtered)
     envelope_raw = np.abs(analytic).astype(np.float64)
     envelope = pd.Series(envelope_raw).rolling(
@@ -304,8 +344,8 @@ def preprocess_audio(
     if high >= 1.0:
         raise ValueError(f"Cannot create a {highcut}Hz filter. The sample rate of {new_sample_rate}Hz is too low.")
 
-    b, a = butter(order, [low, high], btype="band")
-    audio_filtered = filtfilt(b, a, audio_downsampled)
+    sos = butter(order, [low, high], btype="band", output="sos")
+    audio_filtered = sosfiltfilt(sos, audio_downsampled)
 
     if save_debug_file:
         base_name = os.path.basename(os.path.splitext(file_path)[0])

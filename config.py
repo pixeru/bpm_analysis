@@ -13,9 +13,9 @@ DEFAULT_PARAMS = {
     "save_filtered_wav": True,    # If True, saves a .wav file of the filtered audio for debugging.
 
     # Main preprocessing: target sample rate and bandpass (single wide band before envelope); typical PCG range for S1/S2.
-    "preprocess_target_sample_rate": 550,   # Resample to this Hz for analysis; lower = faster, less detail.
+    "preprocess_target_sample_rate": 600,   # Resample to this Hz for analysis; lower = faster, less detail.
     "preprocess_bandpass_low_hz": 30.0,     # increasing this reduces the amplitude of S1.
-    "preprocess_bandpass_high_hz": 220.0,
+    "preprocess_bandpass_high_hz": 290.0,
     "preprocess_bandpass_order": 2,   # Butterworth order; higher order not yet validated for this pipeline.
 
     "enable_hum_removal": True,           # Detect and notch narrow low-frequency hums if present
@@ -30,10 +30,10 @@ DEFAULT_PARAMS = {
 
     # --- Multi-band S1 vs S2 (spectral fingerprint) ---
     "enable_multiband_s1_s2": True,      # Use S1-band vs S2-band energy to adjust pairing confidence.
-    "s1_band_low_hz": 20.0,             # S1 typical range 20-60 Hz.
+    "s1_band_low_hz": 25.0,             # S1 typical range 20-60 Hz.
     "s1_band_high_hz": 60.0,
-    "s2_band_low_hz": 170.0,             # S2 typical range 60-200 Hz.
-    "s2_band_high_hz": 220.0,
+    "s2_band_low_hz": 200.0,             # S2 typical range 60-200 Hz.
+    "s2_band_high_hz": 290.0,
     "multiband_boost_max": 0.1,         # Max confidence boost when band energies support S1-S2.
     "multiband_penalty_max": 0.1,      # Max confidence penalty when bands suggest wrong order.
     "multiband_peak_window_ms": 130.0,   # Time window (ms) centered on each peak; covers whole beat. Converted to samples using sample rate.
@@ -189,6 +189,10 @@ DEFAULT_PARAMS = {
     "optimize_long_plots": False,                # Whether to enable long-plot optimization.
     "long_plot_duration_threshold_sec": 600.0,   # Duration threshold (seconds) to treat a file as "long" (default: 10 minutes).
 
+    # --- 7.1.1. FFT Profiles (S1/S2 frequency spectra from raw and preprocessed audio) ---
+    "enable_fft_profiles": True,                 # If True, generate separate HTML with S1/S2 FFT profiles.
+    "fft_window_ms": 100.0,                     # Time window (ms) centered on each peak for FFT.
+
     # --- 7.2. Trapezoid Artifact Detection ---
     # These control detection of brief, trapezoid-shaped BPM jumps that are often extra-beat artifacts.
     "trapezoid_rate_threshold": 7.0,            # BPM/s: physiologically implausible rate for rise/fall edges.
@@ -211,5 +215,6 @@ DEFAULT_OUTPUT_OPTIONS = {
     "filtered_wav": True,
     "bpm_text": False,
     "spectrogram": True,
+    "fft_profiles": True,
     "regression_log": False,
 }

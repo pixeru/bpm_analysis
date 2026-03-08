@@ -37,6 +37,7 @@ OUTPUT_FILE_OPTIONS = (
     ("png", "Plot PNG (auto-export)"),
     ("csv", "CSV Data"),
     ("spectrogram", "HTML Spectrogram"),
+    ("fft_profiles", "S1/S2 FFT Profiles (HTML)"),
     ("summary", "Summary Report"),
     ("debug", "Debug Report"),
     ("filtered_wav", "Filtered Audio WAV"),
@@ -127,12 +128,13 @@ class BPMApp:
 
         for i, (opt_key, label) in enumerate(OUTPUT_FILE_OPTIONS):
             var = getattr(self, "output_" + opt_key)
+            full_width = i >= 8
             ttk.Checkbutton(
                 output_frame, text=label, variable=var, command=self._update_output_status
             ).grid(
-                row=i // 2 if i < 8 else 4,
-                column=0 if i >= 8 else i % 2,
-                columnspan=2 if i >= 8 else 1,
+                row=i // 2 if i < 8 else 4 + (i - 8),
+                column=0 if full_width else i % 2,
+                columnspan=2 if full_width else 1,
                 sticky="w",
                 padx=(0, 20),
             )
@@ -143,18 +145,18 @@ class BPMApp:
             output_frame,
             text="Optimize long HTML plots (>10 min): hide detailed debug traces to reduce file size",
             variable=self.optimize_long_plots,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
 
         # Output location option (does not change output type counts)
         ttk.Checkbutton(
             output_frame,
             text="Save outputs next to input files (instead of 'processed_files')",
             variable=self.output_to_input_dir,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=(0, 20), pady=(10, 0))
 
         # Select All/None buttons
         btn_frame_output = ttk.Frame(output_frame)
-        btn_frame_output.grid(row=7, column=0, columnspan=2, pady=(10, 0))
+        btn_frame_output.grid(row=8, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(btn_frame_output, text="Select All", command=self.select_all_outputs, 
                   bootstyle=SECONDARY).grid(row=0, column=0, padx=(0, 5))
         ttk.Button(btn_frame_output, text="Select None", command=self.select_none_outputs, 
@@ -162,7 +164,7 @@ class BPMApp:
 
         # Output status label
         self.output_status_label = ttk.Label(output_frame, text="", font=("TkDefaultFont", 9))
-        self.output_status_label.grid(row=8, column=0, columnspan=2, pady=(5, 0))
+        self.output_status_label.grid(row=9, column=0, columnspan=2, pady=(5, 0))
 
         # Bind non-output-type options to save only (no status label update)
         self.output_to_input_dir.trace("w", lambda *args: self.save_ui_settings())
@@ -355,13 +357,13 @@ class BPMApp:
             messagebox.showwarning("No Reports", "No processed files directory found. Run an analysis first.")
             return
         
-        # Find all HTML files matching the pattern *_bpm_plot.html
+        # Find all HTML report files (BPM plot or FFT profiles); open the most recent
+        html_suffixes = ("_bpm_plot.html", "_fft_profiles.html")
         html_files = []
         try:
             for filename in os.listdir(output_dir):
-                if filename.endswith("_bpm_plot.html"):
+                if any(filename.endswith(suffix) for suffix in html_suffixes):
                     file_path = os.path.join(output_dir, filename)
-                    # Get modification time
                     mtime = os.path.getmtime(file_path)
                     html_files.append((mtime, file_path, filename))
         except Exception as e:
@@ -369,7 +371,10 @@ class BPMApp:
             return
         
         if not html_files:
-            messagebox.showwarning("No Reports", "No HTML reports found. Run an analysis first.")
+            messagebox.showwarning(
+                "No Reports",
+                "No HTML reports found (BPM plot or FFT profiles). Run an analysis first.",
+            )
             return
         
         # Sort by modification time (most recent first)

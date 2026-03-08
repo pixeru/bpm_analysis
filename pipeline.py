@@ -28,6 +28,7 @@ from hrv import (
     calculate_global_hrv_frequency,
 )
 from correction import correct_peaks_by_rhythm, fix_rhythmic_discontinuities
+from fft_profiles import save_fft_profiles_html
 
 
 class _NoisyAlgorithmLogFilter(logging.Filter):
@@ -309,6 +310,22 @@ def analyze_wav_file(wav_file_path: str, params: Dict, start_bpm_hint: Optional[
             logging.info("Skipping BPM text export as requested.")
     else:
         logging.info("Skipping all report generation as requested.")
+
+    # FFT profiles: aggregate S1/S2 frequency spectra from raw audio (separate minimal HTML)
+    if params.get("enable_fft_profiles", True) and output_options.get("fft_profiles", True):
+        try:
+            base_name = os.path.basename(os.path.splitext(original_file_path)[0])
+            fft_output_path = os.path.join(output_directory, f"{base_name}_fft_profiles.html")
+            save_fft_profiles_html(
+                wav_file_path,
+                analysis_data.get("beat_debug_info", {}),
+                sample_rate,
+                fft_output_path,
+                audio_envelope,
+                params,
+            )
+        except Exception as e:
+            logging.warning(f"FFT profiles generation failed: {e}")
 
     duration = time.time() - start_time
     logging.info(f"--- Analysis stage finished in {duration:.2f} seconds (post-conversion). ---")
