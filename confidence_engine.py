@@ -58,6 +58,8 @@ class AnalysisState:
         s1_s2_contractility_history: Rolling window of the last N accepted S1/S2
             prominence ratios. Used by `PairingEngine` to build an empirical
             contractility expectation once enough paired beats have been observed.
+        recent_s1_outcomes: (time_sec, was_paired) for each S1 we decided on; used to
+            compute pair rate in the last N seconds for blending history vs BPM expected.
     """
 
     dynamic_noise_floor: pd.Series
@@ -75,6 +77,7 @@ class AnalysisState:
     pairing_ratio_override: Optional[float] = None
     s1_s2_interval_history: List[float] = field(default_factory=list)  # Last N accepted S1-S2 intervals (sec) for expected-S1-S2
     s1_s2_contractility_history: List[float] = field(default_factory=list)  # Last N accepted S1/S2 prominence ratios for expected contractility
+    recent_s1_outcomes: List[Tuple[float, bool]] = field(default_factory=list)  # (time_sec, was_paired) for pair-rate window
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +91,7 @@ def calculate_bpm_intervals(bpm: float, params: Dict) -> Dict[str, float]:
     Returns a dictionary with:
       - 'rr_interval'     : full S1→S1 (R-R) interval
       - 's1_s2_min'       : minimum plausible S1→S2 interval
-      - 's1_s2_nominal'   : expected S1→S2 (Weissler-style if enabled, else fraction of R-R)
+      - 's1_s2_nominal'   : expected S1→S2 (Weissler: ET = ref_et - slope*(BPM - ref_bpm))
       - 's1_s2_max'       : maximum plausible S1→S2 interval (capped)
       - 's2_s1_nominal'   : nominal S2→S1 interval (R-R minus S1→S2 nominal)
     """
@@ -97,20 +100,18 @@ def calculate_bpm_intervals(bpm: float, params: Dict) -> Dict[str, float]:
     rr_interval = 60.0 / bpm
 
     min_frac = params.get("min_s1_s2_interval_rr_fraction", 0.35)
-    nominal_frac = params.get("s1_s2_interval_rr_fraction", 0.5)
     min_abs = params.get("min_s1_s2_interval_sec", 0.15)
-    cap_abs = params.get("s1_s2_interval_cap_sec", rr_interval * nominal_frac)
+    cap_abs = params.get("s1_s2_interval_cap_sec", 0.4)
 
     s1_s2_min = max(rr_interval * min_frac, min_abs)
-    if params.get("s1_s2_expected_use_weissler", False):
-        # Weissler-style: expected S1-S2 (ejection time) decreases with BPM (ms per BPM)
-        ref_et_ms = params.get("s1_s2_expected_weissler_ref_et_ms", 300)
-        ref_bpm = params.get("s1_s2_expected_weissler_ref_bpm", 60)
-        slope = params.get("s1_s2_expected_weissler_slope_ms_per_bpm", 1.0)
-        expected_et_ms = ref_et_ms - slope * (bpm - ref_bpm)
-        s1_s2_nominal = np.clip(expected_et_ms / 1000.0, min_abs, cap_abs)
-    else:
-        s1_s2_nominal = rr_interval * nominal_frac
+
+    # Weissler-style: ejection time shortens linearly with rising BPM
+    ref_et_ms = params.get("s1_s2_expected_weissler_ref_et_ms", 300)
+    ref_bpm = params.get("s1_s2_expected_weissler_ref_bpm", 60)
+    slope = params.get("s1_s2_expected_weissler_slope_ms_per_bpm", 1.0)
+    expected_et_ms = ref_et_ms - slope * (bpm - ref_bpm)
+    s1_s2_nominal = np.clip(expected_et_ms / 1000.0, min_abs, cap_abs)
+
     s1_s2_max = min(cap_abs, max(s1_s2_nominal, s1_s2_min))
     s2_s1_nominal = max(0.0, rr_interval - s1_s2_nominal)
 
@@ -165,56 +166,98 @@ def adjust_confidence_with_contractility(
     bpm: float,
     params: Dict,
     state: Optional[AnalysisState] = None,
+    current_time_sec: Optional[float] = None,
 ) -> Tuple[float, Dict[str, Any]]:
     """
     Contractility / prominence adjustment. S1/S2 ratio; expected from history or BPM power curve.
+    When contractility_expected_use_history is True, expected is blended by recent pair rate:
+    pair_rate in last N sec → weight history; (1 - pair_rate) → weight BPM (so many Lone S1s → more BPM).
     Single deviation from expected: inside band → boost (tent); outside → penalty (linear ramp).
 
     Returns (updated_confidence, step_dict) where step_dict is a confidence_trace step.
     """
-    # --- 1. Expected S1/S2: from history or BPM power curve ---
+    # --- 1. Expected S1/S2: history vs BPM, blended by pair rate in last N seconds ---
     history = getattr(state, "s1_s2_contractility_history", []) if state else []
     n_use = params.get("contractility_expected_history_count", 10)
-    # Use BPM formula until queue is at least half the window (e.g. first 5 of 10); then use history.
     min_for_history = max(1, n_use // 2)
-    use_history = params.get("contractility_expected_use_history", True) and len(history) >= min_for_history
-    if use_history:
+    use_history_flag = params.get("contractility_expected_use_history", True) and len(history) >= min_for_history
+
+    expected_ratio_bpm = _contractility_expected_ratio_bpm(bpm, params)
+    if use_history_flag:
         arr = np.array(history[-n_use:])
         if len(arr) > 2:
             arr = np.sort(arr)[1:-1]  # drop highest and lowest to reduce outlier impact
-        expected_ratio = float(np.mean(arr))
-        expected_source = f"past {len(history[-n_use:])} pairs"
+        expected_ratio_history = float(np.mean(arr))
     else:
-        expected_ratio = _contractility_expected_ratio_bpm(bpm, params)
+        expected_ratio_history = expected_ratio_bpm  # not used when not use_history_flag
+
+    # Pair rate in last N sec: 100% pairs → trust history; many Lone S1s → blend toward BPM
+    pair_rate = 1.0
+    if state is not None and current_time_sec is not None:
+        outcomes = getattr(state, "recent_s1_outcomes", [])
+        window_sec = params.get("contractility_pair_rate_window_sec", 5.0)
+        cutoff = current_time_sec - window_sec
+        in_window = [(t, p) for t, p in outcomes if t >= cutoff]
+        if in_window:
+            n_paired = sum(1 for _, p in in_window if p)
+            pair_rate = n_paired / len(in_window)
+
+    if use_history_flag:
+        expected_ratio = pair_rate * expected_ratio_history + (1.0 - pair_rate) * expected_ratio_bpm
+        expected_source = f"blend: {pair_rate:.0%} history + {1 - pair_rate:.0%} BPM (pair rate in last {params.get('contractility_pair_rate_window_sec', 5):.0f}s)"
+    else:
+        expected_ratio = expected_ratio_bpm
         expected_source = "BPM power curve"
 
-    # --- 2. Measured S1/S2 prominence ratio and deviation from expected ---
+    # --- 2. Measured S1/S2 prominence ratio ---
     actual_ratio = s1_prominence / (s2_prominence + 1e-9)
-    abs_deviation = abs(actual_ratio - expected_ratio)
 
-    # --- 3. Single deviation-based curve: band (boost) and ramp (penalty) ---
-    zero_crossing_frac = params.get("contractility_zero_crossing_fraction", 0.2)
-    ramp_frac = params.get("contractility_penalty_ramp_fraction", 0.4)
+    # --- 3. Asymmetric piecewise-linear curve: L2, L1, R_exp, R1, R2 ---
+    a_low = params.get("contractility_zero_crossing_low", 0.2)
+    a_high = params.get("contractility_zero_crossing_high", 0.2)
+    r_low = params.get("contractility_penalty_ramp_fraction_low", 0.4)
+    r_high = params.get("contractility_penalty_ramp_fraction_high", 0.4)
     boost_max = params.get("contractility_boost_max", 0.10)
     penalty_max = params.get("contractility_penalty_max", 0.30)
 
-    band_half_width = expected_ratio * zero_crossing_frac
-    ramp_width = expected_ratio * ramp_frac
+    L2 = expected_ratio * (1.0 - r_low)
+    L1 = expected_ratio * (1.0 - a_low)
+    R1 = expected_ratio * (1.0 + a_high)
+    R2 = expected_ratio * (1.0 + r_high)
 
     contractility_boost = 0.0
     contractility_penalty = 0.0
 
-    if abs_deviation <= band_half_width:
-        # Inside band: boost 0 at edge, max at center (tent)
-        if band_half_width > 1e-9:
-            t = 1.0 - (abs_deviation / band_half_width)
-            contractility_boost = boost_max * float(np.clip(t, 0, 1))
-    else:
-        # Outside band: penalty ramps from 0 at edge to penalty_max over ramp_width
-        excess = abs_deviation - band_half_width
-        if ramp_width > 1e-9:
-            t = excess / ramp_width
+    if actual_ratio < L2:
+        # Left of left ramp: full penalty
+        contractility_penalty = penalty_max
+    elif actual_ratio < L1:
+        # Left penalty ramp: (L2, -P_max) to (L1, 0)
+        span = L1 - L2
+        if span > 1e-9:
+            t = (L1 - actual_ratio) / span
             contractility_penalty = penalty_max * float(np.clip(t, 0, 1))
+    elif actual_ratio <= R1:
+        # Boost zone: (L1, 0) to (R_exp, B_max) to (R1, 0)
+        if actual_ratio <= expected_ratio:
+            span = expected_ratio - L1
+            if span > 1e-9:
+                t = (actual_ratio - L1) / span
+                contractility_boost = boost_max * float(np.clip(t, 0, 1))
+        else:
+            span = R1 - expected_ratio
+            if span > 1e-9:
+                t = (R1 - actual_ratio) / span
+                contractility_boost = boost_max * float(np.clip(t, 0, 1))
+    elif actual_ratio <= R2:
+        # Right penalty ramp: (R1, 0) to (R2, -P_max)
+        span = R2 - R1
+        if span > 1e-9:
+            t = (actual_ratio - R1) / span
+            contractility_penalty = penalty_max * float(np.clip(t, 0, 1))
+    else:
+        # Right of right ramp: full penalty
+        contractility_penalty = penalty_max
 
     confidence = base_confidence
     if contractility_boost > 0:
@@ -353,6 +396,14 @@ def _append_s1_s2_contractility(
     n_keep = params.get("contractility_expected_history_count", 10)
     if len(state.s1_s2_contractility_history) > n_keep:
         state.s1_s2_contractility_history = state.s1_s2_contractility_history[-n_keep:]
+
+
+def record_s1_outcome(state: AnalysisState, time_sec: float, was_paired: bool, params: Dict) -> None:
+    """Record an S1 decision (paired or lone) and trim recent_s1_outcomes to the pair-rate window."""
+    state.recent_s1_outcomes.append((time_sec, was_paired))
+    window_sec = params.get("contractility_pair_rate_window_sec", 5.0)
+    cutoff = time_sec - window_sec
+    state.recent_s1_outcomes = [(t, p) for t, p in state.recent_s1_outcomes if t >= cutoff]
 
 
 def _get_recent_s1_prominences_for_state(
@@ -509,6 +560,7 @@ class PairingEngine:
         }
 
         # --- Contractility model based on S1/S2 prominence ratio ---
+        current_time_sec = s1_candidate_idx / self.sample_rate
         confidence, contractility_step = adjust_confidence_with_contractility(
             base_confidence,
             s1_prominence,
@@ -516,6 +568,7 @@ class PairingEngine:
             bpm,
             self.params,
             state=state,
+            current_time_sec=current_time_sec,
         )
         steps.append(contractility_step)
 

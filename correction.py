@@ -56,7 +56,7 @@ def correct_peaks_by_rhythm(peaks: np.ndarray, audio_envelope: np.ndarray, sampl
     return np.array(corrected_peaks)
 
 
-def _fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray, debug_info: Dict,
+def fix_rhythmic_discontinuities(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray, debug_info: Dict,
                                   audio_envelope: np.ndarray, dynamic_noise_floor: pd.Series, params: Dict,
                                   sample_rate: int) -> Tuple[np.ndarray, Dict, int]:
     """

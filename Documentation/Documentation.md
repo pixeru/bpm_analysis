@@ -11,7 +11,7 @@ In a ideal world, the user should only need to enter a file, press run, and get 
 > [!say]
 > I want to write my code to be "self documenting". I need to decrease the "mental entropy" required to determine if a future change in the code will clash or make previous bits of code redundant or not. Ideally, a lot of these "band aid fixes" that are currently in the code will be replaced with a more robust algorithm if I can come up with the proper solution. 
 > 
-> To improve maintainability of my codebase, this documentation.md organizes my brainstorming notes. This documentation file will be used to store the entire explanation behind design choices while brief explanations are written in the code as comments. 
+> To improve maintainability of my codebase, this documentation.md organizes my brainstorming notes. This documentation file will be used to store the entire explanation behind design choices while brief explanations are written in the code as comments. Documentation should be reserved for reasoning and not the specific details on how the idea is implemented. This keeps our documentation flexible to massive algorithm changes with no changes in documentation. 
 > I'm treating the documentation like a developer's journal since I'm currently the only user of the tool. One of the best ways to make my codebase more maintainable is to write documentation to help explain the design decisions that led to the current state of the codebase.
 
 
@@ -182,50 +182,13 @@ aspectRatio: "56.25"
 
 
 
-### Find a way to help the algorithm identify S1 and S2
+## Find a way to help the algorithm identify S1 and S2
 [Transfer Learning in Heart Sound Classification using Mel Spectrogram](https://cinc.org/archives/2022/pdf/CinC2022-046.pdf)
-
-
-
-> [!think] Multiple frequency bands
-> what if we preprocess using multiple frequency bands for the explicit propose of comparing the confidence that a peak is S1 vs S2 across the two frequency bands.
-> the idea is, we generate a profile of what we think S1 sound, sounds like and when we encounter something that sound similar we give it a confidence score. then we pre process the audio again with a different frequency band and generate a new confidence score. Then we compare what we did vs how it changed the confidence score to generate a final confidence. 
-> S1 is typically found between 20–80 Hz
-> S2 is typically found between 60–200 Hz
-> 
-> if we do 60–200 Hz refilter and run analysis, if confidence for S2 increases, maybe we should increase confidence again since it aligns with what we expect?
-
-> [!think]
-> Each beat, S1 and S2 should have a distinct sound that gives it its unique "profile". S2's higher frequency components (up to 250 Hz) are different S1's lower frequencies. I think there should be a way to exploit this. I need to confirm whether or not this frequency separation exists in my dataset before I try to isolate it. 
-
-
-
-
-
-
-> [!think]
-> Looking at `Test4_bpm_plot.html`,
-> I wonder, Is it possible make a profile for S1 and S2 heart sounds? that data would be very large. I'm thinking of a way to compress/express this profile data in a easy to parse way.
-> what If we apply different EQ band filters for ever 100 hz or something. This will generate different amplitude peaks for each peak. Then we can get the difference and compare.
-> 
->So far, we haven't needed to compress the input data because the peak detection algorithm naturally outputs simple and easily parsable data. The additional data I plan to input input to the algorithm will not be easily parsable so I need to find a way to "compress the info" into a more "parsable" format. 
->
-> I'm just trying to get a way to make the algorithm understand what S1 and S2 *sounds* like. currently, The algorithm knows what S1 and S2 *look* like from a point wise perspective. (there's no logic for trapezoidal shaped waveforms yet). The current data being fed into the algorithm is very minimal which means the current algorithm has to make many educated guesses. If I can find a way to efficiently compress beat "profile" data and feed it into the algorithm, then I should be able to make it substantially more robust. 
-
-
 > [!think]
 > Right now, the algorithms confidence is artificially boosted
 > If we look at the input data the algorithm is receiving. There are many instances where logically there should be no way the algorithm can determine a answer. 
 > But right now it does
 > I've done this intentionally as a band aid fix. I wanted more labeling but I must acknowledge that many peaks are being labeled correctly because the algorithm is simply making a lucky guess
-
-
-We can identify the following parameters for S1/S2 sounds
-- Spectral centroid trajectory
-- Bandwidth evolution
-- Dominant frequency
-- Energy envelope shape (attack/decay)
-
 
 ### Multiple bandpass filters to isolate the different frequency ranges of S1 and S2
 > [!say]
@@ -234,16 +197,25 @@ We can identify the following parameters for S1/S2 sounds
 > But within the file, every S1 should sound similar
 > And be distinct from S2
 > If this is true, there must be a way to exploit this
+
+> [!think] Multiple frequency bands
+> what if we preprocess using multiple frequency bands for the explicit propose of comparing the confidence that a peak is S1 vs S2 across the two frequency bands.
+> the idea is, we generate a profile of what we think S1 sound, sounds like and when we encounter something that sound similar we give it a confidence score. then we pre process the audio again with a different frequency band and generate a new confidence score. Then we compare what we did vs how it changed the confidence score to generate a final confidence. 
+> S1 is typically found between 20–80 Hz
+> S2 is typically found between 60–200 Hz
+> 
+> if we do 60–200 Hz refilter and run analysis, if confidence for S2 increases, maybe we should increase confidence again since it aligns with what we expect?
 - [x] Implemented
+
 S1 tends to have more energy in the lower frequency band, S2 in the higher frequency band.
 We calculate the ratio between  these energies and adjust pairing confidence accordingly. If the first peak is more S1-like and the second more S2-like, boost confidence; if the pattern is reversed, penalize.
 
 We use a Gaussian‑weighted sum of the band energy to get the "energy of the whole beat". 100ms is average duration of the S1 heart sound, the width of the beat's Hilbert envelope. We make the gaussian this width and place it at the detected peak. Then use it to mask out the section of time we are interested in. 
 
+> [!think]
+> Each beat, S1 and S2 should have a distinct sound that gives it its unique "profile". S2's higher frequency components (up to 250 Hz) are different S1's lower frequencies. I think there should be a way to exploit this. I need to confirm whether or not this frequency separation exists in my dataset before I try to isolate it. 
 
-
-
-
+After implementing multiple frequency bands, it appears that there's minimal or inconsistent frequency separation in my dataset. I'm not sure what do do about this.
 
 
 
@@ -253,14 +225,15 @@ We use a Gaussian‑weighted sum of the band energy to get the "energy of the wh
 
 
 
-I want to generate a profile over time:
-so we average the features of the past 5 labeled S1 peaks and build a understanding of what S1 should look like in the context of this recording. 
-
-what if we further this idea by sampling at random indices, we take 10 random marked S1 peaks after labeling is done and re-run the labeling using this "trained model"
-like we are training a model in real time to label, then label to train the model, recursively. 
-
-for the features, I want to sample the entire beat, not just the time at the peak. this means finding the bounds of the envelope and sampling the data within that time frame maybe with increasing significance towards the center?
-like we use a gaussian to mask the... or maybe not, do the edges of the beat contain important data? if not we should mask it out... but what if it does?
+> [!think]
+> I want to generate a profile over time:
+> so we average the features of the past 5 labeled S1 peaks and build a understanding of what S1 should look like in the context of this recording. 
+> 
+> what if we further this idea by sampling at random indices, we take 10 random marked S1 peaks after labeling is done and re-run the labeling using this "trained model"
+> like we are training a model in real time to label, then label to train the model, recursively. 
+> 
+> for the features, I want to sample the entire beat, not just the time at the peak. this means finding the bounds of the envelope and sampling the data within that time frame maybe with increasing significance towards the center?
+> like we use a gaussian to mask the... or maybe not, do the edges of the beat contain important data? if not we should mask it out... but what if it does?
 
 
 
@@ -346,24 +319,16 @@ since everything is based on the `Long-Term BPM`, we need to make sure it's accu
 > for example, If I input a suggested bpm of 120, then the script calculates the interval between beats to be at 240bpm. then we can obviously conclude that it counted a S2 as a lone S1, it missed the pairing. So we can also use this discrepancy to work with the normal deviation we calculated in the other step, to definitively conclude that the beat is supposed to be S2.
 > obviously my starting bpm suggestion should be value for the long term bpm.
 
-### Code Implementation:
-This concept became the **`update_long_term_bpm()`** function and the **`state['long_term_bpm']`** variable in `bpm_analysis.py`. The key insight was that `s1_s2_max_interval_sec` should be calculated from a **stable, slowly-adapting BPM belief** rather than from the instantaneous interval between the last two beats.
-The configuration parameter:
-```python
-"s1_s2_interval_rr_fraction": 0.7,  # The S1-S2 interval cannot be longer than this fraction of the R-R interval.
-```
-
 ### Long-Term BPM vs Instantaneous BPM
 **Problem:** A mislabeled beat could drastically shrink s1_s2_max_interval, causing all subsequent beats to be misclassified.
 **Solution:** Maintain two BPM values:
 - `long_term_bpm`: Slowly adapting belief (0.05 learning rate) that stabilizes the S1-S2 window
 - `instant_bpm`: Raw calculation from last interval, used only to update the belief
 **Why this works:** Allows the algorithm to self-correct. If instant BPM spikes to 240 but long-term is 120, we know we double-counted S2 and can trigger corrective logic.
-**Code:** `update_long_term_bpm()`, `PeakClassifier.state['long_term_bpm']`
 
 ### Dynamic S1-S2 Pairing Window
 **Problem:** At 90 BPM, true S1-S1 interval is 0.67s. But if s1_s2_max_interval is 0.33s, then at 170 BPM (true interval 0.35s), the algorithm merges separate beats.
-**Solution:** `s1_s2_max_interval_sec = min(0.4, expected_rr_interval * 0.6)` where expected_rr comes from long_term_bpm, not last interval.
+**Solution:** The maximum allowed S1-S2 interval is derived from the stable long-term BPM belief rather than the last instantaneous interval.
 **Physiological basis:** S1-S2 interval is ~35-50% of total R-R interval and adapts with heart rate.
 
 
@@ -450,7 +415,7 @@ it's also important to note:
 This may also be a contributor for why S1 waveform amplitude increases with BPM.
 
 
-### Code implementation
+### Contractility Power Curve
 ```embed
 title: "Heart Contractility Power curve"
 image: "https://www.desmos.com/calc_thumbs/production/version/qll0xbsiuk/65328f50-19ea-11f1-bd8a-c516bba7813a.png"
@@ -500,78 +465,31 @@ While S1 remains augmented, S2 normalization lags because:
 - **Residual vasodilation** in skeletal muscle beds affects systemic vascular resistance
 - **Splitting patterns** remain abnormal during early recovery
 
-### Code Implementation:
 #### Post-Exercise, S1 amplitude remains elevated despite BPM decreasing
 **Physiology:** Sympathetic tone persists after HR normalizes → contractility remains elevated → S1 stays loud.
-**Code Location:** `bpm_analysis.py`, `_apply_other_pairing_adjustments()`
-```python
-# Recovery phase detection
-if (peak_bpm_time_sec is not None and 
-    recovery_end_time_sec is not None and
-    peak_bpm_time_sec <= current_time_sec <= recovery_end_time_sec):
-    # Override stability floor during recovery
-    recovery_floor = params.get("recovery_phase_stability_floor", 0.90)
-```
-**How it works:**
-- When `current_time` is within 120 seconds after peak BPM (your `recovery_phase_duration_sec`), the algorithm knows "I'm in recovery mode."
-- This prevents the algorithm from penalizing valid S1-S2 pairs when S2 is re-emerging faintly during early recovery.
-**config.py settings:**
-```python
-"recovery_phase_duration_sec": 120,     # Sympathetic tone persists ~2 minutes
-"recovery_phase_stability_floor": 0.90, # Be lenient about faint S2s during this window
-```
+**How it works:** When the algorithm detects the recording is within the recovery window after peak exertion, it relaxes confidence penalties on S1-S2 pairs. This prevents faint, re-emerging S2 peaks from being rejected during early recovery.
 
 #### S2 Re-Emergence After Dropout
 **Physiology:** After S2 disappears at high BPM, it reappears faintly as HR drops. Initial faint peaks are easy to miss.
-**Code Location:** `bpm_analysis.py`, `_kickstart_check()`
-```python
-# Detect S1→Noise pattern
-if matches >= min_matches:
-    override_ratio = params.get("kickstart_override_ratio", 0.60)
-    logging.info(f"KICK-START: Found {matches} patterns. Overriding pairing ratio to {override_ratio}.")
-    self.state['pairing_ratio_override'] = override_ratio
-```
 **How it works:**
-- If last 4 beats show pattern: **S1 (Lone) → Noise → S1 (Lone) → Noise**, it means S2 is trying to reappear but being rejected as noise.
-- Algorithm **temporarily boosts pairing_ratio to 0.60**, giving faint S2 peaks a chance to be paired.
-- This is your "get out of Lone S1 mode" mechanism.
-**config.py settings:**
-```python
-"kickstart_check_threshold": 0.3,           # Only run when pairing_ratio is low
-"kickstart_override_ratio": 0.60,           # Temporarily accept more pairs
-```
+- If the recent beat history shows the pattern **S1 (Lone) → Noise** repeated several times, it means S2 is trying to reappear but failing confidence thresholds.
+- The algorithm temporarily relaxes its pairing threshold to give these faint S2 peaks a chance to anchor the rhythm again.
+- This is the "kick-start" mechanism to escape a "Lone S1 only" rut.
 
 #### Contractility vs. Rate Mismatch (Post-Exercise 90 BPM)
 **Physiology:** At 90 BPM post-exercise, contractility is still high (loud S1). At 90 BPM pre-exercise, contractility is normal (balanced S1/S2).
-**Code Location:** `bpm_analysis.py`, `PeakClassifier.__init__`
-```python
-# State initialization uses start_bpm_hint
-self.state['long_term_bpm'] = float(start_bpm_hint) if start_bpm_hint else 80.0
-self.state['long_term_bpm_history'] = []
-```
-**How it works:**
-- The **entire algorithm's expectation** is anchored to `long_term_bpm`, not instantaneous rate.
-- After peak exertion at 170 BPM, `long_term_bpm` slowly decays (learning rate 0.05). At 90 BPM post-exercise, `long_term_bpm` might still be 110-120.
-- The contractility model (Section 1 above) uses this **higher belief BPM** → expects S1 dominance → doesn't penalize loud S1 at 90 BPM.
+**How it works:** The algorithm's pairing expectations are anchored to a slowly-decaying long-term BPM belief rather than instantaneous rate. After peak exertion, the belief decays slowly, so even as measured BPM drops, the algorithm's contractility expectations remain elevated for a period. This correctly models the physiological lag between heart rate and sympathetic tone.
 **Example timeline:**
-1. Peak: 170 BPM → `long_term_bpm = 170`
-2. 1 min later: Instant BPM = 90, but `long_term_bpm` ≈ 120 (slow decay)
+1. Peak exertion at 170 BPM → long-term belief = 170
+2. 1 min later: Instant BPM = 90, but long-term belief ≈ 120 (slow decay)
 3. Algorithm still in "high contractility" mode → expects S1 > S2 → correctly processes post-exercise audio
+
 #### S1 Amplitude Floor (Preventing Noise as S1)
 **Physiology:** Even at high BPM, S1 must exceed a minimum amplitude to be a real heartbeat.
-**Code Location:** `bpm_analysis.py`, `_validate_lone_s1()`
-```python
-# Absolute prominence guardrail
-if len(recent_prominences) >= 5:
-    reference_prominence = np.percentile(recent_prominences, 80)
-    if prominence_ratio < params['lone_s1_min_prominence_ratio']:  # Default 0.4
-        penalty_factor = float(np.clip(prominence_ratio / 0.4, 0.0, 1.0))
-        confidence *= penalty_factor
-```
 **How it works:**
-- Tracks top 20% of recent S1 prominences as reference
-- Current S1 must be >40% of reference amplitude, or confidence is slashed
-- Prevents noise spikes from being mistaken for S1, even if timing is plausible
+- The algorithm tracks recent S1 peak amplitudes and establishes a reference from the top percentile.
+- A candidate S1 whose amplitude falls too far below this reference has its confidence reduced proportionally.
+- This prevents noise spikes from being accepted as valid heartbeats even when their timing is plausible.
 
 
 ## S2 disappears and reappears in some recordings
@@ -590,7 +508,6 @@ Kick-Start Recovery Mechanism feels like a band aid fix to this issue. A more ro
 During recovery, S2 disappears. The algorithm enters a "Lone S1 only" mode and can't exit even when S2 reappears.
 **Solution:** Scan last 4 beats. If pattern is S1→Noise repeated 3+ times, temporarily boost pairing ratio to 0.60.
 **Why this works:** S2 re-emerges as faint peaks that fail normal confidence thresholds. Kick-start gives them a chance to anchor the rhythm again.
-**Code:** `_kickstart_check()`, `kickstart_override_ratio`
 
 
 
@@ -605,13 +522,6 @@ When noise inflates trough heights, prominence will decrease.
 1. **Find adjacent troughs:** For a given peak at index `i`, locate the nearest trough to the left (`i-1`) and right (`i+1`) using the pre-computed `trough_indices`.
 2. **Determine key col:** The key col is the **higher** of the two trough amplitudes (the "shoulder" of the peak).
 3. **Calculate prominence:** `prominence = peak_amplitude - key_col_amplitude`
-
-**Code:** `get_peak_prominence_details()` in `bpm_analysis.py`
-**parameters In `config.py`:**
-```python
-    "trough_prominence_quantile": 0.1,   # How much a dip must stand out to be considered a 'trough'.
-    "trough_rejection_multiplier": 10.0,    # A trough N-times higher than the draft noise floor is rejected.
-```
 
 ### Trough Sanitization
 **Problem:** Temporary noise creates high troughs that inflate the noise floor, reducing prominence of valid peaks that occur after noise ends.
@@ -663,7 +573,6 @@ Detects trapezoid-shaped discontinuities in the average BPM series that are char
   - A very fast rise
   - A sustained plateau
   - A very fast fall that returns to baseline
-**Code:** `detect_trapezoid_discontinuities()`
 
 
 ## Parameter Tuning Rationale
@@ -796,13 +705,29 @@ So far, our code has
 **Technical debt**: 
 If I can find a better solution these band aid fixes would not be here: (e.g., "kick-start" recovery mechanisms, cascade resets)
 
-**Architectural Debt:**
-- **Deep call stacks**: 6-stage pipeline with shared state dictionaries makes debugging challenging
 
-**Undocumented code**
-Documentation should be reserved for reasoning and not the specific details on how the idea is implemented. This keeps our documentation flexible to massive algorithm changes with no changes in documentation
+
+
+
+### Release
+I've decided to package binaries in a `BPM_Analyzer.exe` for non technical users to run on windows computers
+Simply run `pyinstaller BPM_Analyzer.spec` to repackage and update binaries
+
+
+
+### Contributing.md
+```
+# Do not remove debugging code unless specified by the user
+# try to avoid further abstracting my code
+# try to avoid further segmenting my code
+# Do not over-engineer a solution, keep it simple
+```
 
 #### LLM prompts to maintain our codebase
+> [!say]
+> Let's do a codebase audit. Can you find areas of improvement to my codebase to make it more maintainable?
+> 
+
 > [!say]
 > There are bits of logic that I implemented to the script that likely do not need to be there. I come up with a idea to solve a problem, then later I come up with a better idea but left the initial solution in the code. Therefore there may be redundancy in logic that's still being used in the call stack but from a practical standpoint the logic is redundant. 
 > 
@@ -821,23 +746,14 @@ Documentation should be reserved for reasoning and not the specific details on h
 > [!say]
 > We should be writing code/text that makes it easy for AI to decipher and replace. Previously, we had difficulty with, and replacing/editing code using AI. Replace all high-risk characters with their ASCII equivalents so the codebase would be all-ASCII in its source text (string literals + comments). double check areas of concern. 
 
+> [!say]
+> that was a large refactor, let's double check if all the decisions we made make sense in the larger context of what we are trying to do.
 
 
 
 
-### Release
-I've decided to package binaries in a `BPM_Analyzer.exe` for non technical users to run on windows computers
-Simply run `pyinstaller BPM_Analyzer.spec` to repackage and update binaries
 
 
-
-### Contributing.md
-```
-# Do not remove debugging code unless specified by the user
-# try to avoid further abstracting my code
-# try to avoid further segmenting my code
-# Do not over-engineer a solution, keep it simple
-```
 
 
 ### Other remarks
@@ -1043,15 +959,7 @@ Contractility can also be used to visualize RSA.
 
 
 
-### heartbeat_labeler.py
-> [!say] regarding my heartbeat_labeler.py
-> I originally made this script to label sections of data, but now I want to use it to label a entire audio file. Let's make this tool more usable for labeling entire files.
-> Right now, the too close warning is based on the grouping logic, but since there's only going to be one group now, the warning pops up for sections where the bpm is just fast.
-> We could fix this by appling auto groups every 10 seconds regardless of how many labels are in each group. just a pure time based grouping.
-> the Time Range Analysis feature will be made redundant.
-> 
-> 
-> I've been doing this manual data labeling for a while now, but why don't we find a way to export the labeling data directly from my script. then write a software that allows me to fix/edit those labels. this will speed up my labeling workflow immensely
+
 
 
 
@@ -1083,26 +991,24 @@ Contractility can also be used to visualize RSA.
 ``` title:"Mermaid diagram for algorithm's logic flow"
 flowchart TD
     %% Input Stage
-    A[Input Audio File] --> B[Is .wav?]
-    B -- NO --> C[Convert to WAV]
+    A[Input Audio File] --> B{Is .wav?}
+    B -- NO --> C[Convert to WAV via FFmpeg]
     B -- YES --> D
     C --> D
 
     %% Stage 1: Preprocessing
     subgraph Stage1[Stage 1: Preprocessing]
-        D[Preprocess Audio] --> E[Calculate Audio Envelope]
-        E --> F[Find All Potential Troughs]
-        
-        %% Fallback for insufficient troughs
-        F --> G[Enough troughs?
->= 5 troughs]
-        G -- YES --> G1[Calculate Dynamic Noise Floor 
-& Sanitize Troughs]
-        G -- NO --> G2["Use Static Noise Floor
-(Fallback)"]
+        D[Resample & Bandpass Filter] --> D1{Hum removal\nenabled?}
+        D1 -- YES --> D2[Detect & Notch-Filter\nStationary Hum]
+        D1 -- NO --> E
+        D2 --> E
+        E[Extract Hilbert Envelope] --> E1[Extract Multi-Band\nS1 & S2 Band Envelopes]
+        E1 --> F[Find All Potential Troughs]
+        F --> G{Enough troughs?\n>= 5}
+        G -- YES --> G1[Calculate Dynamic Noise Floor\n& Sanitize Troughs]
+        G -- NO --> G2[Use Static Noise Floor\nFallback]
         G1 --> H
         G2 --> H
-        
         H[Find Raw Peaks Above Noise Floor]
     end
 
@@ -1110,117 +1016,114 @@ flowchart TD
 
     %% Stage 2: Preliminary Pass
     subgraph Stage2[Stage 2: Preliminary Pass]
-        I[Run Preliminary Pass
-with High-Confidence Threshold] --> I1[High-Confidence PeakClassifier]
-        I1 --> I2["Extract Anchor Beats
-(S1 peaks from pass)"]
-        
-        %% Fallback for insufficient anchor beats
-        I2 --> I3[Anchor beats >= 10?]
-        I3 -- YES --> I4[Estimate Global BPM from Median RR]
-        I3 -- NO --> I5["Use Default BPM = 80.0
-(Fallback)"]
-        
-        I4 --> I6[Detect Peak Time & Recovery Phase Boundaries]
+        I[Run High-Confidence PeakClassifier\npairing threshold elevated] --> I2[Extract Anchor Beats]
+        I2 --> I3{Anchor beats\n>= 10?}
+        I3 -- YES --> I4[Estimate Global BPM\nfrom Median R-R]
+        I3 -- NO --> I5[Use start_bpm_hint\nor Default 80 BPM]
+        I4 --> I6
         I5 --> I6
-        I6 --> J
+        I6[Detect Peak BPM Time\n& Recovery Phase Window]
     end
+
+    I6 --> J
 
     %% Stage 3: Main Classification Loop
     subgraph Stage3[Stage 3: Main Classification Loop]
-        J[Initialize Main PeakClassifier] --> K[Begin Main Classification Loop
-loop_idx = 0]
-        
-        %% Kickstart check is per-iteration
-        K --> L[Per-Iteration Kickstart Check
-Override Pairing Ratio if Stuck]
-        L --> M[More Peaks Remain?]
-        M -- NO --> ZZ[Return: s1_peaks, all_raw_peaks, analysis_data]
-        M -- YES --> N[Get Current and Next Peak]
-        
-        N --> O["Check for Weak Middle Peak?
-(lookahead enabled)"]
-        O -- YES --> O1[Evaluate Middle Peak Prominence & Interval]
-        O1 -- YES --> O2[Skip Middle: Pair Peaks, Mark as Noise]
-        O2 --> M
+        J[Initialize PeakClassifier\nwith BPM & recovery context] --> M
+
+        M{More peaks\nremaining?} -- NO --> ZZ[Return S1 peaks,\nAll Raw Peaks, Debug Info]
+        M -- YES --> K[Calculate Pairing Ratio\nfrom recent beat history]
+        K --> L[Kick-Start Check:\nif stuck in Lone S1 mode,\ntemporarily boost pairing ratio]
+        L --> Mlast{Is last peak?}
+        Mlast -- YES --> Ylast[Label as Lone S1 Last] --> Z
+        Mlast -- NO --> N[Get Current Peak & Next Peak]
+
+        N --> O{Lookahead enabled &\nweak middle peak present?}
+        O -- YES --> O1{Middle peak below\nskip threshold?}
+        O1 -- YES --> O2[Skip Middle: label as Noise\nPair current & next+1] --> Z
         O1 -- NO --> P
         O -- NO --> P
-        
-        P[Attempt S1-S2 Pairing] --> P1[Check Minimum Interval Constraint]
-        P1 --> P2[Calculate Base Confidence]
-        P2 --> P3[Adjust for Contractility]
-        P3 --> P4[Apply Stability & Other Adjustments]
-        P4 --> P5[Apply Interval & Forward-Look Penalties]
-        P5 --> Q[Pairing Confidence High Enough?]
-        
-        Q -- YES --> R[Label as Paired S1 and S2]
-        Q -- NO --> S[Classify Lone Peak]
-        
-        S --> T[Validate Lone S1
-- Rhythm check
-- Amplitude check
-- Forward check]
-        T --> U[Is Valid Lone S1?
- >= threshold]
-        
-        U -- YES --> V[Label Validated Lone S1]
-        U -- NO --> W[Cascade Reset Triggered?
-consecutive rejections >= 3]
-        W -- YES --> X[Label Cascade Lone S1]
+
+        P[Attempt S1-S2 Pairing] --> P1{Min S1-S2 interval\nconstraint met?}
+        P1 -- NO: too close --> S
+        P1 -- YES --> P2["Score Confidence:
+1. Base timing score
+2. Contractility / S1:S2 ratio
+3. Multi-band spectral fingerprint
+4. Stability history adjustment
+5. V-shape interval penalty
+6. Forward-look penalty"]
+        P2 --> Q{Confidence >=\npairing threshold?}
+
+        Q -- YES --> R[Label as S1 Paired + S2 Paired\nUpdate interval & contractility history]
+        Q -- NO --> S
+
+        S["Validate Lone S1:
+- Rhythm plausibility check
+- Amplitude vs recent S1 history
+- Forward BPM spike check"] --> U{Lone S1 score\n>= threshold?}
+        U -- YES --> V[Label as Validated Lone S1]
+        U -- NO --> W{Consecutive rejections\n>= cascade threshold?}
+        W -- YES --> X[Label as Cascade Lone S1\nReset rejection counter]
         W -- NO --> Y[Label as Noise]
-        
-        R --> Z[Update Long-Term BPM]
+
+        R --> Z[Update Long-Term BPM Belief]
         V --> Z
         X --> Z
         Y --> Z
         Z --> M
     end
 
-    %% Transition to Stage 4
-    ZZ -- "Proceed to Stage 4
-with returned data" --> AA
+    ZZ --> AA
 
-    %% Stage 4: Correction & Refinement
-    subgraph Stage4[Stage 4: Correction & Refinement]
-        AA[Rhythm-Based Correction] --> AA1[Resolve Adjacent S1 Conflicts
-Keep Stronger Amplitude]
-        AA1 --> BB[Fix Rhythmic Discontinuities]
-        
-        BB --> BB1["Pass 1: Find Long Gaps
-(missed beats)"]
-        BB1 --> BB2[Search for Missed S1-S2 Pairs
-in noise-labeled peaks]
-        BB2 --> BB3[Relabel Corrected Gaps]
-        
-        BB3 --> BB4["Pass 2: Find Short Conflicts
-(adjacent S1s)"]
-        BB4 --> BB5[Resolve Short Conflicts
-remove weaker peak]
-        
-        BB5 --> BB6["More Corrections Made?
-(max 5 iterations)"]
-        BB6 -- YES --> BB1
-        BB6 -- NO --> CC[Final Corrected S1 Peaks & Debug Info]
+    %% Stages 4 & 5: Correction & Refinement
+    subgraph Stage4["Stages 4 & 5: Correction & Refinement"]
+        AA["Stage 4: Rhythm Correction
+Remove too-close adjacent S1s
+Keep higher amplitude"] --> BB
+
+        BB["Stage 5: Fix Rhythmic Discontinuities
+Iteration start"] --> BB1["Pass 1: Find Long Gaps
+Search noise-labeled peaks for
+strong missed S1-S2 pairs and promote them"]
+        BB1 --> BB4["Pass 2: Find Short Conflicts
+Remove weaker of adjacent S1 pair"]
+        BB4 --> BB6{Corrections made\nthis pass?}
+        BB6 -- "YES: iterate up to 5x" --> BB
+        BB6 -- "NO: stable" --> CC[Final Corrected S1 Peaks & Debug Info]
     end
 
-    CC --> DD
+    CC --> GUARD{>= 2 S1 peaks\ndetected?}
+    GUARD -- NO --> ABORT[Return None:\nInsufficient peaks warning]
+    GUARD -- YES --> DD
 
-    %% Stage 5: Final Metrics & Output
-    subgraph Stage5[Stage 5: Final Metrics & Output]
-        DD[Calculate Final Metrics] --> EE[Calculate BPM Series]
-        EE --> FF[Detect Trapezoid Artifacts]
-        FF --> GG[Calculate Windowed HRV]
-        GG --> HH[Find HR Inclines and Declines]
-        
-        %% Split HRR calculations
-        HH --> II1["Calculate Standard HRR
-(fixed interval)"]
-        II1 --> II2["Calculate Peak Recovery Rate
-(steepest slope)"]
-        
-        II2 --> JJ[Generate Summary Statistics]
-        
-        JJ --> KK[Generate Interactive Plot]
-        KK --> LL[Generate Reports: CSV, Summary, Debug Log, BPM Text]
+    %% Stage 6: Final Metrics & Outputs
+    subgraph Stage5[Stage 6: Final Metrics & Outputs]
+        DD[Calculate Smoothed BPM Series] --> DD1[Detect Trapezoid Artifacts]
+        DD1 --> DD2[Find Major HR Inclines & Declines]
+        DD2 --> DD3["Calculate HRR
+Peak Recovery Rate
+Peak Exertion Rate"]
+        DD3 --> DD4["Calculate Windowed HRV
+RMSSD & SDNN per window"]
+        DD4 --> DD5{Frequency domain\nHRV enabled?}
+        DD5 -- YES --> DD6["Lomb-Scargle Periodogram
+LF / HF / VLF / LF:HF ratio"]
+        DD5 -- NO --> EE
+        DD6 --> EE
+
+        EE{Manual labels\nCSV found?}
+        EE -- YES --> EE1[Compare predictions vs manual labels\nAppend to regression log]
+        EE -- NO --> FF
+        EE1 --> FF
+
+        FF["Generate Outputs
+based on output options"]
+        FF --> FF1[HTML Interactive Plot\nwith audio sync & spectrogram]
+        FF --> FF2[PNG Static Image]
+        FF --> FF3[CSV Data Export]
+        FF --> FF4["Analysis Summary
+& Debug Chronological Log"]
+        FF --> FF5[Filtered WAV]
     end
 ```

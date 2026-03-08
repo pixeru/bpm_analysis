@@ -35,7 +35,7 @@ DEFAULT_PARAMS = {
     "s2_band_low_hz": 170.0,             # S2 typical range 60-200 Hz.
     "s2_band_high_hz": 220.0,
     "multiband_boost_max": 0.15,         # Max confidence boost when band energies support S1-S2.
-    "multiband_penalty_max": 0.15,      # Max confidence penalty when bands suggest wrong order.
+    "multiband_penalty_max": 0.1,      # Max confidence penalty when bands suggest wrong order.
     "multiband_peak_window_ms": 130.0,   # Time window (ms) centered on each peak; covers whole beat. Converted to samples using sample rate.
     "multiband_gaussian_sigma_ms": 25.0, # Gaussian sigma (ms) for weighting; typically window/4 so weight falls off by edges. Used for Gaussian-weighted sum of band energy.
 
@@ -71,16 +71,14 @@ DEFAULT_PARAMS = {
     "pairing_confidence_threshold": 0.50,          # Confidence score required to classify two peaks as an S1-S2 pair.
     "preliminary_pass_confidence_threshold": 0.75, # Higher threshold used for the first (anchor-finding) pass only.
     "s1_s2_interval_cap_sec": 0.4,        # The absolute maximum time (seconds) allowed between S1 and S2.
-    "s1_s2_interval_rr_fraction": 0.7,    # Used when Weissler is disabled: nominal S1-S2 as fraction of R-R.
-    'min_s1_s2_interval_sec': 0.10,           # Absolute minimum (100ms)
-    'min_s1_s2_interval_rr_fraction': 0.23,   # Or 23% of total RR interval
-    # BPM-dependent expected S1-S2 (Weissler-style: ET shortens with HR)
-    "s1_s2_expected_use_weissler": True,      # If True, expected S1-S2 from linear model; else rr_interval * rr_fraction.
+    "min_s1_s2_interval_sec": 0.10,           # Absolute minimum (100ms)
+    "min_s1_s2_interval_rr_fraction": 0.23,   # Or 23% of total RR interval
+    # BPM-dependent expected S1-S2 (Weissler: ET = ref_et - slope*(BPM - ref_bpm))
     "s1_s2_expected_weissler_ref_et_ms": 300, # Reference ejection time (ms) at ref_bpm (e.g. ~300 ms at 60 BPM).
     "s1_s2_expected_weissler_ref_bpm": 60,    # BPM at which ref_et_ms is defined.
     "s1_s2_expected_weissler_slope_ms_per_bpm": 1.0,  # ET decrease (ms) per BPM increase (literature ~1.0-1.7).
-    'noise_prominence_threshold': 0.35,   # Peaks below this ratio are "suspect noise" 
-    'enable_lookahead_skipping': True,    # Enable/disable lookahead skipping
+    "noise_prominence_threshold": 0.35,   # Peaks below this ratio are "suspect noise"
+    "enable_lookahead_skipping": True,    # Enable/disable lookahead skipping
 
     # --- 4.2. Amplitude-Based Confidence Model ---
     "deviation_smoothing_factor": 0.05,   # Smoothing applied to the peak-to-peak amplitude deviation series.
@@ -98,29 +96,32 @@ DEFAULT_PARAMS = {
     "forward_look_drop_threshold": 0.4,     # If next peak < 60% of S2, it's suspicious
     "forward_look_max_penalty": 0.4,        # Max penalty for this scenario
     # Contractility: S1/S2 prominence ratio. Expected from history (past N pairs) or BPM power-curve fallback.
-    "contractility_expected_use_history": False,   # If True, expected S1/S2 = mean of last N accepted pairs; else BPM power curve.
+    "contractility_expected_use_history": True,   # If True, expected S1/S2 = mean of last N accepted pairs; else BPM power curve.
     "contractility_expected_history_count": 8,   # Number of past S1/S2 ratios to average.
     "contractility_expected_history_min": 1,      # Min history length before using average (else BPM fallback).
+    "contractility_pair_rate_window_sec": 5.0,    # Pair rate in this window blends history vs BPM: 100% pairs → use history; lower → blend toward BPM.
     # BPM fallback: power curve expected_ratio = low + (high - low) * ((BPM - bpm_min) / (bpm_max - bpm_min)) ** exponent.
     "contractility_bpm_min": 60,                 # BPM at which ratio = low_ratio.
     "contractility_bpm_max": 200,                # BPM at which ratio = high_ratio.
     "contractility_low_ratio": 0.9,              # Expected S1/S2 at bpm_min (rest).
-    "contractility_high_ratio": 6.0,             # Expected S1/S2 at bpm_max (high exertion).
-    "contractility_power_exponent": 0.5,         # <1: steep rise at low BPM then flatter (contractility kicks in early).
-    # Deviation-based curve: |actual - expected|; inside band = boost, outside = penalty ramp.
-    "contractility_zero_crossing_fraction": 0.2,  # Band half-width = expected × this; inside → boost, outside → penalty.
-    "contractility_boost_max": 0.15,              # Max multiplicative boost at expected: confidence *= (1 + boost).
-    "contractility_penalty_max": 0.2,             # Max multiplicative penalty when far outside band.
-    "contractility_penalty_ramp_fraction": 0.4,   # Ramp width = expected × this; penalty reaches max over this distance beyond band.
+    "contractility_high_ratio": 3.5,             # Expected S1/S2 at bpm_max (high exertion).
+    "contractility_power_exponent": 0.6,         # <1: steep rise at low BPM then flatter (contractility kicks in early).
+    # Asymmetric deviation-based curve: L2=(1-r_low), L1=(1-a_low), R1=(1+a_high), R2=(1+r_high) × expected.
+    "contractility_zero_crossing_low": 0.3,       # Left zero-crossing: L1 = expected × (1 - this).
+    "contractility_zero_crossing_high": 0.4,      # Right zero-crossing: R1 = expected × (1 + this).
+    "contractility_penalty_ramp_fraction_low": 1.2,   # Left ramp end: L2 = expected × (1 - this); penalty max at L2.
+    "contractility_penalty_ramp_fraction_high": 2.5,  # Right ramp end: R2 = expected × (1 + this); penalty max at R2.
+    "contractility_boost_max": 0.2,              # Max multiplicative boost at expected: confidence *= (1 + boost).
+    "contractility_penalty_max": 0.5,             # Max multiplicative penalty when far outside band.
     "recovery_phase_duration_sec": 120,      # Duration (seconds) of the high-contractility state after peak BPM.
     "recovery_phase_min_peak_bpm": 110,      # Only enable recovery-phase adjust if preliminary peak BPM >= this (avoids activating when BPM stays low).
 
     # --- 4.4. V-Shaped Interval: boost near expected, penalty outside ---
     # Linear boost from 0 at expected±zero_crossing to max at expected; linear penalty outside that band.
     "interval_v_penalty_max": 0.75,              # Max penalty (multiplicative) at ramp ends.
-    "interval_v_boost_max": 0.2,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
+    "interval_v_boost_max": 0.5,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
     "interval_zero_crossing_fraction": 0.2,      # Fraction of expected where effect crosses zero: boost zone [expected*(1±this)].
-    "interval_v_short_ramp_end_fraction": 0.2,  # Left: below this fraction of expected → hard reject; ramp from here up to left zero-crossing.
+    "interval_v_short_ramp_end_fraction": 0.4,  # Left: below this fraction of expected → hard reject; ramp from here up to left zero-crossing.
     "interval_v_long_ramp_end_fraction": 2.0,   # Right: ramp from right zero-crossing to this × expected → full penalty.
     "interval_v_long_reject_fraction": 2.5,     # Right: above this × expected → hard reject.
     # Expected S1-S2 from past pairs (when enabled, overrides BPM-based expected for the V-shape)
@@ -152,7 +153,7 @@ DEFAULT_PARAMS = {
     "lone_s1_forward_check_pct": 0.44,    # I Adjusted This✔ A Lone S1 is rejected if the next peak is too close, implying a BPM spike.
     "lone_s1_forward_penalty_factor": 0.52,  # I Adjusted This✔ Multiplier applied when forward check suspects the peak is actually an S2.
 
-    # --- 5.4. Lone S1 Gradient Confidence Engine ---
+    # --- 5.3. Lone S1 Gradient Confidence Engine ---
     "lone_s1_confidence_threshold": 0.50, # Final combined score needed to be accepted as a Lone S1.
     "lone_s1_rhythm_weight": 0.65,         # The weight given to the rhythmic timing score (0.0 to 1.0).
     "lone_s1_amplitude_weight": 0.35,      # The weight given to the amplitude consistency score.
@@ -181,13 +182,13 @@ DEFAULT_PARAMS = {
     "plot_downsample_factor": 4,             # Downsample only large traces: Audio Envelope and Dynamic Noise Floor (keep 1 of every N points). Does NOT apply to Average S1/S2 contractility, BPM, HRV, or markers.
     "contractility_average_window_sec": 1.0, # Time to average S1/S2 contractility plot: Used in: long-term (contractility vs BPM), short-term (S1 vs inhale/exhale)
 
-    # --- 7.2. Long Plot Optimization ---
+    # --- 7.1. Long Plot Optimization ---
     # When enabled, very long recordings can skip detailed debug traces in the HTML plot
     # to keep file sizes manageable. Shorter recordings are always shown in full detail.
     "optimize_long_plots": False,                # Whether to enable long-plot optimization.
     "long_plot_duration_threshold_sec": 600.0,   # Duration threshold (seconds) to treat a file as "long" (default: 10 minutes).
 
-    # --- 7.1. Trapezoid Artifact Detection ---
+    # --- 7.2. Trapezoid Artifact Detection ---
     # These control detection of brief, trapezoid-shaped BPM jumps that are often extra-beat artifacts.
     "trapezoid_rate_threshold": 7.0,            # BPM/s: physiologically implausible rate for rise/fall edges.
     "trapezoid_max_edge_duration_sec": 2,     # Maximum duration (seconds) for the rise/fall edges.

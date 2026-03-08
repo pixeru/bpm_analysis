@@ -27,7 +27,7 @@ from hrv import (
     calculate_windowed_hrv,
     calculate_global_hrv_frequency,
 )
-from correction import correct_peaks_by_rhythm, _fix_rhythmic_discontinuities
+from correction import correct_peaks_by_rhythm, fix_rhythmic_discontinuities
 
 
 class _NoisyAlgorithmLogFilter(logging.Filter):
@@ -113,7 +113,7 @@ def _refine_and_correct_peaks(s1_peaks: np.ndarray, all_raw_peaks: np.ndarray,
     for i in range(max_iterations):
         logging.info(f"Correction Pass Iteration {i + 1}...")
 
-        new_peaks, new_debug_info, corrections_made = _fix_rhythmic_discontinuities(
+        new_peaks, new_debug_info, corrections_made = fix_rhythmic_discontinuities(
             s1_peaks=final_peaks,
             all_raw_peaks=all_raw_peaks,
             debug_info=current_debug_info,

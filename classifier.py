@@ -14,6 +14,7 @@ from confidence_engine import (
     _append_s1_s2_interval,
     _append_s1_s2_contractility,
     _get_recent_s1_prominences_for_state,
+    record_s1_outcome,
 )
 from peak_utils import (
     PeakType,
@@ -238,6 +239,7 @@ class PeakClassifier:
             }
 
             self.state.consecutive_rr_rejections = 0
+            record_s1_outcome(self.state, s1_idx / self.sample_rate, True, self.params)
             # Skip the S1, middle noise, and S2 peaks
             self.state.loop_idx += 3
             return
@@ -247,6 +249,7 @@ class PeakClassifier:
             self.state, current_peak_idx, next_peak_idx, pairing_ratio
         )
 
+        current_time_sec = current_peak_idx / self.sample_rate
         if is_paired:
             self.state.candidate_beats.append(current_peak_idx)
             _append_s1_s2_interval(self.state, (next_peak_idx - current_peak_idx) / self.sample_rate, self.params)
@@ -268,10 +271,53 @@ class PeakClassifier:
                 "sections": sections,
             }
             self.state.consecutive_rr_rejections = 0
+            record_s1_outcome(self.state, current_time_sec, True, self.params)
             self.state.loop_idx += 2
-        else:
-            self._classify_lone_peak(current_peak_idx, steps, kickstart_msg=kickstart_msg)
-            self.state.loop_idx += 1
+            return
+
+        # --- Skip-one fallback: pair with peak after next (middle may be noise) ---
+        if loop_idx + 2 < len(all_peaks):
+            next_next_peak_idx = all_peaks[loop_idx + 2]
+            is_paired_skip, steps_skip, prominence_context_skip = self.pairing_engine.attempt_pair(
+                self.state, current_peak_idx, next_next_peak_idx, pairing_ratio
+            )
+            if is_paired_skip:
+                middle_idx = next_peak_idx
+                self.state.candidate_beats.append(current_peak_idx)
+                _append_s1_s2_interval(
+                    self.state, (next_next_peak_idx - current_peak_idx) / self.sample_rate, self.params
+                )
+                _append_s1_s2_contractility(
+                    self.state, current_peak_idx, next_next_peak_idx, self.audio_envelope,
+                    self.state.trough_indices, self.sample_rate, self.params,
+                )
+                skip_one_sections: List[Dict[str, Any]] = [
+                    {"type": "skip_one", "text": "Paired S1 with peak after next (middle labeled as noise)."},
+                    {"type": "confidence_trace", "steps": steps_skip},
+                    {"type": "prominence", "details": prominence_context_skip},
+                ]
+                if kickstart_msg:
+                    skip_one_sections.insert(0, {"type": "kickstart", "text": kickstart_msg})
+                self.state.beat_debug_info[current_peak_idx] = {
+                    "peak_type": PeakType.S1_PAIRED.value,
+                    "sections": skip_one_sections,
+                }
+                self.state.beat_debug_info[middle_idx] = {
+                    "peak_type": PeakType.NOISE.value,
+                    "sections": [{"type": "skip_one", "text": "Skipped as noise (S2 was next peak)."}],
+                }
+                self.state.beat_debug_info[next_next_peak_idx] = {
+                    "peak_type": PeakType.S2_PAIRED.value,
+                    "sections": skip_one_sections,
+                }
+                self.state.consecutive_rr_rejections = 0
+                record_s1_outcome(self.state, current_time_sec, True, self.params)
+                self.state.loop_idx += 3
+                return
+
+        record_s1_outcome(self.state, current_time_sec, False, self.params)
+        self._classify_lone_peak(current_peak_idx, steps, kickstart_msg=kickstart_msg)
+        self.state.loop_idx += 1
 
     def _update_long_term_bpm(self):
         """Updates the long-term BPM belief after each decision."""

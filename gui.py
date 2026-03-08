@@ -17,6 +17,7 @@ from ttkbootstrap.constants import *
 from config import DEFAULT_PARAMS, DEFAULT_OUTPUT_OPTIONS
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any
 from time_utils import timestamp_str
 
 class UIMessageType(Enum):
@@ -27,7 +28,7 @@ class UIMessageType(Enum):
 @dataclass
 class UIMessage:
     type: UIMessageType
-    data: any = None
+    data: Any = None
 
 # Order and labels for output file checkboxes (keys must match DEFAULT_OUTPUT_OPTIONS in config).
 # First 8 in 2-column grid, 9th full width. Default values come from config only.

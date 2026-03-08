@@ -1,5 +1,6 @@
 import os
 import logging
+import urllib.parse
 from time_utils import seconds_to_datetime
 import csv
 import shutil
@@ -895,73 +896,65 @@ class Plotter:
     ) -> str:
         """
         Generates custom HTML with audio player, timeline scrubber, and synchronized playhead.
-        Fixes audio path issues and adds debugging capabilities.
+        Loads assets/template.html and substitutes %%PLACEHOLDER%% tokens with computed values.
         """
         audio_file_name = os.path.basename(self.audio_source_path)
         duration_sec = self.audio_duration_sec or 0
 
+        # --- Resolve audio source path ---
         audio_src = ""
         if os.path.exists(self.audio_source_path):
             dest_audio_path = os.path.join(self.output_directory, audio_file_name)
-            src_abspath = os.path.abspath(self.audio_source_path)
-            dest_abspath = os.path.abspath(dest_audio_path)
-
-            if src_abspath != dest_abspath:
+            if os.path.abspath(self.audio_source_path) != os.path.abspath(dest_audio_path):
                 try:
                     shutil.copy2(self.audio_source_path, dest_audio_path)
-                    logging.info(f"✅ Copied audio file to {dest_audio_path}")
+                    logging.info(f"Copied audio file to {dest_audio_path}")
                 except Exception as e:
-                    logging.error(f"❌ Could not copy audio file: {e}")
+                    logging.error(f"Could not copy audio file: {e}")
             audio_src = audio_file_name.replace('\\', '/')
         else:
-            logging.error(f"❌ Audio source file does NOT exist: {self.audio_source_path}")
+            logging.error(f"Audio source file does NOT exist: {self.audio_source_path}")
             dest_audio_path = os.path.join(self.output_directory, audio_file_name)
             if os.path.exists(dest_audio_path):
                 audio_src = audio_file_name.replace('\\', '/')
-                logging.info(f"✅ Found audio file in output directory: {dest_audio_path}")
+                logging.info(f"Found audio file in output directory: {dest_audio_path}")
             else:
-                logging.error(f"❌ Audio file not found anywhere: {audio_file_name}")
-                audio_src = ""
+                logging.error(f"Audio file not found anywhere: {audio_file_name}")
 
         filtered_debug_file_name = f"{base_name}_filtered_debug.wav"
         filtered_debug_path = os.path.join(self.output_directory, filtered_debug_file_name)
         filtered_available = os.path.exists(filtered_debug_path)
         filtered_audio_src = filtered_debug_file_name.replace('\\', '/') if filtered_available else ""
         if filtered_available:
-            logging.info(f"🎧 Using filtered debug audio: {filtered_debug_path}")
+            logging.info(f"Using filtered debug audio: {filtered_debug_path}")
 
-        logging.info(f"🎵 HTML audio source path: '{audio_src}'")
-        import urllib.parse
+        logging.info(f"HTML audio source path: '{audio_src}'")
         audio_src_escaped = urllib.parse.quote(audio_src)
         filtered_audio_src_escaped = urllib.parse.quote(filtered_audio_src) if filtered_audio_src else ""
 
-        # Prepare spectrogram filenames (PNGs saved in same directory as HTML; no embedding).
+        # --- Resolve spectrogram paths ---
         spectrogram_original_src = ""
         spectrogram_filtered_src = ""
-        spectrogram_available_original = "false"
-        spectrogram_available_filtered = "false"
+        spectrogram_available_original = False
+        spectrogram_available_filtered = False
 
-        spectrogram_enabled = getattr(self, "spectrogram_enabled", True)
-
-        if spectrogram_enabled:
-            # Original spectrogram (precomputed in plot_and_save if possible)
+        if getattr(self, "spectrogram_enabled", True):
             if getattr(self, "spectrogram_original_filename", None):
                 spectrogram_original_src = self.spectrogram_original_filename
-                spectrogram_available_original = "true"
+                spectrogram_available_original = True
             else:
-                # Fallback: generate and save to file from the copied audio in the output directory
                 try:
                     if audio_src:
-                        orig_audio_path_for_spec = os.path.join(self.output_directory, audio_src)
                         spec_path = os.path.join(self.output_directory, f"{base_name}_spectrogram.png")
-                        spec_name = self._generate_spectrogram_image(orig_audio_path_for_spec, spec_path)
+                        spec_name = self._generate_spectrogram_image(
+                            os.path.join(self.output_directory, audio_src), spec_path
+                        )
                         if spec_name:
                             spectrogram_original_src = spec_name
-                            spectrogram_available_original = "true"
+                            spectrogram_available_original = True
                 except Exception as e:
                     logging.warning(f"Failed to generate on-demand original spectrogram: {e}")
 
-            # Filtered spectrogram (if filtered debug audio exists)
             if filtered_available:
                 try:
                     spec_filtered_path = os.path.join(
@@ -972,12 +965,13 @@ class Plotter:
                     )
                     if spec_filtered_name:
                         spectrogram_filtered_src = spec_filtered_name
-                        spectrogram_available_filtered = "true"
+                        spectrogram_available_filtered = True
                 except Exception as e:
                     logging.warning(f"Failed to generate filtered spectrogram: {e}")
         else:
             logging.info("Spectrogram generation disabled; no spectrogram images generated.")
 
+        # --- Build audio source <select> ---
         audio_source_options = ['<option value="original">Original Audio</option>']
         if filtered_available:
             audio_source_options.append('<option value="filtered">Filtered Debug</option>')
@@ -986,8 +980,8 @@ class Plotter:
             + "".join(audio_source_options)
             + '</select>'
         )
-        
-        # Build configuration payload for external interactive_plot.js script
+
+        # --- Build JS configuration payload ---
         config_payload = {
             "totalDuration": float(duration_sec),
             "spectrogramSources": {
@@ -995,8 +989,8 @@ class Plotter:
                 "filtered": spectrogram_filtered_src,
             },
             "spectrogramAvailable": {
-                "original": spectrogram_available_original == "true",
-                "filtered": spectrogram_available_filtered == "true",
+                "original": spectrogram_available_original,
+                "filtered": spectrogram_available_filtered,
             },
             "audioSources": {
                 "original": audio_src_escaped,
@@ -1010,7 +1004,7 @@ class Plotter:
         }
         config_json = json.dumps(config_payload)
 
-        # Ensure interactive_plot.js is available next to the HTML file
+        # --- Copy interactive_plot.js to output directory ---
         try:
             js_src_path = os.path.join(os.path.dirname(__file__), "assets", "interactive_plot.js")
             js_dest_path = os.path.join(self.output_directory, "interactive_plot.js")
@@ -1022,549 +1016,24 @@ class Plotter:
         except Exception as e:
             logging.error(f"Failed to copy interactive_plot.js: {e}")
 
-        html_template = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <title>{plot_title}</title>
-    <style>
-        * {{
-            box-sizing: border-box;
-        }}
-        body {{
-            margin: 0;
-            padding: 0;
-            background-color: #111;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            color: #e0e0e0;
-        }}
-        
-        /* Main container - full viewport */
-        #main-container {{
-            width: 100%;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }}
-        
-        /* Timeline Scrubber - compact bar above the graph */
-        #timeline-container {{
-            background: linear-gradient(180deg, #1e1e2e 0%, #151520 100%);
-            border-bottom: 1px solid #333;
-            padding: 4px 10px;
-            flex-shrink: 0;
-        }}
-        
-        /* Controls row */
-        #controls-row {{
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 4px;
-            flex-wrap: wrap;
-        }}
-        
-        #current-time {{
-            font-size: 12px;
-            font-weight: bold;
-            color: #00d4ff;
-            font-family: 'Consolas', 'Monaco', monospace;
-            min-width: 140px;
-        }}
-        
-        #audio-controls {{
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }}
-        
-        #audio-controls button {{
-            background: #2a2a3a;
-            border: 1px solid #444;
-            color: #e0e0e0;
-            padding: 3px 10px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 11px;
-            transition: all 0.15s;
-        }}
-        
-        #audio-controls button:hover {{
-            background: #3a3a4a;
-            border-color: #00d4ff;
-        }}
-        
-        #audio-controls button.active {{
-            background: #00d4ff;
-            color: #111;
-        }}
+        # --- Load template and substitute placeholders ---
+        template_path = os.path.join(os.path.dirname(__file__), "assets", "template.html")
+        try:
+            with open(template_path, encoding="utf-8") as f:
+                template = f.read()
+        except OSError as e:
+            logging.error(f"Could not load HTML template from {template_path}: {e}")
+            raise
 
-        #grid-controls {{
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 11px;
-            color: #aaa;
-        }}
+        total_time_str = f"{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}"
 
-        #grid-controls .grid-label {{
-            font-size: 11px;
-            font-weight: 600;
-            color: #cfdcff;
-        }}
-
-        .grid-toggle-button {{
-            background: #2a2a3a;
-            border: 1px solid #444;
-            color: #e0e0e0;
-            padding: 3px 8px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 11px;
-            transition: all 0.15s;
-        }}
-
-        .grid-toggle-button:hover {{
-            background: #3a3a4a;
-            border-color: #00d4ff;
-        }}
-
-        .grid-toggle-button.active {{
-            background: #00d4ff;
-            color: #111;
-        }}
-        
-        #volume-control {{
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 12px;
-        }}
-        
-        #volume-slider {{
-            width: 60px;
-            height: 3px;
-            -webkit-appearance: none;
-            background: #333;
-            border-radius: 2px;
-            outline: none;
-        }}
-        
-        #volume-slider::-webkit-slider-thumb {{
-            -webkit-appearance: none;
-            width: 10px;
-            height: 10px;
-            background: #00d4ff;
-            border-radius: 50%;
-            cursor: pointer;
-        }}
-
-        #audio-source-select {{
-            background: #1e1e2e;
-            border: 1px solid #333;
-            color: #e0e0e0;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 11px;
-            font-family: 'Segoe UI', sans-serif;
-        }}
-        
-        #total-time {{
-            font-size: 12px;
-            color: #888;
-            font-family: 'Consolas', 'Monaco', monospace;
-        }}
-        
-
-        /* Labeling controls - aligned right for visual separation from playback/grid controls */
-        #labeling-controls {{
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 11px;
-            color: #aaa;
-            flex-wrap: wrap;
-            margin-left: auto;
-        }}
-
-        #label-type-select {{
-            background: #1e1e2e;
-            border: 1px solid #333;
-            color: #e0e0e0;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 11px;
-            font-family: 'Segoe UI', sans-serif;
-        }}
-
-        #apply-label-btn,
-        #download-labels-btn {{
-            background: #2a2a3a;
-            border: 1px solid #444;
-            color: #e0e0e0;
-            padding: 3px 8px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 11px;
-            transition: all 0.15s;
-        }}
-
-        #apply-label-btn:hover,
-        #download-labels-btn:hover {{
-            background: #3a3a4a;
-            border-color: #00d4ff;
-        }}
-        
-        /* Timeline scrubber bar */
-        #timeline-scrubber {{
-            position: relative;
-            height: 18px;
-            background: #1a1a2a;
-            border-radius: 3px;
-            cursor: pointer;
-            overflow: hidden;
-            border: 1px solid #333;
-        }}
-        
-        #timeline-progress {{
-            position: absolute;
-            top: 0;
-            left: 0;
-            height: 100%;
-            background: linear-gradient(90deg, #00d4ff44 0%, #00d4ff22 100%);
-            pointer-events: none;
-        }}
-        
-        #timeline-playhead {{
-            position: absolute;
-            top: 0;
-            width: 2px;
-            height: 100%;
-            background: #00d4ff;
-            box-shadow: 0 0 6px #00d4ff;
-            pointer-events: none;
-        }}
-        
-        #timeline-ticks {{
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            pointer-events: none;
-        }}
-        
-        .timeline-tick {{
-            position: absolute;
-            top: 0;
-            width: 1px;
-            background: #333;
-        }}
-        
-        .timeline-tick.major {{
-            height: 100%;
-            background: #444;
-        }}
-        
-        .timeline-tick.minor {{
-            height: 40%;
-            top: 60%;
-        }}
-        
-        .tick-label {{
-            position: absolute;
-            top: 1px;
-            font-size: 8px;
-            color: #666;
-            transform: translateX(-50%);
-            pointer-events: none;
-        }}
-        
-        /* Chart container - fills remaining space */
-        #chart-container {{
-            flex: 1;
-            position: relative;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-        }}
-        
-        /* Chart toolbar - title, audio filename, legend filter */
-        #chart-toolbar {{
-            flex-shrink: 0;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 4px 8px;
-            background: rgba(40, 40, 50, 0.6);
-            border-bottom: 1px solid #333;
-            font-size: 12px;
-        }}
-        #chart-toolbar .chart-toolbar-title {{
-            color: #aaa;
-            white-space: nowrap;
-        }}
-        #chart-toolbar .chart-toolbar-label {{
-            color: #aaa;
-            white-space: nowrap;
-            margin-left: auto;
-        }}
-        #chart-toolbar #audio-file-name {{
-            font-size: 12px;
-            color: #ccc;
-            white-space: nowrap;
-            flex-shrink: 0;
-        }}
-        #legend-category-filter {{
-            padding: 2px 6px;
-            background: #2a2a35;
-            color: #ddd;
-            border: 1px solid #444;
-            border-radius: 3px;
-            font-size: 12px;
-            cursor: pointer;
-        }}
-        #legend-category-filter:hover {{
-            border-color: #666;
-        }}
-        
-        .plotly-chart-wrapper {{
-            position: relative;
-            flex: 1;
-            min-height: 0;
-            width: 100%;
-        }}
-
-        #plotly-chart {{
-            width: 100%;
-            height: 100%;
-        }}
-
-        #plotly-chart > div {{
-            width: 100% !important;
-            height: 100% !important;
-        }}
-        
-        /* Vertical playhead line on chart */
-        #chart-playhead {{
-            position: absolute;
-            top: 0;
-            width: 2px;
-            height: 100%;
-            background: #ff4757;
-            box-shadow: 0 0 8px #ff4757;
-            pointer-events: none;
-            z-index: 100;
-            display: none;
-        }}
-        
-        /* Hidden audio element */
-        #audio-player {{
-            display: none;
-        }}
-        
-        /* Spectrogram overlay */
-        #spectrogram-container {{
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 1;
-            overflow: hidden;
-        }}
-        
-        #spectrogram-image {{
-            position: absolute;
-            height: 100%;
-            opacity: 0.4;
-            pointer-events: none;
-            image-rendering: auto;
-            transition: opacity 0.2s ease;
-        }}
-        
-        #spectrogram-image.hidden {{
-            opacity: 0;
-        }}
-        
-        /* Keyboard shortcuts hint */
-        #shortcuts-hint {{
-            position: fixed;
-            bottom: 8px;
-            right: 8px;
-            background: rgba(30, 30, 40, 0.85);
-            padding: 6px 10px;
-            border-radius: 4px;
-            font-size: 10px;
-            color: #777;
-            z-index: 1000;
-        }}
-        
-        #shortcuts-hint kbd {{
-            background: #333;
-            padding: 1px 4px;
-            border-radius: 2px;
-            margin: 0 1px;
-            font-size: 9px;
-        }}
-
-        /* Analysis Summary modal */
-        #analysis-summary-overlay {{
-            display: none;
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, 0.7);
-            z-index: 3000;
-            align-items: center;
-            justify-content: center;
-        }}
-        #analysis-summary-overlay.visible {{
-            display: flex;
-        }}
-        #analysis-summary-modal {{
-            background: #1e1e2e;
-            border: 1px solid #444;
-            border-radius: 8px;
-            padding: 16px;
-            max-width: 90%;
-            max-height: 80vh;
-            display: flex;
-            flex-direction: column;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-        }}
-        #analysis-summary-modal h3 {{
-            margin: 0 0 10px 0;
-            font-size: 14px;
-            color: #00d4ff;
-        }}
-        #analysis-summary-text {{
-            width: 480px;
-            min-height: 120px;
-            max-height: 50vh;
-            padding: 10px;
-            background: #111;
-            border: 1px solid #333;
-            border-radius: 4px;
-            color: #e0e0e0;
-            font-family: Consolas, Monaco, monospace;
-            font-size: 12px;
-            resize: vertical;
-        }}
-        #analysis-summary-modal .modal-close {{
-            margin-top: 12px;
-            align-self: flex-end;
-            padding: 6px 14px;
-            background: #2a2a3a;
-            border: 1px solid #444;
-            color: #e0e0e0;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-        }}
-        #analysis-summary-modal .modal-close:hover {{
-            background: #3a3a4a;
-            border-color: #00d4ff;
-        }}
-    </style>
-</head>
-<body>
-    <div id="main-container">
-        <!-- Timeline Scrubber - compact bar above graph -->
-        <div id="timeline-container">
-            <div id="controls-row">
-                <span id="current-time">00:00.000 (0.00s)</span>
-                <div id="audio-controls">
-                    <button id="play-btn" title="Play/Pause (Space)">▶ Play</button>
-                    <button id="stop-btn" title="Stop (S)">⏹ Stop</button>
-                    <button id="sync-btn" class="active" title="Sync playhead">🔗</button>
-                    <button id="spectrogram-btn" title="Toggle Spectrogram (G)">📊 Spectrogram</button>
-                    <div id="spectrogram-controls">
-                        <input type="range" id="spectrogram-opacity" min="0.1" max="0.8" step="0.05" value="0.4" title="Spectrogram opacity">
-                    </div>
-                    <div id="volume-control">
-                        <span>🔊</span>
-                        <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
-                    </div>
-                    {audio_source_select_html}
-                    <button id="analysis-summary-btn" title="View analysis summary (copy-friendly)">📋 Analysis Summary</button>
-                </div>
-                <div id="grid-controls">
-                    <span class="grid-label">Grid:</span>
-                    <button class="grid-toggle-button" data-grid-axis="yaxis" title="Toggle signal amplitude gridlines">Signal</button>
-                    <button class="grid-toggle-button active" data-grid-axis="yaxis2" title="Toggle BPM/HRV gridlines">BPM</button>
-                </div>
-                <div id="labeling-controls">
-                    <span class="grid-label">Label:</span>
-                    <select id="label-type-select" title="Desired label for nearest peak">
-                        <option value="S1">S1</option>
-                        <option value="S2">S2</option>
-                        <option value="Noise">Noise</option>
-                    </select>
-                    <button id="apply-label-btn" title="Relabel nearest peak to current playhead time">Apply</button>
-                    <button id="flip-labels-right-btn" title="Flip all S1/S2 labels to the right of the playhead">Flip Right</button>
-                    <button id="download-labels-btn" title="Download current labels as CSV">Download CSV</button>
-                    <button id="import-labels-btn" title="Import manually labeled peaks CSV">Import CSV</button>
-                    <input type="file" id="import-labels-input" accept=".csv" style="display:none" />
-                </div>
-                <span id="total-time">{int(duration_sec // 60):02d}:{int(duration_sec % 60):02d}</span>
-            </div>
-            <div id="timeline-scrubber">
-                <div id="timeline-ticks"></div>
-                <div id="timeline-progress"></div>
-                <div id="timeline-playhead"></div>
-            </div>
-        </div>
-        
-        <!-- Chart container - takes up remaining space -->
-        <div id="chart-container">
-            <div id="chart-toolbar">
-                <span class="chart-toolbar-title">Heartbeat Analysis - </span>
-                <span id="audio-file-name" title="{audio_file_name}">{audio_file_name}</span>
-                <label for="legend-category-filter" class="chart-toolbar-label">Show:</label>
-                <select id="legend-category-filter" title="Filter legend and visible traces by category">
-                    <option value="all">All</option>
-                    <option value="debug">Debug</option>
-                    <option value="analysis">Analysis Data</option>
-                </select>
-            </div>
-            <div id="spectrogram-container">
-                <img id="spectrogram-image" class="hidden" src="{spectrogram_original_src}" alt="Spectrogram" />
-            </div>
-            <div id="chart-playhead"></div>
-            <div id="plotly-chart">
-                {plotly_html}
-            </div>
-        </div>
-    </div>
-    
-    <!-- Hidden audio player -->
-    <audio id="audio-player" preload="auto">
-        Your browser does not support audio playback.
-    </audio>
-    
-    <!-- Analysis Summary modal -->
-    <div id="analysis-summary-overlay" aria-hidden="true">
-        <div id="analysis-summary-modal">
-            <h3>Analysis Summary</h3>
-            <textarea id="analysis-summary-text" readonly placeholder="No summary data."></textarea>
-            <button type="button" class="modal-close" id="analysis-summary-close">Close</button>
-        </div>
-    </div>
-    
-    <!-- Keyboard shortcuts hint -->
-    <div id="shortcuts-hint">
-        <kbd>Space</kbd> Play &nbsp;
-        <kbd>S</kbd> Stop &nbsp;
-        <kbd>←→</kbd> Seek &nbsp;
-        <kbd>G</kbd> Spectrogram
-    </div>
-    
-    <script>
-        window.BPM_ANALYZER_CONFIG = {config_json};
-    </script>
-    <script src="interactive_plot.js"></script>
-</body>
-</html>'''
-        
-        return html_template
+        return (
+            template
+            .replace("%%PLOT_TITLE%%", plot_title)
+            .replace("%%AUDIO_FILE_NAME%%", audio_file_name)
+            .replace("%%TOTAL_TIME%%", total_time_str)
+            .replace("%%AUDIO_SOURCE_SELECT%%", audio_source_select_html)
+            .replace("%%SPECTROGRAM_SRC%%", spectrogram_original_src)
+            .replace("%%CONFIG_JSON%%", config_json)
+            .replace("%%PLOTLY_HTML%%", plotly_html)
+        )
