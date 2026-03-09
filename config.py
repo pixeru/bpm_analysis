@@ -1,4 +1,8 @@
 # config.py
+# Default parameters and output toggles for the analysis pipeline.
+# Values are tuned for typical PCG recordings from consumer hardware.
+# See Documentation.md "Parameter Tuning Rationale" for reasoning behind specific values.
+
 
 DEFAULT_PARAMS = {
     # =================================================================================
@@ -8,22 +12,55 @@ DEFAULT_PARAMS = {
     "downsample_factor": 300,     # Factor to reduce sample rate. Higher = faster processing, less detail.
     "save_filtered_wav": True,    # If True, saves a .wav file of the filtered audio for debugging.
 
+    # Main preprocessing: target sample rate and bandpass (single wide band before envelope); typical PCG range for S1/S2.
+    "preprocess_target_sample_rate": 600,   # Resample to this Hz for analysis; lower = faster, less detail.
+    "preprocess_bandpass_low_hz": 30.0,     # increasing this reduces the amplitude of S1.
+    "preprocess_bandpass_high_hz": 290.0,
+    "preprocess_bandpass_order": 2,   # Butterworth order; higher order not yet validated for this pipeline.
+
+    "enable_hum_removal": True,           # Detect and notch narrow low-frequency hums if present
+    "hum_psd_window_sec": 4.0,            # PSD window length (seconds) for hum detection
+    "hum_min_freq_hz": 40.0,              # Min frequency of narrow-band hum to consider
+    "hum_max_freq_hz": 100.0,             # Max frequency of narrow-band hum to consider
+    "hum_min_prominence_db": 8.0,         # Minimum prominence (dB) above local median to trigger notch
+    "hum_min_prominence_over_second_db": 3.0,  # Gap over next peak before trusting detection
+    "hum_notch_q": 35.0,                  # Q factor, Higher = narrower notch (try 35-40 for sharp hums)
+
+    "envelope_smooth_window_ms": 40,      # Rolling window (ms) for smoothing Hilbert envelope after abs(analytic). Matches common PCG practice (e.g. 50 ms).
+
+    # --- Multi-band S1 vs S2 (spectral fingerprint) ---
+    "enable_multiband_s1_s2": True,      # Use S1-band vs S2-band energy to adjust pairing confidence.
+    "s1_band_low_hz": 25.0,             # S1 typical range 20-60 Hz.
+    "s1_band_high_hz": 60.0,
+    "s2_band_low_hz": 200.0,             # S2 typical range 60-200 Hz.
+    "s2_band_high_hz": 290.0,
+    "multiband_boost_max": 0.1,         # Max confidence boost when band energies support S1-S2.
+    "multiband_penalty_max": 0.1,      # Max confidence penalty when bands suggest wrong order.
+    "multiband_peak_window_ms": 130.0,   # Time window (ms) centered on each peak; covers whole beat. Converted to samples using sample rate.
+    "multiband_gaussian_sigma_ms": 25.0, # Gaussian sigma (ms) for weighting; typically window/4 so weight falls off by edges. Used for Gaussian-weighted sum of band energy.
+
     # =================================================================================
     # 2. Signal Feature Detection
     # Governs the initial identification of peaks and troughs in the audio envelope.
     # =================================================================================
-    "min_peak_distance_sec": 0.05,      # Minimum time allowed between any two raw peaks.
-    "peak_prominence_quantile": 0.1,    # How much a spike must stand out to be considered a 'peak'.
-    "trough_prominence_quantile": 0.1,  # How much a dip must stand out to be considered a 'trough'.
+    "min_peak_distance_sec": 0.1,        # I Adjusted This✔ Minimum time allowed between any two raw peaks.
+    "peak_prominence_quantile": 0.50,    # Min prominence = this quantile of envelope. Higher reduces false peaks (e.g. Hilbert ripple).
+    "trough_prominence_quantile": 0.3,   # How much a dip must stand out to be considered a 'trough'.
+
+    # Peak position refinement: shift each raw peak to super-Gaussian-weighted center-of-mass (~100 ms window).
+    "peak_refine_window_ms": 100,        # Window (ms) around each peak for CoM; ~100 ms covers typical S1 extent.
+    "peak_refine_max_shift_ms": 10,      # Cap shift so noisy envelope cannot pull peak more than this (ms).
+    "peak_refine_super_gaussian_n": 4,   # Super-Gaussian exponent (flat top); n=4 gives flat center, smooth falloff.
 
     # =================================================================================
     # 3. Noise Estimation & Rejection
     # Rules for calculating the dynamic noise floor and vetoing noisy peaks.
     # =================================================================================
     # --- 3.1. Dynamic Noise Floor ---
-    "noise_floor_quantile": 0.20,       # Quantile of troughs used to calculate the noise floor. (0.2 = 20th percentile).
-    "noise_window_sec": 10,             # Rolling window (in seconds) for calculating the dynamic noise floor.
-    "trough_rejection_multiplier": 4.0, # A trough N-times higher than the draft noise floor is rejected.
+    "noise_floor_quantile": 0.20,        # Quantile of troughs used to calculate the noise floor. (0.2 = 20th percentile).
+    "noise_window_sec": 4,               # I Adjusted This✔ Rolling window in seconds. smaller means more sensitive to noise.
+    "trough_rejection_multiplier": 10.0, # I Adjusted This✔ A trough N-times higher than the draft noise floor is rejected.
+    # I wanted to keep this value high to be conservative
 
     # --- 3.2. Peak Noise Vetoing ---
     "noise_confidence_threshold": 0.6,  # A peak is rejected if its calculated "noise confidence" exceeds this.
@@ -36,36 +73,74 @@ DEFAULT_PARAMS = {
     # The core logic for identifying S1-S2 pairs based on timing and physiology.
     # =================================================================================
     # --- 4.1. Core Pairing Rules ---
-    "pairing_confidence_threshold": 0.50, # Confidence score required to classify two peaks as an S1-S2 pair.
-    "s1_s2_interval_cap_sec": 0.4,      # The absolute maximum time (seconds) allowed between S1 and S2.
-    "s1_s2_interval_rr_fraction": 0.7,  # The S1-S2 interval cannot be longer than this fraction of the R-R interval.
+    "pairing_confidence_threshold": 0.50,          # Confidence score required to classify two peaks as an S1-S2 pair.
+    "preliminary_pass_confidence_threshold": 0.75, # Higher threshold used for the first (anchor-finding) pass only.
+    "s1_s2_interval_cap_sec": 0.4,        # The absolute maximum time (seconds) allowed between S1 and S2.
+    "min_s1_s2_interval_sec": 0.10,           # Absolute minimum (100ms)
+    "min_s1_s2_interval_rr_fraction": 0.23,   # Or 23% of total RR interval
+    # BPM-dependent expected S1-S2 (Weissler: ET = ref_et - slope*(BPM - ref_bpm))
+    "s1_s2_expected_weissler_ref_et_ms": 300, # Reference ejection time (ms) at ref_bpm (e.g. ~300 ms at 60 BPM).
+    "s1_s2_expected_weissler_ref_bpm": 60,    # BPM at which ref_et_ms is defined.
+    "s1_s2_expected_weissler_slope_ms_per_bpm": 1.0,  # ET decrease (ms) per BPM increase (literature ~1.0-1.7).
+    "noise_prominence_threshold": 0.35,   # Peaks below this ratio are "suspect noise"
+    "enable_lookahead_skipping": True,    # Enable/disable lookahead skipping
 
     # --- 4.2. Amplitude-Based Confidence Model ---
-    "deviation_smoothing_factor": 0.05, # Smoothing applied to the peak-to-peak amplitude deviation series.
+    "deviation_smoothing_factor": 0.05,   # Smoothing applied to the peak-to-peak amplitude deviation series.
 
     # --- 4.3. Physiology-Based Confidence Adjustment ---
     "stability_history_window": 20,         # Number of recent beats used to determine rhythm stability.
-    "stability_confidence_floor": 0.60,     # At 0% pairing success, confidence is multiplied by this (e.g., a 50% reduction).
-    "stability_confidence_ceiling": 1.25,   # At 100% pairing success, confidence is multiplied by this (e.g., a 10% boost).
+    "stability_confidence_floor": 0.7,      # I Adjusted This✔ At 0% pairing success, confidence is multiplied by this.
+    "stability_confidence_ceiling": 1.3,    # I Adjusted This✔ At 100% pairing success, confidence is multiplied by this (e.g., a 10% boost).
+    "recovery_phase_stability_floor": 0.90,  # Disable stability penalty during recovery (0% pairing → factor = 1.0)
     "s1_s2_boost_ratio": 1.2,               # S1 strength must be > (S2 strength * this value) to get a confidence boost.
     "boost_amount_min": 0.10,               # Additive confidence boost for a "good" pair in an unstable section.
     "boost_amount_max": 0.35,               # Additive confidence boost for a "good" pair in a stable section.
     "penalty_amount_min": 0.10,             # Subtractive confidence penalty for a "bad" pair in a stable section.
     "penalty_amount_max": 0.30,             # Subtractive confidence penalty for a "bad" pair in an unstable section.
-    "s2_s1_ratio_low_bpm": 1.5,             # At low BPM, allows S2 to be up to 1.5x S1 strength before penalty.
-    "s2_s1_ratio_high_bpm": 1.1,            # At high BPM, expects S2 to be no more than 1.1x S1 strength.
-    "contractility_bpm_low": 120.0,         # Below this BPM, the 'low BPM' confidence model is used.
-    "contractility_bpm_high": 140.0,        # Above this BPM, the 'high BPM' confidence model is used.
-    "recovery_phase_duration_sec": 120,     # Duration (seconds) of the high-contractility state after peak BPM.
+    "forward_look_drop_threshold": 0.4,     # If next peak < 60% of S2, it's suspicious
+    "forward_look_max_penalty": 0.4,        # Max penalty for this scenario
+    "pairing_rr_penalty_max": 0.25,         # Multiplicative penalty for RR mismatch vs 60/BPM when evaluating an S1-S2 pair.
+    # Contractility: S1/S2 prominence ratio. Expected from history (past N pairs) or BPM power-curve fallback.
+    "contractility_expected_use_history": True,   # If True, expected S1/S2 = mean of last N accepted pairs; else BPM power curve.
+    "contractility_expected_history_count": 8,   # Number of past S1/S2 ratios to average.
+    "contractility_expected_history_min": 1,      # Min history length before using average (else BPM fallback).
+    "contractility_pair_rate_window_sec": 5.0,    # Pair rate in this window blends history vs BPM: 100% pairs → use history; lower → blend toward BPM.
+    # BPM fallback: power curve expected_ratio = low + (high - low) * ((BPM - bpm_min) / (bpm_max - bpm_min)) ** exponent.
+    "contractility_bpm_min": 60,                 # BPM at which ratio = low_ratio.
+    "contractility_bpm_max": 200,                # BPM at which ratio = high_ratio.
+    "contractility_low_ratio": 0.9,              # Expected S1/S2 at bpm_min (rest).
+    "contractility_high_ratio": 3.5,             # Expected S1/S2 at bpm_max (high exertion).
+    "contractility_power_exponent": 0.6,         # <1: steep rise at low BPM then flatter (contractility kicks in early).
+    # Asymmetric deviation-based curve: L2=(1-r_low), L1=(1-a_low), R1=(1+a_high), R2=(1+r_high) × expected.
+    "contractility_zero_crossing_low": 0.3,       # Left zero-crossing: L1 = expected × (1 - this).
+    "contractility_zero_crossing_high": 0.4,      # Right zero-crossing: R1 = expected × (1 + this).
+    "contractility_penalty_ramp_fraction_low": 1.3,   # Left ramp end: L2 = expected × (1 - this); penalty max at L2.
+    "contractility_penalty_ramp_fraction_high": 2.5,  # Right ramp end: R2 = expected × (1 + this); penalty max at R2.
+    "contractility_boost_max": 0.2,              # Max multiplicative boost at expected: confidence *= (1 + boost).
+    "contractility_penalty_max": 0.5,             # Max multiplicative penalty when far outside band.
+    "recovery_phase_duration_sec": 120,      # Duration (seconds) of the high-contractility state after peak BPM.
+    "recovery_phase_min_peak_bpm": 110,      # Only enable recovery-phase adjust if preliminary peak BPM >= this (avoids activating when BPM stays low).
 
-    # --- 4.4. Interval-Based Confidence Penalty ---
-    "interval_penalty_start_factor": 1.0,     # Penalty begins when interval > (max_interval * this value).
-    "interval_penalty_full_factor": 1.4,      # Penalty is at max when interval > (max_interval * this value).
-    "interval_max_penalty": 0.75,             # Max confidence points to subtract for a long interval.
+    # --- 4.4. V-Shaped Interval: boost near expected, penalty outside ---
+    # Linear boost from 0 at expected±zero_crossing to max at expected; linear penalty outside that band.
+    "interval_v_penalty_max": 0.75,              # Max penalty (multiplicative) at ramp ends.
+    "interval_v_boost_max": 0.6,                # Max boost at expected: confidence *= (1 + boost). 0 at zero-crossing boundaries.
+    "interval_zero_crossing_fraction": 0.2,      # Fraction of expected where effect crosses zero: boost zone [expected*(1±this)].
+    "interval_v_short_ramp_end_fraction": 0.4,  # Left: below this fraction of expected → hard reject; ramp from here up to left zero-crossing.
+    "interval_v_long_ramp_end_fraction": 2.0,   # Right: ramp from right zero-crossing to this × expected → full penalty.
+    "interval_v_long_reject_fraction": 2.5,     # Right: above this × expected → hard reject.
+    # Expected S1-S2 from past pairs (when enabled, overrides BPM-based expected for the V-shape)
+    "s1_s2_expected_use_history": True,         # If True, expected = mean of last N accepted S1-S2 intervals; else BPM-based.
+    "s1_s2_expected_history_count": 10,        # Number of past S1-S2 intervals to average.
+    "s1_s2_expected_history_min": 1,           # Minimum history length before using average (else fallback to BPM).
 
     # --- 4.5. Kick-Start Mechanism to Recover from Pairing Failure ---
     "kickstart_check_threshold": 0.3,           # Only run the check if pairing_ratio is BELOW this value.
     "kickstart_override_ratio": 0.60,           # The temporary pairing ratio to use if kick-start is triggered.
+    "kickstart_history_beats": 4,               # Look-back window: how many recent beats to inspect for the pattern.
+    "kickstart_min_lone_s1s": 3,                # How many of those beats must be Lone S1 candidates.
+    "kickstart_min_noise_matches": 3,           # How many of those Lone S1s must be immediately followed by a Noise peak.
 
     # =================================================================================
     # 5. Rhythm Plausibility & Validation
@@ -74,14 +149,17 @@ DEFAULT_PARAMS = {
     # --- 5.1. Long-Term BPM Belief ---
     "min_bpm": 40,                          # Absolute minimum BPM the algorithm will consider valid.
     "max_bpm": 240,                         # Absolute maximum BPM the algorithm will consider valid.
+    "bpm_belief_learning_rate": 0.05,       # EMA weight for each new beat; lower = smoother but slower to track changes.
+    "bpm_belief_max_change_per_beat": 3.0,  # Speed limiter: max BPM shift allowed per beat (scaled by interval length).
 
     # --- 5.2. Beat-to-Beat Validation ---
     "rr_interval_max_decrease_pct": 0.45, # A new R-R interval can't be more than 45% shorter than the previous one.
     "rr_interval_max_increase_pct": 0.70, # A new R-R interval can't be more than 70% longer than the previous one.
-    "lone_s1_min_strength_ratio": 0.30,   # A Lone S1 candidate's strength must be at least this fraction of the previous S1's.
-    "lone_s1_forward_check_pct": 0.50,    # A Lone S1 is rejected if the next peak is too close, implying a BPM spike.
+    "lone_s1_min_strength_ratio": 0.29,   # I Adjusted This✔ A Lone S1 candidate's strength must be at least this fraction of the previous S1's.
+    "lone_s1_forward_check_pct": 0.44,    # I Adjusted This✔ A Lone S1 is rejected if the next peak is too close, implying a BPM spike.
+    "lone_s1_forward_penalty_factor": 0.52,  # I Adjusted This✔ Multiplier applied when forward check suspects the peak is actually an S2.
 
-    # --- 5.4. Lone S1 Gradient Confidence Engine ---
+    # --- 5.3. Lone S1 Gradient Confidence Engine ---
     "lone_s1_confidence_threshold": 0.50, # Final combined score needed to be accepted as a Lone S1.
     "lone_s1_rhythm_weight": 0.65,         # The weight given to the rhythmic timing score (0.0 to 1.0).
     "lone_s1_amplitude_weight": 0.35,      # The weight given to the amplitude consistency score.
@@ -103,6 +181,49 @@ DEFAULT_PARAMS = {
     "output_smoothing_window_sec": 5,        # Time window (seconds) for smoothing the final BPM curve for display.
     "hrv_window_size_beats": 40,             # Sliding window size (in beats) for HRV calculation.
     "hrv_step_size_beats": 5,                # How many beats the HRV window moves in each step.
+    "enable_hrv_frequency_domain": True,     # If True, compute Lomb-Scargle LF/HF and optional global VLF/LF/HF.
+    "hrv_global_min_duration_sec": 300.0,    # Only compute global spectrum when recording duration >= this (5 min).
     "plot_amplitude_scale_factor": 250.0,    # Adjusts the default y-axis range of the signal amplitude plot.
-    "plot_downsample_factor": 1,             # The factor for downsampling plot traces (e.g., 5 = keep 1 of every 5 points).
+    # In plotting.py: avoid dashed lines (dash=...) for line traces--they cause noticeable lag.
+    "plot_downsample_factor": 4,             # Downsample only large traces: Audio Envelope and Dynamic Noise Floor (keep 1 of every N points). Does NOT apply to Average S1/S2 contractility, BPM, HRV, or markers.
+    "contractility_average_window_sec": 1.0, # Time to average S1/S2 contractility plot: Used in: long-term (contractility vs BPM), short-term (S1 vs inhale/exhale)
+
+    # --- 7.1. Long Plot Optimization ---
+    # When enabled, very long recordings can skip detailed debug traces in the HTML plot
+    # to keep file sizes manageable. Shorter recordings are always shown in full detail.
+    "optimize_long_plots": False,                # Whether to enable long-plot optimization.
+    "long_plot_duration_threshold_sec": 600.0,   # Duration threshold (seconds) to treat a file as "long" (default: 10 minutes).
+
+    # --- 7.1.1. FFT Profiles (S1/S2 frequency spectra from raw and preprocessed audio) ---
+    "enable_fft_profiles": True,                 # If True, generate separate HTML with S1/S2 FFT profiles.
+    "fft_window_ms": 120.0,                      # Time window (ms) centered on each peak for FFT.
+    "fft_max_peaks_per_type": 200,               # Max S1 and S2 peaks (each) for FFT; selected by highest pairing confidence. Lone S1s excluded.
+    "fft_aggregate_sr": 32000,                   # Sample rate for multi-file FFT aggregation (common grid). Per-file uses native sr.
+    "fft_neutral_band_low_hz": 3000.0,           # Neutral band low (Hz) for S2→S1 alignment (force same level in this band).
+    "fft_neutral_band_high_hz": 5000.0,          # Neutral band high (Hz) for S2→S1 alignment.
+
+    # --- 7.2. Trapezoid Artifact Detection ---
+    # These control detection of brief, trapezoid-shaped BPM jumps that are often extra-beat artifacts.
+    "trapezoid_rate_threshold": 7.0,            # BPM/s: physiologically implausible rate for rise/fall edges.
+    "trapezoid_max_edge_duration_sec": 2,       # Maximum duration (seconds) for the rise/fall edges.
+    "trapezoid_min_plateau_duration_sec": 1.5,  # Minimum plateau length between rise and fall.
+    "trapezoid_max_plateau_duration_sec": 15.0, # Maximum plateau length between rise and fall.
+    "trapezoid_baseline_tolerance_bpm": 5.0,    # Allowed BPM difference between pre- and post-artifact baseline.
+    "trapezoid_min_jump_bpm": 3.0,              # Minimum BPM jump from baseline to plateau median.
+    "trapezoid_min_fall_delta_bpm": 3.0,        # Minimum absolute BPM drop across the fall edge (start vs end of fall).
+}
+
+# Single source of truth for pipeline output toggles. GUI and analyze_wav_file use this;
+# add new options here only (GUI builds checkboxes and get_output_options from these keys).
+DEFAULT_OUTPUT_OPTIONS = {
+    "html": True,
+    "png": False,
+    "csv": True,
+    "summary": True,
+    "debug": True,
+    "filtered_wav": True,
+    "bpm_text": False,
+    "spectrogram": True,
+    "fft_profiles": True,
+    "regression_log": False,
 }
